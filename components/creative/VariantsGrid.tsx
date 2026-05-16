@@ -3,7 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
+import { ImageIcon } from "lucide-react";
 
+import { EmptyState } from "@/components/EmptyState";
 import { createClient } from "@/lib/supabase/browser";
 import type { Creative } from "@/lib/creatives";
 
@@ -173,12 +175,11 @@ export function VariantsGrid({
 
   if (sorted.length === 0) {
     return (
-      <div className="rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center">
-        <p className="text-sm font-medium text-foreground">No creatives yet</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Once the worker renders variants for this brief, they&apos;ll show up here in real time.
-        </p>
-      </div>
+      <EmptyState
+        icon={<ImageIcon className="h-8 w-8" aria-hidden="true" />}
+        title="No creatives yet"
+        description="Once the worker renders variants for this brief, they'll show up here in real time."
+      />
     );
   }
 

@@ -2,7 +2,9 @@
 
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { ClipboardList, Film } from "lucide-react";
 
+import { EmptyState } from "@/components/EmptyState";
 import {
   KANBAN_STAGES,
   STAGE_DOT_COLORS,
@@ -89,6 +91,7 @@ type KanbanTrackProps =
 function KanbanTrack(props: KanbanTrackProps) {
   const { title, accentClass, kind, briefs } = props;
   const briefColumn = briefs.filter((b) => BRIEF_COLUMN_STATUSES.has(b.status));
+  const trackIsEmpty = briefs.length === 0;
 
   return (
     <section className="flex flex-col gap-3">
@@ -97,41 +100,63 @@ function KanbanTrack(props: KanbanTrackProps) {
         <h2 className="text-base font-semibold text-foreground">{title}</h2>
         <span className="text-xs text-muted-foreground">{briefs.length} active</span>
       </div>
-      <div className="flex gap-4 overflow-x-auto pb-2">
-        {KANBAN_STAGES.map((stage: FunnelStage) => {
-          const isBriefColumn = stage === "in_brief";
-          const count = isBriefColumn ? briefColumn.length : 0;
-          return (
-            <KanbanColumn
-              key={stage}
-              title={STAGE_LABELS[stage]}
-              count={count}
-              accentClass={STAGE_DOT_COLORS[stage]}
-              emptyMessage={
-                isBriefColumn ? "No briefs in this stage yet." : "Lands in a later milestone."
-              }
-            >
-              {isBriefColumn
-                ? briefColumn.map((brief) =>
-                    kind === "image" ? (
-                      <KanbanCard
-                        key={brief.id}
-                        kind="image"
-                        brief={brief as DashboardImageBrief}
-                      />
-                    ) : (
-                      <KanbanCard
-                        key={brief.id}
-                        kind="video"
-                        brief={brief as DashboardVideoBrief}
-                      />
-                    ),
-                  )
-                : null}
-            </KanbanColumn>
-          );
-        })}
-      </div>
+      {trackIsEmpty ? (
+        <EmptyState
+          icon={
+            kind === "image" ? (
+              <ClipboardList className="h-8 w-8" aria-hidden="true" />
+            ) : (
+              <Film className="h-8 w-8" aria-hidden="true" />
+            )
+          }
+          title={`No active ${kind} briefs`}
+          description={
+            kind === "image"
+              ? "Create an image brief to populate the board."
+              : "Create a video brief to populate the board."
+          }
+          action={{
+            label: kind === "image" ? "New image brief" : "New video brief",
+            href: kind === "image" ? "/briefs/new" : "/briefs/video/new",
+          }}
+        />
+      ) : (
+        <div className="flex gap-4 overflow-x-auto pb-2">
+          {KANBAN_STAGES.map((stage: FunnelStage) => {
+            const isBriefColumn = stage === "in_brief";
+            const count = isBriefColumn ? briefColumn.length : 0;
+            return (
+              <KanbanColumn
+                key={stage}
+                title={STAGE_LABELS[stage]}
+                count={count}
+                accentClass={STAGE_DOT_COLORS[stage]}
+                emptyMessage={
+                  isBriefColumn ? "No briefs in this stage yet." : "Lands in a later milestone."
+                }
+              >
+                {isBriefColumn
+                  ? briefColumn.map((brief) =>
+                      kind === "image" ? (
+                        <KanbanCard
+                          key={brief.id}
+                          kind="image"
+                          brief={brief as DashboardImageBrief}
+                        />
+                      ) : (
+                        <KanbanCard
+                          key={brief.id}
+                          kind="video"
+                          brief={brief as DashboardVideoBrief}
+                        />
+                      ),
+                    )
+                  : null}
+              </KanbanColumn>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
