@@ -23,12 +23,12 @@ Do NOT use this skill for talking-head ads (use `video-talking-head`), image ads
 You receive a `video_briefs` row payload. Fields that drive the script:
 
 | Field                        | Source        | Use                                                                                                        |
-| ---------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------- | ----------------- | ---------- | ---------------------------------- |
+| ---------------------------- | ------------- | ---------------------------------------------------------------------------------------------------------- |
 | `script_outline.hook`        | operator seed | rewrite freely; this is a starting point, not a constraint                                                 |
 | `script_outline.segments[]`  | operator      | each has `topic`, `duration_s`, `broll_theme`. Keep the beat order but rewrite VO + tighten b-roll queries |
 | `target_duration_s`          | brief         | total runtime (cap 60s in v1)                                                                              |
 | `voice_id`                   | brief         | ElevenLabs voice id, used downstream. Write VO that fits the voice's range (energetic vs warm vs deadpan)  |
-| `hook_style`                 | brief         | `curiosity                                                                                                 | pattern_interrupt | data_shock | question`. Picks the hook template |
+| `hook_style`                 | brief         | one of `curiosity`, `pattern_interrupt`, `data_shock`, `question`. Picks the hook template                 |
 | `dimensions`                 | brief         | usually `9x16`; affects b-roll framing ("vertical handheld" vs "wide drone")                               |
 | `captions_style`             | brief         | drives emphasis density                                                                                    |
 | `client_id` + client profile | linked        | informs region, niche, banned words, the actual offer                                                      |
