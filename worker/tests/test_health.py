@@ -24,10 +24,13 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     # Reset the cached settings + app so env changes are picked up.
     from src.config import get_settings
+    from src.services.queue import reset_queue
 
     get_settings.cache_clear()
+    reset_queue()
     yield
     get_settings.cache_clear()
+    reset_queue()
 
 
 @pytest.fixture
@@ -63,4 +66,10 @@ def test_health_with_valid_token_returns_expected_shape(client: TestClient) -> N
     assert body["tailscale_hostname"] == "voxhorizon-worker-test"
     assert isinstance(body["claude_code_available"], bool)
     assert body["skills_loaded"] == []
-    assert body["queue_depth"] == {"image": 0, "video": 0, "broll": 0}
+    qd = body["queue_depth"]
+    assert qd["image"] == 0
+    assert qd["video"] == 0
+    assert qd["broll"] == 0
+    # New per-brief queue infra (M2-12): idle worker has no contention.
+    assert qd["briefs"] == {}
+    assert qd["total"] == 0
