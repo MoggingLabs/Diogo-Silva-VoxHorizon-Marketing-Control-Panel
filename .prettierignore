@@ -1,0 +1,14 @@
+node_modules
+.next
+.turbo
+out
+dist
+build
+.vercel
+coverage
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+*.tsbuildinfo
+next-env.d.ts
+lib/supabase/types.gen.ts
