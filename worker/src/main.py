@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import audit, broll, chat, creative, health, upload
+from .routes import audit, broll, chat, creative, health, launch, upload
 from .services.queue import get_queue
 
 
@@ -65,6 +65,12 @@ def create_app() -> FastAPI:
     app.include_router(upload.router, tags=["upload"])
     app.include_router(chat.router, tags=["chat"])
     app.include_router(broll.router, tags=["broll"])
+
+    # === wave 4 launch routes ===
+    # The /work/upload/drive + /work/video/upload-drive endpoints live on
+    # the existing `upload` router (registered above); `launch.router` adds
+    # the validator endpoint /work/launch/validate.
+    app.include_router(launch.router, tags=["launch"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.
