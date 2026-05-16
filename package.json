@@ -12,7 +12,10 @@
     "format:check": "prettier --check .",
     "tsc": "tsc --noEmit",
     "prepare": "husky",
-    "regen:types": "supabase gen types typescript --linked > lib/supabase/types.gen.ts"
+    "regen:types": "supabase gen types typescript --linked > lib/supabase/types.gen.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:install": "playwright install chromium"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
@@ -36,6 +39,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.5",
+    "@playwright/test": "^1.60.0",
     "@types/node": "^22.9.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
