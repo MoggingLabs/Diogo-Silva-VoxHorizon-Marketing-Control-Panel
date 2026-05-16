@@ -1,0 +1,66 @@
+"""Tests for /work/health auth + JSON shape."""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+SHARED_SECRET = "test-secret-for-health-tests"
+
+
+@pytest.fixture(autouse=True)
+def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Provision env + reset cached settings before each test."""
+    monkeypatch.setenv("WORKER_SHARED_SECRET", SHARED_SECRET)
+    monkeypatch.setenv("WORKER_CORS_ORIGIN", "http://localhost:3000")
+    monkeypatch.setenv("WORKER_PUBLIC_BASE_URL", "http://localhost:8000")
+    monkeypatch.setenv("BROLL_STORE_BACKEND", "local")
+    monkeypatch.setenv("BROLL_LOCAL_ROOT", str(tmp_path))
+    monkeypatch.setenv("TAILSCALE_HOSTNAME", "voxhorizon-worker-test")
+
+    # Reset the cached settings + app so env changes are picked up.
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def client() -> TestClient:
+    """Fresh TestClient built against a fresh app instance."""
+    from src.main import create_app
+
+    return TestClient(create_app())
+
+
+def test_health_without_auth_returns_401(client: TestClient) -> None:
+    resp = client.get("/work/health")
+    assert resp.status_code == 401
+
+
+def test_health_with_wrong_token_returns_401(client: TestClient) -> None:
+    resp = client.get("/work/health", headers={"Authorization": "Bearer wrong"})
+    assert resp.status_code == 401
+
+
+def test_health_with_valid_token_returns_expected_shape(client: TestClient) -> None:
+    resp = client.get(
+        "/work/health",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["ok"] is True
+    assert isinstance(body["version"], str)
+    assert isinstance(body["uptime_seconds"], int)
+    assert body["uptime_seconds"] >= 0
+    assert body["tailscale_hostname"] == "voxhorizon-worker-test"
+    assert isinstance(body["claude_code_available"], bool)
+    assert body["skills_loaded"] == []
+    assert body["queue_depth"] == {"image": 0, "video": 0, "broll": 0}
