@@ -1,0 +1,68 @@
+# Node / Next.js
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.gh-token
+
+# Python / worker
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+.uv/
+.python-version
+*.egg-info/
+
+# Supabase
+supabase/.temp/
+supabase/.branches/
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs / runtime state
+*.log
+logs/
+*.pid
+*.seed
+*.pid.lock
+worker/storage/
+worker/.cache/
+
+# OS
+Thumbs.db
+.AppleDouble
+.LSOverride
+
+# Test / coverage
+coverage/
+*.lcov
+.nyc_output/
+playwright-report/
+playwright/.cache/
+test-results/
+
+# Build artifacts
+build/
+*.tar.gz
+
+# Local plan / scratch
+.plans/
+.scratch/
