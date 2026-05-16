@@ -296,8 +296,11 @@ create table campaign_perf_image (
 create index on campaign_perf_image (client_id, pulled_at desc);
 -- Enforce at-most-one row per (client, campaign, window, day):
 -- expression in UNIQUE inline isn't supported by Postgres, so use a unique index.
+-- Note: date_trunc on a timestamptz is STABLE (timezone-dependent), but indexes
+-- require IMMUTABLE expressions. Cast to a fixed-UTC timestamp first via
+-- `AT TIME ZONE 'UTC'` so the resulting `timestamp` is timezone-stable.
 create unique index campaign_perf_image_daily_uniq
-  on campaign_perf_image (client_id, campaign_id, window_days, (date_trunc('day', pulled_at)));
+  on campaign_perf_image (client_id, campaign_id, window_days, (date_trunc('day', pulled_at at time zone 'UTC')));
 
 -- campaign_perf_video ---------------------------------------------------
 -- Video has additional engagement metrics that don't apply to static images.
@@ -324,7 +327,7 @@ create table campaign_perf_video (
 );
 create index on campaign_perf_video (client_id, pulled_at desc);
 create unique index campaign_perf_video_daily_uniq
-  on campaign_perf_video (client_id, campaign_id, window_days, (date_trunc('day', pulled_at)));
+  on campaign_perf_video (client_id, campaign_id, window_days, (date_trunc('day', pulled_at at time zone 'UTC')));
 
 -- v_campaign_perf -------------------------------------------------------
 -- UNION view exposes the common subset of fields tagged with format.
