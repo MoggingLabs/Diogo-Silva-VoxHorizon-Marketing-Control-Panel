@@ -2,6 +2,7 @@
 
 import { useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import type { Route } from "next";
 
 import { AUDIT_FORMAT_VALUES, type AuditFormat } from "@/lib/audit";
 import { cn } from "@/lib/utils";
@@ -37,10 +38,9 @@ export function FormatTabs({ value }: FormatTabsProps) {
       params.set("format", next);
     }
     const qs = params.toString();
+    const href = (qs.length > 0 ? `/audit?${qs}` : "/audit") as Route;
     startTransition(() => {
-      router.replace(qs.length > 0 ? `/audit?${qs}` : "/audit", {
-        scroll: false,
-      });
+      router.replace(href, { scroll: false });
     });
   }
 
