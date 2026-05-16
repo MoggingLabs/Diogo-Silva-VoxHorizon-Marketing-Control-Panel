@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 
+import { AppShell } from "@/components/AppShell";
+
 import "./globals.css";
 
 const inter = Inter({
@@ -23,7 +25,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={inter.variable}>
-      <body className="min-h-dvh font-sans">{children}</body>
+      <body className="min-h-dvh font-sans">
+        <AppShell>{children}</AppShell>
+      </body>
     </html>
   );
 }
