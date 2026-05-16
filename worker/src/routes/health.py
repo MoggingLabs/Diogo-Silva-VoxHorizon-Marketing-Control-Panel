@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends
 
 from ..auth import verify_secret
 from ..config import Settings, get_settings
+from ..services.queue import get_queue
 
 
 router = APIRouter()
@@ -46,6 +47,7 @@ def _git_sha() -> str:
 def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
     """Return worker liveness + capability snapshot."""
     uptime = int(time.time() - _PROCESS_STARTED_AT)
+    queue = get_queue()
     return {
         "ok": True,
         "version": _git_sha(),
@@ -53,5 +55,14 @@ def health(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
         "tailscale_hostname": settings.tailscale_hostname,
         "claude_code_available": shutil.which("claude") is not None,
         "skills_loaded": [],
-        "queue_depth": {"image": 0, "video": 0, "broll": 0},
+        # `image`/`video`/`broll` were placeholders from M0 and are kept
+        # for backward compat with the Next.js status panel. `briefs` is
+        # the live per-brief queue depth, and `total` is the sum.
+        "queue_depth": {
+            "image": 0,
+            "video": 0,
+            "broll": 0,
+            "briefs": queue.all_depths(),
+            "total": queue.total_depth(),
+        },
     }

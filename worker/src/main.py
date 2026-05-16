@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .routes import audit, broll, chat, creative, health, upload
+from .services.queue import get_queue
 
 
 def _configure_logging() -> None:
@@ -64,6 +65,10 @@ def create_app() -> FastAPI:
     app.include_router(upload.router, tags=["upload"])
     app.include_router(chat.router, tags=["chat"])
     app.include_router(broll.router, tags=["broll"])
+
+    # Eagerly construct the per-brief queue singleton so the first
+    # `/work/creative/*` request doesn't race on lazy init.
+    get_queue()
 
     structlog.get_logger(__name__).info(
         "worker_started",
