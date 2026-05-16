@@ -1,5 +1,7 @@
 import Link from "next/link";
+import { ClipboardList } from "lucide-react";
 
+import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
 import { readBriefPayload, type Brief, type BriefStatusT } from "@/lib/briefs";
 import { createClient } from "@/lib/supabase/server";
@@ -80,9 +82,14 @@ export default async function BriefsListPage() {
         </div>
       ) : null}
 
-      {briefs.length === 0 ? (
-        <p className="text-muted-foreground">No briefs yet. Create one to get started.</p>
-      ) : (
+      {briefs.length === 0 && !error ? (
+        <EmptyState
+          icon={<ClipboardList className="h-8 w-8" aria-hidden="true" />}
+          title="No briefs yet"
+          description="Create your first image brief to start drafting creative variants."
+          action={{ label: "New brief", href: "/briefs/new" }}
+        />
+      ) : briefs.length > 0 ? (
         <div className="space-y-8">
           {STATUS_ORDER.map((status) => {
             const rows = grouped[status];
@@ -145,7 +152,7 @@ export default async function BriefsListPage() {
             );
           })}
         </div>
-      )}
+      ) : null}
     </main>
   );
 }

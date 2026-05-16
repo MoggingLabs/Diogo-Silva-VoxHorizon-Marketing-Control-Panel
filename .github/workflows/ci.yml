@@ -1,0 +1,130 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref. Saves CI minutes when you push a
+# follow-up commit before the previous build completes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Next.js app: typecheck, lint, and a full production build to catch any
+  # runtime/build-time misconfiguration. No secrets required at this stage —
+  # the build runs without Supabase env vars, and any code that needs them at
+  # build time should pull lazily.
+  # ---------------------------------------------------------------------------
+  web:
+    name: Web (typecheck + lint + build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm tsc --noEmit
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+        env:
+          # Skip Sentry/telemetry init in CI builds.
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  # ---------------------------------------------------------------------------
+  # Python worker: install via uv (matches local toolchain) and run pytest.
+  # ---------------------------------------------------------------------------
+  worker:
+    name: Worker (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install deps
+        run: uv sync --extra dev
+
+      - name: Run tests
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
+  # End-to-end Playwright tests. Requires repo secrets to be configured:
+  #   NEXT_PUBLIC_SUPABASE_URL
+  #   NEXT_PUBLIC_SUPABASE_ANON_KEY
+  #   SUPABASE_SERVICE_ROLE_KEY
+  # Until those are set in GitHub repo settings, this job will fail at the
+  # `pnpm test:e2e` step — the `web` and `worker` jobs above will still pass.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    needs: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm playwright install --with-deps chromium
+
+      - name: Run Playwright tests
+        run: pnpm test:e2e
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: ${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          WORKER_SHARED_SECRET: ${{ secrets.WORKER_SHARED_SECRET }}
+          NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
