@@ -105,3 +105,30 @@ export async function getPipeline(id: string): Promise<GetPipelineResult> {
   }
   return readJson<GetPipelineResult>(res);
 }
+
+/**
+ * Persists the operator's per-track pick selection for the ideation stage.
+ *
+ * The request overwrites the per-track arrays present in `picks` (so
+ * deselecting works naturally), while tracks not present in the body are
+ * left untouched on the server side. Throws on 4xx/5xx with the response
+ * body inlined for the caller to surface — the `StageIdeation` UI uses
+ * the error message in a toast / inline banner.
+ */
+export async function updatePicks(
+  id: string,
+  picks: { image?: string[]; video?: string[] },
+): Promise<void> {
+  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}/picks`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(picks),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/${id}/picks failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+}
