@@ -353,6 +353,10 @@ Public HTTPS for the VPS path terminates at Caddy. The chain is:
 - **Health route.** [VPS-6 / #163](../../issues/163) keeps `/work/health` cheap and bearer-authed so the container healthcheck and Caddy upstream probes can both rely on it.
 - **State.** Named volumes (`voxhorizon-worker-broll-pool`, `voxhorizon-worker-logs`) keep the b-roll pool and runtime sidecars across image rebuilds. Supabase / Drive / GHCR stay external — the container is stateless beyond those volumes.
 
+### Deployment pipeline
+
+Pushes to `main` that touch `worker/**`, the `Caddyfile`, `docker-compose.yml`, or `.github/workflows/deploy-worker.yml` trigger the `deploy-worker` workflow. The workflow builds `worker/Dockerfile` once on `ubuntu-latest`, pushes the image to GHCR as `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`, then SSHes into the VPS as the `deploy` user with a dedicated ed25519 key. The remote script does the rollout: `git reset --hard origin/main` to sync the compose file, `docker compose pull` to fetch the new image, `docker compose up -d --remove-orphans` to roll the stack, and a 10-tick polling loop on the worker's healthcheck before pruning the old image. The rollout aborts (non-zero exit, log dump) if the worker doesn't report healthy within ~50s. Concurrency is serialised on the `deploy-worker` group with `cancel-in-progress: false`, so two pushes in quick succession queue rather than racing. Rollback is a manual `docker compose pull ghcr.io/pveloso01/voxhorizon-worker:<previous-sha>` + `up -d` on the VPS; the `:<sha>` tag stays available in GHCR. See [`infra/deploy/README.md`](./infra/deploy/README.md) for the operator contract and [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets) for the SSH-key handling.
+
 The container path is opt-in; the Mac path remains supported.
 
 ---

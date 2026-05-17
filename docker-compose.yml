@@ -11,7 +11,7 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile
-    image: ghcr.io/pveloso01/voxhorizon-worker:local
+    image: ghcr.io/pveloso01/voxhorizon-worker:${WORKER_IMAGE_TAG:-latest}
     restart: unless-stopped
     # Production path: env file lives at the canonical absolute path on
     # the VPS (chmod 600, owned by the deploy user). Dev override:
