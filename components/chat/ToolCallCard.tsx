@@ -1,127 +1,83 @@
 "use client";
 
-import { useState } from "react";
-import {
-  CheckCircle2,
-  ChevronDown,
-  ChevronRight,
-  Hammer,
-  Loader2,
-  Paintbrush,
-  RefreshCw,
-  ScanSearch,
-  Sparkles,
-} from "lucide-react";
+import React from "react";
 
-import { cn } from "@/lib/utils";
 import type { ToolCallView } from "@/lib/chat";
 
+import { FallbackCard } from "./cards/FallbackCard";
+import { RecaptionCard } from "./cards/RecaptionCard";
+import { RegenerateImageCard } from "./cards/RegenerateImageCard";
+import { RegenerateVoiceoverCard } from "./cards/RegenerateVoiceoverCard";
+import { RerenderVideoCard } from "./cards/RerenderVideoCard";
+import { SwapBrollCard } from "./cards/SwapBrollCard";
+
 /**
- * Inline card for one tool call. Renders a one-line summary by default;
- * the operator can expand to see the full input + result JSON.
+ * Inline card for one assistant tool call.
  *
- * Visual states:
- *  - `pending`: spinner icon, "in flight" text
- *  - resolved (`result != null`): checkmark icon, "done"
+ * Wave 6 rewrite: dispatch on `call.tool` through a `CARD_RENDERERS`
+ * registry instead of a single component that switches on icons. Each
+ * tool gets its own focused renderer in `./cards/*`, which surfaces
+ * the most useful fields up-front so a thread is scannable without
+ * needing to expand every row.
  *
- * Tool icons map known names to lucide icons so the card has a quick
- * visual scan. Unknown tools fall back to the wrench.
+ * Pattern lifted from forge `src/components/chat/structured-card.tsx`:
+ *  - `CARD_RENDERERS` maps tool name → React component
+ *  - Unknown tools fall back to `<FallbackCard />`
+ *  - The whole render is wrapped in an error boundary so a malformed
+ *    payload never takes down the chat panel
  */
 
 export type ToolCallCardProps = {
   call: ToolCallView;
 };
 
-const TOOL_ICONS: Record<string, typeof Hammer> = {
-  regenerate_image: RefreshCw,
-  composite_image: Paintbrush,
-  regenerate_voiceover: Sparkles,
-  swap_broll: ScanSearch,
-  rerender_video: RefreshCw,
+type ToolCardRenderer = React.FC<{ call: ToolCallView }>;
+
+const CARD_RENDERERS: Record<string, ToolCardRenderer> = {
+  regenerate_image: RegenerateImageCard,
+  composite_image: RegenerateImageCard, // overlay/composite reads a prompt-like field too
+  regenerate_voiceover: RegenerateVoiceoverCard,
+  swap_broll: SwapBrollCard,
+  rerender_video: RerenderVideoCard,
+  recaption: RecaptionCard,
 };
 
-function iconFor(tool: string): typeof Hammer {
-  return TOOL_ICONS[tool] ?? Hammer;
-}
+/**
+ * Class-component error boundary. React still requires class syntax
+ * for `componentDidCatch`; we keep it tiny so the cost is minimal.
+ */
+class ToolCallErrorBoundary extends React.Component<
+  { children: React.ReactNode; tool: string },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
 
-function summarize(input: unknown): string {
-  if (input == null) return "(no input yet)";
-  if (typeof input === "string") return input.slice(0, 120);
-  if (typeof input !== "object") return String(input);
-  try {
-    // Pick a sensible one-line field if we recognise it.
-    const rec = input as Record<string, unknown>;
-    for (const key of ["prompt", "headline", "script", "voice_id", "clip_id"]) {
-      const v = rec[key];
-      if (typeof v === "string" && v.trim().length > 0) {
-        return v.length > 120 ? `${v.slice(0, 117)}…` : v;
-      }
-    }
-    return JSON.stringify(input).slice(0, 120);
-  } catch {
-    return "…";
+  static getDerivedStateFromError(): { hasError: boolean } {
+    return { hasError: true };
   }
-}
 
-function prettyJson(value: unknown): string {
-  if (value === undefined || value === null) return "(null)";
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
+  componentDidCatch(error: Error): void {
+    console.error(`[ToolCallCard] renderer for "${this.props.tool}" threw:`, error);
+  }
+
+  render(): React.ReactNode {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+          <span className="font-mono font-medium">{this.props.tool}</span>
+          <span className="ml-1">· failed to render — payload was malformed.</span>
+        </div>
+      );
+    }
+    return this.props.children;
   }
 }
 
 export function ToolCallCard({ call }: ToolCallCardProps) {
-  const [expanded, setExpanded] = useState(false);
-  const Icon = iconFor(call.tool);
-  const StatusIcon = call.pending ? Loader2 : CheckCircle2;
-  const summary = summarize(call.input);
-
+  const Renderer = CARD_RENDERERS[call.tool] ?? FallbackCard;
   return (
-    <div className="rounded-md border border-violet-200 bg-violet-50/50 text-xs">
-      <button
-        type="button"
-        onClick={() => setExpanded((v) => !v)}
-        className="flex w-full items-start gap-2 px-2.5 py-1.5 text-left hover:bg-violet-100/60"
-        aria-expanded={expanded}
-      >
-        <span className="mt-0.5 inline-flex items-center gap-1">
-          {expanded ? (
-            <ChevronDown aria-hidden="true" className="h-3 w-3 text-violet-700" />
-          ) : (
-            <ChevronRight aria-hidden="true" className="h-3 w-3 text-violet-700" />
-          )}
-          <Icon aria-hidden="true" className="h-3.5 w-3.5 text-violet-700" />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="font-mono text-[11px] font-medium text-violet-900">{call.tool}</span>
-          <span className="ml-1 text-violet-700/90">· {summary}</span>
-        </span>
-        <span className="ml-1 inline-flex items-center gap-1 text-violet-700">
-          <StatusIcon
-            aria-hidden="true"
-            className={cn("h-3.5 w-3.5", call.pending ? "animate-spin" : "text-emerald-600")}
-          />
-        </span>
-      </button>
-      {expanded ? (
-        <div className="border-t border-violet-200/70 px-2.5 py-2 text-[11px]">
-          <p className="font-semibold text-violet-900">Input</p>
-          <pre className="mt-0.5 max-h-32 overflow-auto rounded bg-white px-2 py-1 font-mono text-[10px] text-zinc-800">
-            {prettyJson(call.input)}
-          </pre>
-          {call.result !== null && call.result !== undefined ? (
-            <>
-              <p className="mt-2 font-semibold text-violet-900">Result</p>
-              <pre className="mt-0.5 max-h-32 overflow-auto rounded bg-white px-2 py-1 font-mono text-[10px] text-zinc-800">
-                {prettyJson(call.result)}
-              </pre>
-            </>
-          ) : null}
-        </div>
-      ) : null}
-    </div>
+    <ToolCallErrorBoundary tool={call.tool}>
+      <Renderer call={call} />
+    </ToolCallErrorBoundary>
   );
 }

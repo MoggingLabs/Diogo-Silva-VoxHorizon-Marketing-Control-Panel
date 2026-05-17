@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Edit3, Film, FileText, MessageSquare, Mic, RotateCw, Search, Type } from "lucide-react";
 
+import { createRealtimeQueue } from "@/lib/realtime-queue";
 import { createClient } from "@/lib/supabase/browser";
 import { timeSince } from "@/lib/format-time";
 import {
@@ -98,6 +99,10 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
   }, [initialIterations]);
 
   useEffect(() => {
+    // Chat-shaped data — flush instantly. The queue object is kept
+    // structurally identical to the non-chat siblings so a future
+    // refactor to a hook is straightforward.
+    const queue = createRealtimeQueue();
     const supabase = createClient();
     const channel = supabase
       .channel(`video-iterations:${creativeId}`)
@@ -111,9 +116,11 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
         },
         (payload) => {
           const next = payload.new as VideoIteration;
-          setIterations((prev) => {
-            if (prev.some((it) => it.id === next.id)) return prev;
-            return [...prev, next];
+          queue.flushNow(`insert:${next.id}`, () => {
+            setIterations((prev) => {
+              if (prev.some((it) => it.id === next.id)) return prev;
+              return [...prev, next];
+            });
           });
         },
       )
@@ -127,12 +134,15 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
         },
         (payload) => {
           const next = payload.new as VideoIteration;
-          setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+          queue.flushNow(`update:${next.id}`, () => {
+            setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+          });
         },
       )
       .subscribe();
 
     return () => {
+      queue.dispose();
       void supabase.removeChannel(channel);
     };
   }, [creativeId]);
@@ -154,7 +164,7 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
   }
 
   return (
-    <ol className="space-y-3">
+    <ol className="space-y-3" data-thread-searchable>
       {sorted.map((iter) => {
         const kind = iter.kind as VideoIterationKindT;
         const author = iter.author as VideoIterationAuthorT;
@@ -163,7 +173,7 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
         const preview = contentPreview(iter.content);
 
         return (
-          <li key={iter.id} className="flex gap-3">
+          <li key={iter.id} className="flex gap-3" data-thread-searchable>
             <span
               className={cn(
                 "flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full text-[10px] font-semibold uppercase",

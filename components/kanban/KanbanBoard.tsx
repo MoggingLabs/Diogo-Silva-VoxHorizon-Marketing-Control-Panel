@@ -14,6 +14,7 @@ import {
   type DashboardVideoBrief,
   type FunnelStage,
 } from "@/lib/dashboard-types";
+import { createRealtimeQueue } from "@/lib/realtime-queue";
 import { createClient } from "@/lib/supabase/browser";
 
 import { KanbanCard } from "./KanbanCard";
@@ -44,17 +45,23 @@ export function KanbanBoard({ format, imageBriefs, videoBriefs }: KanbanBoardPro
   const router = useRouter();
 
   useEffect(() => {
+    // Debounce realtime invalidations into a single 200ms batch.
+    // The Kanban server component is expensive (it runs the dashboard
+    // aggregation query), so a burst of brief writes from the worker
+    // shouldn't cascade into multiple `router.refresh()` calls.
+    const queue = createRealtimeQueue();
     const supabase = createClient();
     const channel = supabase
       .channel("dashboard-kanban")
       .on("postgres_changes", { event: "*", schema: "public", table: "briefs" }, () =>
-        router.refresh(),
+        queue.queue("briefs", () => router.refresh()),
       )
       .on("postgres_changes", { event: "*", schema: "public", table: "video_briefs" }, () =>
-        router.refresh(),
+        queue.queue("video_briefs", () => router.refresh()),
       )
       .subscribe();
     return () => {
+      queue.dispose();
       void supabase.removeChannel(channel);
     };
   }, [router]);

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Edit3, MapPin, MessageSquare, RotateCw, Sparkles } from "lucide-react";
 
+import { createRealtimeQueue } from "@/lib/realtime-queue";
 import { createClient } from "@/lib/supabase/browser";
 import type { CreativeIteration, IterationAuthorT, IterationKindT } from "@/lib/creatives";
 import { cn } from "@/lib/utils";
@@ -105,6 +106,12 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
   }, [initialIterations]);
 
   useEffect(() => {
+    // Iterations are chat-shaped — operators expect new lines to land
+    // instantly. We still use `createRealtimeQueue` so the structure
+    // matches sibling components, but every event goes through
+    // `flushNow` (no debounce) per the forge "chat events bypass batch"
+    // rule.
+    const queue = createRealtimeQueue();
     const supabase = createClient();
     const channel = supabase
       .channel(`creative-iterations:${creativeId}`)
@@ -118,9 +125,11 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
         },
         (payload) => {
           const next = payload.new as CreativeIteration;
-          setIterations((prev) => {
-            if (prev.some((it) => it.id === next.id)) return prev;
-            return [...prev, next];
+          queue.flushNow(`insert:${next.id}`, () => {
+            setIterations((prev) => {
+              if (prev.some((it) => it.id === next.id)) return prev;
+              return [...prev, next];
+            });
           });
         },
       )
@@ -134,12 +143,15 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
         },
         (payload) => {
           const next = payload.new as CreativeIteration;
-          setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+          queue.flushNow(`update:${next.id}`, () => {
+            setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+          });
         },
       )
       .subscribe();
 
     return () => {
+      queue.dispose();
       void supabase.removeChannel(channel);
     };
   }, [creativeId]);
@@ -161,7 +173,7 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
   }
 
   return (
-    <ol className="space-y-3">
+    <ol className="space-y-3" data-thread-searchable>
       {sorted.map((iter) => {
         const kind = iter.kind as IterationKindT;
         const author = iter.author as IterationAuthorT;
@@ -170,7 +182,7 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
         const preview = contentPreview(iter.content);
 
         return (
-          <li key={iter.id} className="flex gap-3">
+          <li key={iter.id} className="flex gap-3" data-thread-searchable>
             <span
               className={cn(
                 "flex h-7 w-7 shrink-0 select-none items-center justify-center rounded-full text-[10px] font-semibold uppercase",
