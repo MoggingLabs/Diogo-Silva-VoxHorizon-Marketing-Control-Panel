@@ -8,6 +8,8 @@ Migration sources:
 - `db/migrations/0001_initial_schema.sql` — added in #16 (M0-16)
 - `db/migrations/0002_realtime_publication.sql` — added in #17 (M0-17)
 - `db/migrations/0003_storage_buckets.sql` — added in #17 (M0-17)
+- `db/migrations/0004_v1_video_brief_constraints.sql` — added in #78 (V1-1)
+- `db/migrations/0005_chat_messages.sql` — added in #143 (Wave 5.5-1)
 
 ---
 
@@ -37,166 +39,177 @@ Migration sources:
 ## Image side
 
 ### `clients`
+
 Single source of truth for each marketing client.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | `gen_random_uuid()` default. |
-| `slug` | `text` UNIQUE NOT NULL | URL-safe key (e.g. `acme-roofing`). |
-| `name` | `text` NOT NULL | Display name. |
-| `service_type` | `service_type` enum NOT NULL | `roofing` \| `remodeling`. |
-| `brand_colors` | `jsonb` | Default `{}`. |
-| `meta_account_id` | `text` | Meta Ads account id. |
-| `ghl_location_id` | `text` | GoHighLevel location id. |
-| `drive_root_folder_id` | `text` | Google Drive root folder id. |
-| `cpl_target` | `numeric` | Target cost-per-lead. |
-| `status` | `text` NOT NULL default `active` | |
-| `created_at` / `updated_at` | `timestamptz` NOT NULL default `now()` | |
+| Column                      | Type                                   | Notes                               |
+| --------------------------- | -------------------------------------- | ----------------------------------- |
+| `id`                        | `uuid` PK                              | `gen_random_uuid()` default.        |
+| `slug`                      | `text` UNIQUE NOT NULL                 | URL-safe key (e.g. `acme-roofing`). |
+| `name`                      | `text` NOT NULL                        | Display name.                       |
+| `service_type`              | `service_type` enum NOT NULL           | `roofing` \| `remodeling`.          |
+| `brand_colors`              | `jsonb`                                | Default `{}`.                       |
+| `meta_account_id`           | `text`                                 | Meta Ads account id.                |
+| `ghl_location_id`           | `text`                                 | GoHighLevel location id.            |
+| `drive_root_folder_id`      | `text`                                 | Google Drive root folder id.        |
+| `cpl_target`                | `numeric`                              | Target cost-per-lead.               |
+| `status`                    | `text` NOT NULL default `active`       |                                     |
+| `created_at` / `updated_at` | `timestamptz` NOT NULL default `now()` |                                     |
 
 ### `briefs`
+
 Inbound image brief queue (operator-posted or AI-drafted).
 Added in #16 per M0-16 schema.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `brief_id_human` | `text` UNIQUE NOT NULL | Generated via `gen_brief_id_human(slug)`. |
-| `client_id` | `uuid` FK → `clients.id` | |
-| `status` | `brief_status` enum NOT NULL default `draft` | `draft` \| `posted` \| `approved` \| `approved_with_changes` \| `rejected`. |
-| `payload` | `jsonb` NOT NULL | CHECK requires `service` and `budget` keys. |
-| `created_at`, `posted_at`, `decided_at` | `timestamptz` | |
-| `decided_notes`, `decided_by` | `text` | |
+| Column                                  | Type                                         | Notes                                                                       |
+| --------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------- |
+| `id`                                    | `uuid` PK                                    |                                                                             |
+| `brief_id_human`                        | `text` UNIQUE NOT NULL                       | Generated via `gen_brief_id_human(slug)`.                                   |
+| `client_id`                             | `uuid` FK → `clients.id`                     |                                                                             |
+| `status`                                | `brief_status` enum NOT NULL default `draft` | `draft` \| `posted` \| `approved` \| `approved_with_changes` \| `rejected`. |
+| `payload`                               | `jsonb` NOT NULL                             | CHECK requires `service` and `budget` keys.                                 |
+| `created_at`, `posted_at`, `decided_at` | `timestamptz`                                |                                                                             |
+| `decided_notes`, `decided_by`           | `text`                                       |                                                                             |
 
 Indexes: `(client_id, status)`.
 
 ### `creatives`
+
 Image creative outputs (one or more per brief).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `brief_id` | `uuid` FK → `briefs.id` ON DELETE CASCADE | |
-| `type` | `creative_type` enum NOT NULL default `image` | |
-| `concept`, `offer_text` | `text` | |
-| `ratio` | `ratio` enum | `1x1` \| `9x16` \| `16x9`. |
-| `version` | `text` NOT NULL default `v1.0` | |
-| `file_path_supabase` | `text` | Path inside `creatives` storage bucket. |
-| `file_path_drive` | `text` | Mirror in Google Drive. |
-| `prompt_used` | `jsonb` | LLM/image-gen prompt snapshot. |
-| `status` | `image_creative_status` enum NOT NULL default `draft` | `draft` \| `approved` \| `rejected` \| `live` \| `killed`. |
-| `created_at`, `approved_at` | `timestamptz` | |
+| Column                      | Type                                                  | Notes                                                      |
+| --------------------------- | ----------------------------------------------------- | ---------------------------------------------------------- |
+| `id`                        | `uuid` PK                                             |                                                            |
+| `brief_id`                  | `uuid` FK → `briefs.id` ON DELETE CASCADE             |                                                            |
+| `type`                      | `creative_type` enum NOT NULL default `image`         |                                                            |
+| `concept`, `offer_text`     | `text`                                                |                                                            |
+| `ratio`                     | `ratio` enum                                          | `1x1` \| `9x16` \| `16x9`.                                 |
+| `version`                   | `text` NOT NULL default `v1.0`                        |                                                            |
+| `file_path_supabase`        | `text`                                                | Path inside `creatives` storage bucket.                    |
+| `file_path_drive`           | `text`                                                | Mirror in Google Drive.                                    |
+| `prompt_used`               | `jsonb`                                               | LLM/image-gen prompt snapshot.                             |
+| `status`                    | `image_creative_status` enum NOT NULL default `draft` | `draft` \| `approved` \| `rejected` \| `live` \| `killed`. |
+| `created_at`, `approved_at` | `timestamptz`                                         |                                                            |
 
 Indexes: `(brief_id)`.
 
 ### `creative_iterations`
+
 Append-only audit/conversation trail for image creatives.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `creative_id` | `uuid` FK → `creatives.id` ON DELETE CASCADE | |
-| `parent_creative_id` | `uuid` FK → `creatives.id` | For branch/fork edits. |
-| `author` | `iteration_author` enum NOT NULL | `user` \| `ekko`. |
-| `kind` | `image_iteration_kind` enum NOT NULL | `generate` \| `regenerate` \| `annotate` \| `comment` \| `user_edit`. |
-| `content` | `jsonb` | Free-form payload (text, annotations, etc.). |
-| `image_path_supabase` | `text` | Optional asset for this iteration. |
-| `created_at` | `timestamptz` NOT NULL default `now()` | |
+| Column                | Type                                         | Notes                                                                 |
+| --------------------- | -------------------------------------------- | --------------------------------------------------------------------- |
+| `id`                  | `uuid` PK                                    |                                                                       |
+| `creative_id`         | `uuid` FK → `creatives.id` ON DELETE CASCADE |                                                                       |
+| `parent_creative_id`  | `uuid` FK → `creatives.id`                   | For branch/fork edits.                                                |
+| `author`              | `iteration_author` enum NOT NULL             | `user` \| `ekko`.                                                     |
+| `kind`                | `image_iteration_kind` enum NOT NULL         | `generate` \| `regenerate` \| `annotate` \| `comment` \| `user_edit`. |
+| `content`             | `jsonb`                                      | Free-form payload (text, annotations, etc.).                          |
+| `image_path_supabase` | `text`                                       | Optional asset for this iteration.                                    |
+| `created_at`          | `timestamptz` NOT NULL default `now()`       |                                                                       |
 
 Indexes: `(creative_id, created_at desc)`.
 
 ### `copy_variants`
+
 Ad-copy variants for an image creative.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `creative_id` | `uuid` FK → `creatives.id` ON DELETE CASCADE | |
-| `headline`, `body`, `cta` | `text` | |
-| `humanized` | `boolean` default `false` | |
-| `status` | `text` default `draft` | |
-| `created_at` | `timestamptz` | |
+| Column                    | Type                                         | Notes |
+| ------------------------- | -------------------------------------------- | ----- |
+| `id`                      | `uuid` PK                                    |       |
+| `creative_id`             | `uuid` FK → `creatives.id` ON DELETE CASCADE |       |
+| `headline`, `body`, `cta` | `text`                                       |       |
+| `humanized`               | `boolean` default `false`                    |       |
+| `status`                  | `text` default `draft`                       |       |
+| `created_at`              | `timestamptz`                                |       |
 
 ### `launch_packages`
+
 Validated bundles ready to push to Meta Ads.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `brief_id` | `uuid` FK → `briefs.id` | |
-| `status` | `text` NOT NULL default `validating` | |
-| `payload` | `jsonb` NOT NULL | Targeting, budget, creative refs. |
-| `created_at`, `decided_at` | `timestamptz` | |
-| `decided_notes` | `text` | |
+| Column                     | Type                                 | Notes                             |
+| -------------------------- | ------------------------------------ | --------------------------------- |
+| `id`                       | `uuid` PK                            |                                   |
+| `brief_id`                 | `uuid` FK → `briefs.id`              |                                   |
+| `status`                   | `text` NOT NULL default `validating` |                                   |
+| `payload`                  | `jsonb` NOT NULL                     | Targeting, budget, creative refs. |
+| `created_at`, `decided_at` | `timestamptz`                        |                                   |
+| `decided_notes`            | `text`                               |                                   |
 
 ---
 
 ## Video side
 
 ### `video_briefs`
+
 Inbound video brief queue. Mirrors `briefs` with video-specific fields.
 Added in #16 per M0-16 schema (revised).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `brief_id_human` | `text` UNIQUE NOT NULL | Generated via `gen_video_brief_id_human(slug)`. |
-| `client_id` | `uuid` FK → `clients.id` | |
-| `status` | `video_brief_status` enum NOT NULL default `draft` | |
-| `script_outline` | `jsonb` | Beats / hook ideas. |
-| `target_duration_s` | `int` | |
-| `voice_id` | `text` | TTS voice id (ElevenLabs etc.). |
-| `music_track` | `text` | |
-| `hook_style` | `text` | |
-| `dimensions` | `ratio` enum default `9x16` | |
-| `captions_style` | `text` | |
-| `broll_selection_mode` | `text` NOT NULL default `review_each` | CHECK: `auto` \| `review_each` \| `review_low_confidence`. |
-| `payload` | `jsonb` default `{}` | App enforces shape; no SQL CHECK. |
-| `created_at`, `posted_at`, `decided_at` | `timestamptz` | |
-| `decided_notes`, `decided_by` | `text` | |
+| Column                                  | Type                                               | Notes                                                      |
+| --------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| `id`                                    | `uuid` PK                                          |                                                            |
+| `brief_id_human`                        | `text` UNIQUE NOT NULL                             | Generated via `gen_video_brief_id_human(slug)`.            |
+| `client_id`                             | `uuid` FK → `clients.id`                           |                                                            |
+| `status`                                | `video_brief_status` enum NOT NULL default `draft` |                                                            |
+| `script_outline`                        | `jsonb`                                            | Beats / hook ideas.                                        |
+| `target_duration_s`                     | `int`                                              |                                                            |
+| `voice_id`                              | `text`                                             | TTS voice id (ElevenLabs etc.).                            |
+| `music_track`                           | `text`                                             |                                                            |
+| `hook_style`                            | `text`                                             |                                                            |
+| `dimensions`                            | `ratio` enum default `9x16`                        |                                                            |
+| `captions_style`                        | `text`                                             |                                                            |
+| `broll_selection_mode`                  | `text` NOT NULL default `review_each`              | CHECK: `auto` \| `review_each` \| `review_low_confidence`. |
+| `payload`                               | `jsonb` default `{}`                               | App enforces shape; no SQL CHECK.                          |
+| `created_at`, `posted_at`, `decided_at` | `timestamptz`                                      |                                                            |
+| `decided_notes`, `decided_by`           | `text`                                             |                                                            |
 
 Indexes: `(client_id, status)`.
 
 ### `video_creatives`
+
 One row per generated video. Tracks the pipeline path (script →
 voiceover → b-roll → composed → captioned).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `brief_id` | `uuid` FK → `video_briefs.id` ON DELETE CASCADE | |
-| `version` | `int` NOT NULL default `1` | |
-| `script_path` | `text` | |
-| `voiceover_path` | `text` | |
-| `broll_clips` | `jsonb` | Array of `{segment_idx, store_backend, clip_id, in_s, out_s, source_url}`. `store_backend` is `broll_store_backend` enum (`local` \| `supabase`). |
-| `composed_path` | `text` | Raw composed MP4. |
-| `captioned_path` | `text` | Final shippable MP4. |
-| `drive_url` | `text` | Drive mirror URL. |
-| `duration_actual_s` | `int` | |
-| `status` | `video_creative_status` enum NOT NULL default `draft` | `draft` \| `script_ready` \| `voiceover_ready` \| `broll_ready` \| `composed` \| `captioned` \| `approved` \| `rejected`. |
-| `created_at`, `approved_at` | `timestamptz` | |
+| Column                      | Type                                                  | Notes                                                                                                                                             |
+| --------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                        | `uuid` PK                                             |                                                                                                                                                   |
+| `brief_id`                  | `uuid` FK → `video_briefs.id` ON DELETE CASCADE       |                                                                                                                                                   |
+| `version`                   | `int` NOT NULL default `1`                            |                                                                                                                                                   |
+| `script_path`               | `text`                                                |                                                                                                                                                   |
+| `voiceover_path`            | `text`                                                |                                                                                                                                                   |
+| `broll_clips`               | `jsonb`                                               | Array of `{segment_idx, store_backend, clip_id, in_s, out_s, source_url}`. `store_backend` is `broll_store_backend` enum (`local` \| `supabase`). |
+| `composed_path`             | `text`                                                | Raw composed MP4.                                                                                                                                 |
+| `captioned_path`            | `text`                                                | Final shippable MP4.                                                                                                                              |
+| `drive_url`                 | `text`                                                | Drive mirror URL.                                                                                                                                 |
+| `duration_actual_s`         | `int`                                                 |                                                                                                                                                   |
+| `status`                    | `video_creative_status` enum NOT NULL default `draft` | `draft` \| `script_ready` \| `voiceover_ready` \| `broll_ready` \| `composed` \| `captioned` \| `approved` \| `rejected`.                         |
+| `created_at`, `approved_at` | `timestamptz`                                         |                                                                                                                                                   |
 
 Indexes: `(brief_id)`.
 
 ### `video_iterations`
+
 Append-only audit/conversation trail for video creatives.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `creative_id` | `uuid` FK → `video_creatives.id` ON DELETE CASCADE | |
-| `parent_creative_id` | `uuid` FK → `video_creatives.id` | |
-| `author` | `iteration_author` enum NOT NULL | |
-| `kind` | `video_iteration_kind` enum NOT NULL | `generate_script` \| `regenerate_voiceover` \| `search_broll` \| `swap_broll` \| `rerender` \| `recaption` \| `comment` \| `user_edit`. |
-| `content` | `jsonb` | |
-| `image_path_supabase` | `text` | E.g. b-roll thumbnail. |
-| `created_at` | `timestamptz` | |
+| Column                | Type                                               | Notes                                                                                                                                   |
+| --------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                  | `uuid` PK                                          |                                                                                                                                         |
+| `creative_id`         | `uuid` FK → `video_creatives.id` ON DELETE CASCADE |                                                                                                                                         |
+| `parent_creative_id`  | `uuid` FK → `video_creatives.id`                   |                                                                                                                                         |
+| `author`              | `iteration_author` enum NOT NULL                   |                                                                                                                                         |
+| `kind`                | `video_iteration_kind` enum NOT NULL               | `generate_script` \| `regenerate_voiceover` \| `search_broll` \| `swap_broll` \| `rerender` \| `recaption` \| `comment` \| `user_edit`. |
+| `content`             | `jsonb`                                            |                                                                                                                                         |
+| `image_path_supabase` | `text`                                             | E.g. b-roll thumbnail.                                                                                                                  |
+| `created_at`          | `timestamptz`                                      |                                                                                                                                         |
 
 Indexes: `(creative_id, created_at desc)`.
 
 ### `video_copy_variants`
+
 Same shape as `copy_variants` but FK to `video_creatives`.
 
 ### `video_launch_packages`
+
 Same shape as `launch_packages` but FK to `video_briefs`.
 
 ---
@@ -204,30 +217,33 @@ Same shape as `launch_packages` but FK to `video_briefs`.
 ## Audit
 
 ### `campaign_perf_image`
+
 Per-campaign performance snapshots for image creatives.
 Added in #16 per M0-16 revisions (campaign_perf split).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `client_id` | `uuid` FK → `clients.id` | |
-| `campaign_id` | `text` NOT NULL | Meta Ads campaign id. |
-| `window_days` | `int` NOT NULL | Rolling window for the metrics. |
-| `spend`, `impressions`, `clicks`, `ctr` | mixed | |
-| `leads_meta`, `leads_ghl` | `int` | |
-| `cpl_real`, `freq` | `numeric` | |
-| `verdict` | `ad_verdict` enum | `kill` \| `watch` \| `keep`. |
-| `verdict_reason` | `text` | |
-| `pulled_at` | `timestamptz` NOT NULL default `now()` | |
+| Column                                  | Type                                   | Notes                           |
+| --------------------------------------- | -------------------------------------- | ------------------------------- |
+| `id`                                    | `uuid` PK                              |                                 |
+| `client_id`                             | `uuid` FK → `clients.id`               |                                 |
+| `campaign_id`                           | `text` NOT NULL                        | Meta Ads campaign id.           |
+| `window_days`                           | `int` NOT NULL                         | Rolling window for the metrics. |
+| `spend`, `impressions`, `clicks`, `ctr` | mixed                                  |                                 |
+| `leads_meta`, `leads_ghl`               | `int`                                  |                                 |
+| `cpl_real`, `freq`                      | `numeric`                              |                                 |
+| `verdict`                               | `ad_verdict` enum                      | `kill` \| `watch` \| `keep`.    |
+| `verdict_reason`                        | `text`                                 |                                 |
+| `pulled_at`                             | `timestamptz` NOT NULL default `now()` |                                 |
 
 UNIQUE `(client_id, campaign_id, window_days, date_trunc('day', pulled_at))`.
 Indexes: `(client_id, pulled_at desc)`.
 
 ### `campaign_perf_video`
+
 Same shape as `campaign_perf_image` plus video-specific engagement
 metrics: `hook_rate`, `drop_off_3s`, `view_rate_avg`, `watch_time_p50`.
 
 ### `v_campaign_perf` (view)
+
 UNION ALL over `campaign_perf_image` and `campaign_perf_video`,
 exposing the common columns plus a `format` tag (`image` / `video`).
 Use this for dashboards that mix verticals; query the underlying
@@ -238,72 +254,78 @@ tables directly when format-specific metrics are needed.
 ## Shared utilities
 
 ### `events`
+
 Append-only domain event log. Not on Realtime (too noisy).
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `kind` | `text` NOT NULL | Free-form event kind. |
-| `ref_table` | `text` | Optional pointer table. |
-| `ref_id` | `uuid` | Optional pointer row. |
-| `payload` | `jsonb` | |
-| `created_at` | `timestamptz` | |
+| Column       | Type            | Notes                   |
+| ------------ | --------------- | ----------------------- |
+| `id`         | `uuid` PK       |                         |
+| `kind`       | `text` NOT NULL | Free-form event kind.   |
+| `ref_table`  | `text`          | Optional pointer table. |
+| `ref_id`     | `uuid`          | Optional pointer row.   |
+| `payload`    | `jsonb`         |                         |
+| `created_at` | `timestamptz`   |                         |
 
 Indexes: `(kind, created_at desc)`.
 
 ### `overrides`
+
 Operator corrections layered on top of any table via left-join.
 Added in #16 per M0-16 revisions.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `table_name` | `text` NOT NULL | Logical table name. |
-| `row_id` | `text` NOT NULL | Stringified PK of the target row. |
-| `field_name` | `text` NOT NULL | |
-| `corrected_value` | `jsonb` NOT NULL | New value (JSON-encoded so any type fits). |
-| `edited_by` | `text` NOT NULL default `operator` | |
-| `edited_at` | `timestamptz` NOT NULL default `now()` | |
+| Column            | Type                                   | Notes                                      |
+| ----------------- | -------------------------------------- | ------------------------------------------ |
+| `id`              | `uuid` PK                              |                                            |
+| `table_name`      | `text` NOT NULL                        | Logical table name.                        |
+| `row_id`          | `text` NOT NULL                        | Stringified PK of the target row.          |
+| `field_name`      | `text` NOT NULL                        |                                            |
+| `corrected_value` | `jsonb` NOT NULL                       | New value (JSON-encoded so any type fits). |
+| `edited_by`       | `text` NOT NULL default `operator`     |                                            |
+| `edited_at`       | `timestamptz` NOT NULL default `now()` |                                            |
 
 UNIQUE `(table_name, row_id, field_name)`.
 Indexes: `(table_name, row_id)`.
 
 ### `sync_log`
+
 Cron / worker audit trail. Added in #16 per M0-16 revisions.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `source` | `text` NOT NULL | E.g. `meta_ads_pull`, `ghl_leads_pull`. |
-| `started_at` | `timestamptz` NOT NULL default `now()` | |
-| `finished_at` | `timestamptz` | |
-| `rows_upserted` | `int` | |
-| `status` | `sync_status` enum NOT NULL default `running` | `running` \| `ok` \| `error`. |
-| `error_text` | `text` | |
-| `payload` | `jsonb` | Optional summary. |
+| Column          | Type                                          | Notes                                   |
+| --------------- | --------------------------------------------- | --------------------------------------- |
+| `id`            | `uuid` PK                                     |                                         |
+| `source`        | `text` NOT NULL                               | E.g. `meta_ads_pull`, `ghl_leads_pull`. |
+| `started_at`    | `timestamptz` NOT NULL default `now()`        |                                         |
+| `finished_at`   | `timestamptz`                                 |                                         |
+| `rows_upserted` | `int`                                         |                                         |
+| `status`        | `sync_status` enum NOT NULL default `running` | `running` \| `ok` \| `error`.           |
+| `error_text`    | `text`                                        |                                         |
+| `payload`       | `jsonb`                                       | Optional summary.                       |
 
 Indexes: `(source, started_at desc)`.
 
 ### `push_subscriptions`
+
 Web Push subscription endpoints for the operator's devices.
 
-| Column | Type | Notes |
-| --- | --- | --- |
-| `id` | `uuid` PK | |
-| `endpoint` | `text` NOT NULL | |
-| `keys` | `jsonb` NOT NULL | `{ p256dh, auth }`. |
-| `created_at`, `last_seen` | `timestamptz` | |
+| Column                    | Type             | Notes               |
+| ------------------------- | ---------------- | ------------------- |
+| `id`                      | `uuid` PK        |                     |
+| `endpoint`                | `text` NOT NULL  |                     |
+| `keys`                    | `jsonb` NOT NULL | `{ p256dh, auth }`. |
+| `created_at`, `last_seen` | `timestamptz`    |                     |
 
 ---
 
 ## Helper functions
 
 ### `gen_brief_id_human(p_client_slug text) returns text`
+
 Generates a daily-scoped human id of the form
 `<slug>-YYYY-MM-DD-NNN`, where `NNN` is the next available three-digit
 sequence for that `(slug, UTC day)` in the `briefs` table.
 
 ### `gen_video_brief_id_human(p_client_slug text) returns text`
+
 Same as above but with a `vid-` prefix and reading from `video_briefs`.
 Example: `vid-acme-2026-05-16-001`.
 
@@ -314,21 +336,21 @@ Both functions are non-strict and safely callable as defaults:
 
 ## Enums reference
 
-| Enum | Values |
-| --- | --- |
-| `service_type` | `roofing`, `remodeling` |
-| `brief_status` | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected` |
-| `creative_type` | `image`, `video` |
-| `image_creative_status` | `draft`, `approved`, `rejected`, `live`, `killed` |
-| `ratio` | `1x1`, `9x16`, `16x9` |
-| `iteration_author` | `user`, `ekko` |
-| `image_iteration_kind` | `generate`, `regenerate`, `annotate`, `comment`, `user_edit` |
-| `ad_verdict` | `kill`, `watch`, `keep` |
-| `sync_status` | `running`, `ok`, `error` |
-| `video_brief_status` | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected` |
-| `video_creative_status` | `draft`, `script_ready`, `voiceover_ready`, `broll_ready`, `composed`, `captioned`, `approved`, `rejected` |
-| `video_iteration_kind` | `generate_script`, `regenerate_voiceover`, `search_broll`, `swap_broll`, `rerender`, `recaption`, `comment`, `user_edit` |
-| `broll_store_backend` | `local`, `supabase` |
+| Enum                    | Values                                                                                                                   |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `service_type`          | `roofing`, `remodeling`                                                                                                  |
+| `brief_status`          | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
+| `creative_type`         | `image`, `video`                                                                                                         |
+| `image_creative_status` | `draft`, `approved`, `rejected`, `live`, `killed`                                                                        |
+| `ratio`                 | `1x1`, `9x16`, `16x9`                                                                                                    |
+| `iteration_author`      | `user`, `ekko`                                                                                                           |
+| `image_iteration_kind`  | `generate`, `regenerate`, `annotate`, `comment`, `user_edit`                                                             |
+| `ad_verdict`            | `kill`, `watch`, `keep`                                                                                                  |
+| `sync_status`           | `running`, `ok`, `error`                                                                                                 |
+| `video_brief_status`    | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
+| `video_creative_status` | `draft`, `script_ready`, `voiceover_ready`, `broll_ready`, `composed`, `captioned`, `approved`, `rejected`               |
+| `video_iteration_kind`  | `generate_script`, `regenerate_voiceover`, `search_broll`, `swap_broll`, `rerender`, `recaption`, `comment`, `user_edit` |
+| `broll_store_backend`   | `local`, `supabase`                                                                                                      |
 
 ---
 
