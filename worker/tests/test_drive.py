@@ -65,6 +65,8 @@ def test_subpath_remodeling_goes_universal() -> None:
 def test_subpath_branded_falls_back_when_inputs_thin() -> None:
     assert route_subpath(service_type="roofing", branded=True, state=None, client_slug=None) == "_Universal/"
     assert route_subpath(service_type="roofing", branded=True, state="CA", client_slug=None) == "CA/"
+    # Line 115: client_slug only, no state.
+    assert route_subpath(service_type="roofing", branded=True, state=None, client_slug="sunny") == "sunny/"
 
 
 # ---------------------------------------------------------------------------
@@ -244,3 +246,17 @@ def test_folder_ids_table_is_stable() -> None:
     # Spot-check the two parents most exercised by Wave 4.
     assert FOLDER_IDS["3_image_ads"] == "1C3KA10R1vH39bTPWXoey-tub8bajd7FQ"
     assert FOLDER_IDS["4.2_video_output"] == "17HZ41N0-uKyTRg1fVM5phd5oe0TPRpvq"
+
+
+def test_resolve_gog_binary_returns_path_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Line 147: ``_resolve_gog_binary`` returns the resolved path."""
+    monkeypatch.setattr(drive_mod.shutil, "which", lambda _n: "/usr/local/bin/gog")
+    assert drive_mod._resolve_gog_binary() == "/usr/local/bin/gog"
+
+
+def test_resolve_gog_binary_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(drive_mod.shutil, "which", lambda _n: None)
+    with pytest.raises(RuntimeError, match="gog CLI not found"):
+        drive_mod._resolve_gog_binary()

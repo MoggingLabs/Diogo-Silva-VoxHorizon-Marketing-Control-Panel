@@ -264,3 +264,150 @@ def test_caption_raises_when_completed_without_video_url(
             client.caption("u", style="bold_yellow", poll_interval_s=0.0)
         )
     assert "video_url" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle / context manager + edge body shapes
+# ---------------------------------------------------------------------------
+
+
+def test_client_context_manager_closes_owned_client() -> None:
+    """Lines 110-111 + 113-114 + 116-117: ``async with`` closes the
+    httpx.AsyncClient we own."""
+    from src.services.submagic import SubmagicClient
+
+    fake = _mock_client(get_responses=[], post_responses=[])
+
+    async def _go() -> SubmagicClient:
+        c = SubmagicClient()
+        c._client = fake
+        async with c as ctx_client:
+            assert ctx_client is c
+        return c
+
+    asyncio.run(_go())
+    fake.aclose.assert_awaited_once()
+
+
+def test_client_close_noop_when_client_is_injected() -> None:
+    """Injected httpx client → caller owns lifecycle."""
+    from src.services.submagic import SubmagicClient
+
+    fake = _mock_client(get_responses=[], post_responses=[])
+    client = SubmagicClient(client=fake)
+    asyncio.run(client.close())
+    fake.aclose.assert_not_called()
+
+
+def test_submit_merges_extra_kwargs_into_body() -> None:
+    """Line 145: ``extra`` field merges into the submit body."""
+    from src.services.submagic import SubmagicClient
+
+    post = _mock_response(json_data={"id": "p"})
+    fake = _mock_client(get_responses=[], post_responses=[post])
+    client = SubmagicClient(client=fake)
+    asyncio.run(
+        client.submit(
+            "u", style="bold_yellow", extra={"speaker_label": "Ekko"}
+        )
+    )
+    body = fake.post.call_args.kwargs["json"]
+    assert body["speaker_label"] == "Ekko"
+
+
+def test_poll_raises_on_non_2xx() -> None:
+    """Line 169: GET status returns 5xx → RuntimeError."""
+    from src.services.submagic import SubmagicClient
+
+    err_resp = _mock_response(status_code=500, json_data={})
+    err_resp.text = "internal"
+    fake = _mock_client(get_responses=[err_resp], post_responses=[])
+    client = SubmagicClient(client=fake)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(client.poll("p1"))
+    assert "500" in str(exc.value)
+
+
+def test_poll_raises_when_payload_not_dict() -> None:
+    """Line 174: poll payload must be a dict."""
+    from src.services.submagic import SubmagicClient
+
+    resp = _mock_response(json_data=["not a dict"])
+    fake = _mock_client(get_responses=[resp], post_responses=[])
+    client = SubmagicClient(client=fake)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(client.poll("p1"))
+    assert "non-object" in str(exc.value)
+
+
+def test_download_raises_on_non_2xx() -> None:
+    """Line 181: download URL returning 5xx → RuntimeError."""
+    from src.services.submagic import SubmagicClient
+
+    err_resp = _mock_response(status_code=503)
+    fake = _mock_client(get_responses=[err_resp], post_responses=[])
+    client = SubmagicClient(client=fake)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(client.download("https://cdn/x.mp4"))
+    assert "503" in str(exc.value)
+
+
+def test_caption_completed_with_output_url_field() -> None:
+    """Submagic occasionally returns ``output_url`` instead of ``video_url``."""
+    from src.services import submagic
+    from src.services.submagic import SubmagicClient
+
+    submit_resp = _mock_response(json_data={"id": "p1"})
+    done_resp = _mock_response(
+        json_data={"status": "succeeded", "output_url": "https://cdn/x.mp4"}
+    )
+    download_resp = _mock_response(content=b"MP4")
+    fake = _mock_client(
+        get_responses=[done_resp, download_resp], post_responses=[submit_resp]
+    )
+    import unittest.mock as _mock
+
+    fake_sleep = _mock.AsyncMock()
+    monkeypatch_sleep = _mock.patch.object(submagic.asyncio, "sleep", fake_sleep)
+    monkeypatch_sleep.start()
+    try:
+        client = SubmagicClient(client=fake)
+        result = asyncio.run(
+            client.caption("u", style="brand", poll_interval_s=0.0)
+        )
+    finally:
+        monkeypatch_sleep.stop()
+
+    assert result.video_url == "https://cdn/x.mp4"
+    assert result.captioned_bytes == b"MP4"
+
+
+def test_caption_raises_when_completed_with_non_string_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``video_url`` value isn't a string → fail loudly."""
+    from src.services import submagic
+    from src.services.submagic import SubmagicClient
+
+    submit_resp = _mock_response(json_data={"id": "p1"})
+    done_resp = _mock_response(json_data={"status": "completed", "video_url": 42})
+    fake = _mock_client(
+        get_responses=[done_resp], post_responses=[submit_resp]
+    )
+    monkeypatch.setattr(submagic.asyncio, "sleep", AsyncMock())
+
+    client = SubmagicClient(client=fake)
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(client.caption("u", style="brand", poll_interval_s=0.0))
+    assert "video_url" in str(exc.value)
+
+
+def test_submit_uses_project_id_key_when_id_missing() -> None:
+    """Submagic also returns ``project_id`` instead of ``id`` historically."""
+    from src.services.submagic import SubmagicClient
+
+    post = _mock_response(json_data={"project_id": "p-legacy"})
+    fake = _mock_client(get_responses=[], post_responses=[post])
+    client = SubmagicClient(client=fake)
+    project_id = asyncio.run(client.submit("u", style="bold_yellow"))
+    assert project_id == "p-legacy"
