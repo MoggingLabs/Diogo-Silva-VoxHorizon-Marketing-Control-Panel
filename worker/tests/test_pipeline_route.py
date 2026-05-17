@@ -1,15 +1,15 @@
 """Tests for the pipeline worker routes.
 
-Covers the endpoints shipping in PF-B / PF-C / PF-E-1:
+Covers three endpoints on the pipeline router:
 
   * /work/pipeline/config-draft — PF-B-3 (existing, Wave 10).
   * /work/pipeline/ideation     — PF-C-2 (Wave 11).
-  * /work/pipeline/generation   — PF-E-1 (Wave 11) happy path.
+  * /work/pipeline/generation   — PF-E-1 + PF-D-5 idempotency (Wave 11).
 
 The config-draft cases drive a stubbed ClaudeRunner; the ideation
-and generation cases stub Kie.ai + Supabase so the background
-producer can run without external network calls. The dedicated
-idempotency tests (PF-D-5) land in a follow-up commit.
+cases stub Kie.ai + Supabase so the background producer can run
+without external network calls. The generation cases mock the picks
+read + the substage dispatch.
 """
 
 from __future__ import annotations
@@ -643,3 +643,117 @@ def test_generation_image_picks_render_both_ratios(
         assert ev["payload"]["api"] == "kie.ai"
 
 
+def test_generation_idempotent_when_running(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """PF-D-5: a second POST during in-flight tasks must short-circuit."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-g2",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-4",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    # Stage advance + queued/running events that haven't terminated.
+    pipeline_sb.events_data = [
+        {
+            "id": "ev-g0",
+            "pipeline_id": "p-g2",
+            "kind": "stage_advanced",
+            "stage": "generation",
+            "payload": {},
+            "created_at": "2025-01-02T00:00:00Z",
+        },
+        {
+            "id": "ev-g1",
+            "pipeline_id": "p-g2",
+            "kind": "task_queued",
+            "stage": "generation",
+            "payload": {"kind": "image"},
+            "created_at": "2025-01-02T00:00:05Z",
+        },
+        {
+            "id": "ev-g2",
+            "pipeline_id": "p-g2",
+            "kind": "task_running",
+            "stage": "generation",
+            "payload": {"kind": "image"},
+            "created_at": "2025-01-02T00:00:06Z",
+        },
+    ]
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-g2"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["already_running"] is True
+    assert body["already_complete"] is False
+    assert body["started_at"] == "2025-01-02T00:00:00Z"
+
+    # No new creative inserts were triggered.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+def test_generation_idempotent_when_complete(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """All prior tasks terminal => already_complete branch."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-g3",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-5",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.events_data = [
+        {
+            "id": "ev-g0",
+            "pipeline_id": "p-g3",
+            "kind": "stage_advanced",
+            "stage": "generation",
+            "payload": {},
+            "created_at": "2025-01-02T00:00:00Z",
+        },
+        {
+            "id": "ev-g1",
+            "pipeline_id": "p-g3",
+            "kind": "task_queued",
+            "stage": "generation",
+            "payload": {},
+            "created_at": "2025-01-02T00:00:05Z",
+        },
+        {
+            "id": "ev-g2",
+            "pipeline_id": "p-g3",
+            "kind": "task_done",
+            "stage": "generation",
+            "payload": {},
+            "created_at": "2025-01-02T00:00:30Z",
+        },
+    ]
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-g3"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["already_running"] is False
+    assert body["already_complete"] is True
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
