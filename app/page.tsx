@@ -1,7 +1,8 @@
 import { FormatToggle } from "@/components/funnel/FormatToggle";
 import { FunnelHeader } from "@/components/funnel/FunnelHeader";
-import { KanbanBoard } from "@/components/kanban/KanbanBoard";
+import { KanbanBoard, type BriefPipelineMap } from "@/components/kanban/KanbanBoard";
 import { getDashboardSnapshot, parseFormat } from "@/lib/dashboard";
+import { findPipelinesForBriefs } from "@/lib/pipeline/lookup";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +28,17 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
   const errorMessages = [snapshot.errors.image, snapshot.errors.video].filter(
     (m): m is string => typeof m === "string" && m.length > 0,
   );
+
+  // Pipeline-aware deep-link map: one DB round-trip across both brief lists,
+  // populating which cards should jump into the Pipeline detail view instead
+  // of the standalone brief page (#177). Empty maps are fine — KanbanCard
+  // falls back to the standalone link when the lookup misses.
+  const pipelineLookup = await findPipelinesForBriefs(
+    snapshot.image_briefs.map((b) => b.id),
+    snapshot.video_briefs.map((b) => b.id),
+  );
+  const imagePipelineMap: BriefPipelineMap = Object.fromEntries(pipelineLookup.image);
+  const videoPipelineMap: BriefPipelineMap = Object.fromEntries(pipelineLookup.video);
 
   return (
     <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-8">
@@ -55,6 +67,8 @@ export default async function DashboardPage({ searchParams }: { searchParams: Se
         format={format}
         imageBriefs={snapshot.image_briefs}
         videoBriefs={snapshot.video_briefs}
+        imagePipelineMap={imagePipelineMap}
+        videoPipelineMap={videoPipelineMap}
       />
     </main>
   );
