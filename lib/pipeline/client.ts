@@ -178,6 +178,26 @@ export async function createLaunchPackage(input: LaunchFromPipelineInput): Promi
   return data.launch;
 }
 
+/**
+ * Cancel an in-flight pipeline. Flips the pipeline to `status='cancelled'`
+ * from any non-terminal stage (configuration / ideation / review / generation).
+ * Throws on 4xx/5xx with the inline error body — UI surfaces should display
+ * the message and let the operator decide whether to retry.
+ */
+export async function cancelPipeline(id: string): Promise<{ pipeline: Pipeline }> {
+  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/${id}/cancel failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+  return readJson<{ pipeline: Pipeline }>(res);
+}
+
 /** Body shape for `POST /api/pipelines/:id/review/decision`. */
 export type ReviewDecisionInput = {
   decision: "approved" | "approved_with_changes" | "rejected";

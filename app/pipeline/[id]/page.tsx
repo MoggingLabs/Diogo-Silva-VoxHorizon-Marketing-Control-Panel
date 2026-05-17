@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
 import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
 import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
@@ -91,6 +92,7 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   }
 
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
+  const isCancellable = pipeline.status !== "done" && pipeline.status !== "cancelled";
 
   return (
     <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
@@ -103,26 +105,29 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
           </Link>{" "}
           / <span className="font-mono">{pipeline.id.slice(0, 8)}</span>
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            {shortClientLabel(pipeline, clientName)}
-          </h1>
-          <span
-            className={cn(
-              "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
-              PIPELINE_STATUS_BADGE[pipeline.status],
-            )}
-          >
-            {PIPELINE_STATUS_LABEL[pipeline.status]}
-          </span>
-          <span
-            className={cn(
-              "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
-              PIPELINE_FORMAT_BADGE[pipeline.format_choice],
-            )}
-          >
-            {PIPELINE_FORMAT_LABEL[pipeline.format_choice]}
-          </span>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <h1 className="text-xl font-semibold tracking-tight sm:text-2xl md:text-3xl">
+              {shortClientLabel(pipeline, clientName)}
+            </h1>
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
+                PIPELINE_STATUS_BADGE[pipeline.status],
+              )}
+            >
+              {PIPELINE_STATUS_LABEL[pipeline.status]}
+            </span>
+            <span
+              className={cn(
+                "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
+                PIPELINE_FORMAT_BADGE[pipeline.format_choice],
+              )}
+            >
+              {PIPELINE_FORMAT_LABEL[pipeline.format_choice]}
+            </span>
+          </div>
+          {isCancellable ? <CancelPipelineButton pipelineId={pipeline.id} /> : null}
         </div>
       </header>
 

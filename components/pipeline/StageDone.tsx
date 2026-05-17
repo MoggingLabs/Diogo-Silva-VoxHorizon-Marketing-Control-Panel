@@ -184,43 +184,49 @@ function ImageGallerySection({ briefId }: { briefId: string | null }) {
     let cancelled = false;
     const supabase = createBrowserClient();
     (async () => {
-      // Only the v1.x finals. The ideation stage stamps `v0.ideation` on
-      // its cheap drafts; production stage writes `v1.0`, `v1.1`, …  The
-      // `not.eq` keeps things readable; if we ever introduce another
-      // stage prefix, broaden via a `like 'v1.%'` filter.
-      const { data, error: fetchErr } = await supabase
-        .from("creatives")
-        .select("id, concept, ratio, version, file_path_supabase")
-        .eq("brief_id", briefId)
-        .neq("version", "v0.ideation");
-      if (cancelled) return;
-      if (fetchErr) {
-        setError(fetchErr.message);
-        setBuckets([]);
-        return;
-      }
-      const rows = (data ?? []) as ImageFinalRow[];
-      const grouped = groupByConcept(rows);
-      setBuckets(grouped);
+      try {
+        // Only the v1.x finals. The ideation stage stamps `v0.ideation` on
+        // its cheap drafts; production stage writes `v1.0`, `v1.1`, …  The
+        // `not.eq` keeps things readable; if we ever introduce another
+        // stage prefix, broaden via a `like 'v1.%'` filter.
+        const { data, error: fetchErr } = await supabase
+          .from("creatives")
+          .select("id, concept, ratio, version, file_path_supabase")
+          .eq("brief_id", briefId)
+          .neq("version", "v0.ideation");
+        if (cancelled) return;
+        if (fetchErr) {
+          setError(fetchErr.message);
+          setBuckets([]);
+          return;
+        }
+        const rows = (data ?? []) as ImageFinalRow[];
+        const grouped = groupByConcept(rows);
+        setBuckets(grouped);
 
-      // Resolve signed URLs for every row that has a stored file. Done in
-      // parallel; failures leave the row's URL as `null` so the
-      // placeholder tile renders.
-      const flatRows = grouped.flatMap((b) => b.rows);
-      await Promise.all(
-        flatRows.map(async (row) => {
-          if (!row.file_path_supabase) return;
-          const { data: signed, error: signedErr } = await supabase.storage
-            .from(IMAGE_CREATIVES_BUCKET)
-            .createSignedUrl(row.file_path_supabase, IMAGE_SIGNED_URL_TTL_S);
-          if (cancelled) return;
-          if (signedErr || !signed?.signedUrl) {
-            setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
-            return;
-          }
-          setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
-        }),
-      );
+        // Resolve signed URLs for every row that has a stored file. Done in
+        // parallel; failures leave the row's URL as `null` so the
+        // placeholder tile renders.
+        const flatRows = grouped.flatMap((b) => b.rows);
+        await Promise.all(
+          flatRows.map(async (row) => {
+            if (!row.file_path_supabase) return;
+            const { data: signed, error: signedErr } = await supabase.storage
+              .from(IMAGE_CREATIVES_BUCKET)
+              .createSignedUrl(row.file_path_supabase, IMAGE_SIGNED_URL_TTL_S);
+            if (cancelled) return;
+            if (signedErr || !signed?.signedUrl) {
+              setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
+              return;
+            }
+            setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
+          }),
+        );
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setBuckets([]);
+      }
     })();
     return () => {
       cancelled = true;
@@ -241,7 +247,7 @@ function ImageGallerySection({ briefId }: { briefId: string | null }) {
     >
       {buckets === null ? <ImageSkeleton /> : null}
       {buckets && buckets.length > 0 ? (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
           {buckets.map((b) => (
             <li
               key={b.concept}
@@ -338,44 +344,50 @@ function VideoGallerySection({ briefId }: { briefId: string | null }) {
     let cancelled = false;
     const supabase = createBrowserClient();
     (async () => {
-      // Compose-complete + caption-complete creatives are the ones we
-      // show. The state machine guarantees that a row reaches
-      // `captioned` only after `composed`, and `approved` only after
-      // `captioned` — including all three keeps the gallery resilient
-      // to the operator manually re-approving a creative.
-      const { data, error: fetchErr } = await supabase
-        .from("video_creatives")
-        .select("id, status, composed_path, captioned_path, duration_actual_s")
-        .eq("brief_id", briefId)
-        .in("status", ["composed", "captioned", "approved"]);
-      if (cancelled) return;
-      if (fetchErr) {
-        setError(fetchErr.message);
-        setRows([]);
-        return;
-      }
-      const fetched = (data ?? []) as VideoFinalRow[];
-      setRows(fetched);
+      try {
+        // Compose-complete + caption-complete creatives are the ones we
+        // show. The state machine guarantees that a row reaches
+        // `captioned` only after `composed`, and `approved` only after
+        // `captioned` — including all three keeps the gallery resilient
+        // to the operator manually re-approving a creative.
+        const { data, error: fetchErr } = await supabase
+          .from("video_creatives")
+          .select("id, status, composed_path, captioned_path, duration_actual_s")
+          .eq("brief_id", briefId)
+          .in("status", ["composed", "captioned", "approved"]);
+        if (cancelled) return;
+        if (fetchErr) {
+          setError(fetchErr.message);
+          setRows([]);
+          return;
+        }
+        const fetched = (data ?? []) as VideoFinalRow[];
+        setRows(fetched);
 
-      await Promise.all(
-        fetched.map(async (row) => {
-          // Prefer the captioned MP4 when present — the captioning step is
-          // the final transform. Falling back to composed gives operators
-          // a preview even before captioning finishes (shouldn't normally
-          // happen in `done`, but defensive doesn't hurt).
-          const path = row.captioned_path ?? row.composed_path;
-          if (!path) return;
-          const { data: signed, error: signedErr } = await supabase.storage
-            .from(VIDEO_CREATIVES_BUCKET)
-            .createSignedUrl(path, VIDEO_SIGNED_URL_TTL_S);
-          if (cancelled) return;
-          if (signedErr || !signed?.signedUrl) {
-            setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
-            return;
-          }
-          setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
-        }),
-      );
+        await Promise.all(
+          fetched.map(async (row) => {
+            // Prefer the captioned MP4 when present — the captioning step is
+            // the final transform. Falling back to composed gives operators
+            // a preview even before captioning finishes (shouldn't normally
+            // happen in `done`, but defensive doesn't hurt).
+            const path = row.captioned_path ?? row.composed_path;
+            if (!path) return;
+            const { data: signed, error: signedErr } = await supabase.storage
+              .from(VIDEO_CREATIVES_BUCKET)
+              .createSignedUrl(path, VIDEO_SIGNED_URL_TTL_S);
+            if (cancelled) return;
+            if (signedErr || !signed?.signedUrl) {
+              setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
+              return;
+            }
+            setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
+          }),
+        );
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : String(e));
+        setRows([]);
+      }
     })();
     return () => {
       cancelled = true;
@@ -396,7 +408,7 @@ function VideoGallerySection({ briefId }: { briefId: string | null }) {
     >
       {rows === null ? <ImageSkeleton /> : null}
       {rows && rows.length > 0 ? (
-        <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3">
           {rows.map((row) => {
             const src = signedUrls[row.id] ?? null;
             const isPlaying = playing[row.id] ?? false;
@@ -498,7 +510,7 @@ function GallerySection({
 
 function ImageSkeleton() {
   return (
-    <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
+    <ul className="grid grid-cols-1 gap-3 md:grid-cols-2 lg:grid-cols-3" aria-hidden="true">
       {Array.from({ length: 3 }).map((_, idx) => (
         <li
           key={idx}
