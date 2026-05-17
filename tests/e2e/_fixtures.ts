@@ -7,6 +7,7 @@ import {
   cleanupCampaignPerf,
   cleanupCreatives,
   cleanupLaunchPackages,
+  cleanupPipelines,
   seedApprovedBrief,
   seedCampaignPerf,
   seedCreative,
@@ -126,6 +127,7 @@ export {
   cleanupCampaignPerf,
   cleanupCreatives,
   cleanupLaunchPackages,
+  cleanupPipelines,
   seedApprovedBrief,
   seedCampaignPerf,
   seedCreative,
@@ -144,6 +146,9 @@ export type { BriefFormat, SeedCampaignPerfRow, SeedCreativeOpts, SeedVideoCreat
 async function cleanupAll(clientId: string): Promise<void> {
   await cleanupCampaignPerf(clientId);
   await cleanupLaunchPackages(clientId);
+  // Pipelines reference briefs (FK image_brief_id / video_brief_id). We
+  // drop pipelines first so the brief sweep doesn't trip on the FK.
+  await cleanupPipelines(clientId);
   await cleanupCreatives(clientId);
   await cleanupBriefs(clientId);
 }

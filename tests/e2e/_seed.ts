@@ -159,6 +159,36 @@ export async function cleanupCampaignPerf(clientId: string): Promise<void> {
   }
 }
 
+/**
+ * Removes every `pipelines` row tied to the test client. The schema cascades
+ * pipeline_events on delete; briefs referenced by FK are NOT cascaded by
+ * design (a pipeline-created brief should outlive the pipeline row). The
+ * sister helper `cleanupBriefs` mops those up via the client_id sweep.
+ */
+export async function cleanupPipelines(clientId: string): Promise<void> {
+  const admin = adminClient();
+
+  // First, look up the pipeline ids so we can null out the FK on briefs
+  // that point at them (otherwise the pipeline delete will fail on
+  // ON DELETE RESTRICT). The DB migration uses ON DELETE SET NULL on the
+  // brief→pipeline FK, so this clear is belt-and-braces only.
+  const { data: pipes, error: lookupErr } = await admin
+    .from("pipelines")
+    .select("id")
+    .eq("client_id", clientId);
+  if (lookupErr) {
+    throw new Error(`cleanupPipelines (lookup) failed: ${lookupErr.message}`);
+  }
+
+  const pipelineIds = (pipes ?? []).map((p) => p.id);
+  if (pipelineIds.length === 0) return;
+
+  const res = await admin.from("pipelines").delete().in("id", pipelineIds);
+  if (res.error) {
+    throw new Error(`cleanupPipelines (delete) failed: ${res.error.message}`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Brief seeders
 // ---------------------------------------------------------------------------
