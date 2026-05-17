@@ -14,6 +14,7 @@ read + the substage dispatch.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -21,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from src.services.claude_runner import ClaudeRunner, StreamChunk
@@ -757,3 +759,1171 @@ def test_generation_idempotent_when_complete(
     assert body["already_running"] is False
     assert body["already_complete"] is True
     assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+# ===========================================================================
+# Helpers / branches not reachable from the happy-path tests above
+# ===========================================================================
+
+
+def test_get_runner_constructs_default_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_get_runner`` builds a real ClaudeRunner when no test double has
+    been installed — covers the singleton-init branch."""
+    from src.routes import pipeline as pipeline_route
+
+    pipeline_route._reset_runner()
+    runner = pipeline_route._get_runner()
+    assert isinstance(runner, ClaudeRunner)
+    # Idempotent — second call returns the same instance.
+    assert pipeline_route._get_runner() is runner
+    pipeline_route._reset_runner()
+
+
+def test_system_prompt_includes_video_for_both_format() -> None:
+    """``_system_prompt`` adds the 'video' track marker when format is
+    ``video`` or ``both`` — covers the ``("video", "both")`` branch."""
+    from src.routes.pipeline import _system_prompt
+
+    both = _system_prompt("both", "p-1")
+    assert "image + video" in both
+    video_only = _system_prompt("video", "p-2")
+    assert "video" in video_only
+    assert "image + video" not in video_only
+
+
+def test_default_tools_returns_propose_config_schema() -> None:
+    from src.routes.pipeline import _default_tools
+
+    tools = _default_tools()
+    assert len(tools) == 1
+    assert tools[0]["name"] == "propose_config"
+    assert "format_choice" in tools[0]["input_schema"]["properties"]
+
+
+def test_propose_config_tool_format_required() -> None:
+    from src.routes.pipeline import _propose_config_tool
+
+    spec = _propose_config_tool()
+    assert spec["input_schema"]["required"] == ["format_choice"]
+
+
+# ===========================================================================
+# /work/pipeline/config-draft — SSE wrapper branches
+# ===========================================================================
+
+
+class _SilentRunner(ClaudeRunner):
+    """Emits no chunks at all — used to force the ``not saw_terminal``
+    branch and the heartbeat keepalive path."""
+
+    def __init__(self, *, delay_s: float = 0.0, emit_terminal: bool = False) -> None:
+        super().__init__(anthropic_api_key="test")
+        self._delay_s = delay_s
+        self._emit_terminal = emit_terminal
+
+    async def stream(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncIterator[StreamChunk]:
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
+        if self._emit_terminal:
+            yield StreamChunk(type="message_stop")
+        # else: no yields → producer's finally puts None, stream finishes
+        # without a terminal frame, so the wrapper must synthesize one.
+
+
+def test_config_draft_emits_synthetic_message_stop_when_runner_silent(
+    client: TestClient,
+) -> None:
+    """When the runner yields no chunks the SSE wrapper still closes
+    with a ``message_stop`` so the front end can release the connection.
+    Exercises the ``if not saw_terminal:`` branch."""
+    from src.routes import pipeline as pipeline_route
+
+    pipeline_route._runner = _SilentRunner()
+
+    resp = client.post(
+        "/work/pipeline/config-draft",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={
+            "pipeline_id": "p-silent",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200
+    frames = _parse_sse(resp.text)
+    assert frames[-1]["type"] == "message_stop"
+
+
+def test_config_draft_emits_keepalive_on_idle(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Shrinking the heartbeat to ~10 ms forces the timeout branch:
+    the wrapper yields a ``: keepalive`` SSE comment before any chunk
+    arrives. Exercises the heartbeat lines (315-318)."""
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "_HEARTBEAT_INTERVAL_S", 0.05)
+    # Delay one full heartbeat before emitting the terminal so a
+    # keepalive is forced into the wire.
+    pipeline_route._runner = _SilentRunner(delay_s=0.15, emit_terminal=True)
+
+    resp = client.post(
+        "/work/pipeline/config-draft",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={
+            "pipeline_id": "p-keepalive",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200
+    assert ": keepalive" in resp.text
+    # And the stream still closes with a terminal frame.
+    frames = _parse_sse(resp.text)
+    assert frames[-1]["type"] == "message_stop"
+
+
+def test_config_draft_abort_mid_stream(
+    client: TestClient,
+) -> None:
+    """Pre-flagging the abort store before the request runs causes the
+    wrapper to short-circuit on the first iteration with a
+    ``message_stop``. Exercises lines 303-307."""
+    from src.routes import pipeline as pipeline_route
+    from src.services.chat_abort import get_store
+
+    # The wrapper polls the abort flag at the top of each loop
+    # iteration. By pre-flagging we guarantee the first iteration sees
+    # it; the wrapper's ``store.clear`` at the start of the wrapper has
+    # to be re-flagged AFTER it runs. We do that with a runner that
+    # flips the flag on first yield.
+
+    class _AbortOnFirstYieldRunner(ClaudeRunner):
+        def __init__(self) -> None:
+            super().__init__(anthropic_api_key="test")
+
+        async def stream(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: list[dict[str, Any]] | None = None,
+            system_prompt: str | None = None,
+            model: str | None = None,
+            max_tokens: int | None = None,
+        ) -> AsyncIterator[StreamChunk]:
+            # Flip the abort flag, then keep streaming. The wrapper will
+            # see the flag on the next iteration and break.
+            get_store().request("image", "pipeline:p-abort")
+            for _ in range(50):
+                yield StreamChunk(type="text_delta", delta="more")
+                await asyncio.sleep(0)
+
+    pipeline_route._runner = _AbortOnFirstYieldRunner()
+
+    resp = client.post(
+        "/work/pipeline/config-draft",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={
+            "pipeline_id": "p-abort",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    )
+    assert resp.status_code == 200
+    frames = _parse_sse(resp.text)
+    # Must end with message_stop — the abort path emits one explicitly.
+    assert frames[-1]["type"] == "message_stop"
+    # The wrapper clears the flag on the way out so subsequent sessions
+    # for the same pipeline_id start fresh.
+    assert get_store().is_aborted("image", "pipeline:p-abort") is False
+
+
+def test_config_draft_forwards_caller_supplied_tools_and_system(
+    client: TestClient,
+) -> None:
+    """When the caller passes ``tools`` / ``system_prompt``, the route
+    forwards them verbatim rather than substituting defaults."""
+    from src.routes import pipeline as pipeline_route
+
+    captured: dict[str, Any] = {}
+
+    class _CapturingRunner(ClaudeRunner):
+        def __init__(self) -> None:
+            super().__init__(anthropic_api_key="test")
+
+        async def stream(
+            self,
+            messages: list[dict[str, Any]],
+            *,
+            tools: list[dict[str, Any]] | None = None,
+            system_prompt: str | None = None,
+            model: str | None = None,
+            max_tokens: int | None = None,
+        ) -> AsyncIterator[StreamChunk]:
+            captured["tools"] = tools
+            captured["system_prompt"] = system_prompt
+            captured["messages"] = messages
+            yield StreamChunk(type="message_stop")
+
+    pipeline_route._runner = _CapturingRunner()
+
+    resp = client.post(
+        "/work/pipeline/config-draft",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={
+            "pipeline_id": "p-fwd",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {
+                    "name": "custom_tool",
+                    "description": "do a thing",
+                    "input_schema": {"type": "object"},
+                }
+            ],
+            "system_prompt": "custom system prompt",
+        },
+    )
+    assert resp.status_code == 200
+    assert captured["system_prompt"] == "custom system prompt"
+    assert captured["tools"] == [
+        {
+            "name": "custom_tool",
+            "description": "do a thing",
+            "input_schema": {"type": "object"},
+        }
+    ]
+
+
+# ===========================================================================
+# Ideation — error / branch paths
+# ===========================================================================
+
+
+def test_ideation_image_brief_missing_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``_fetch_image_brief`` returns None the background producer
+    must emit a ``task_error`` event with a clear payload and return —
+    no Kie call, no creative insert."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-mb",
+        "status": "ideation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-missing",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    # brief_row left as None → ``_fetch_image_brief`` returns None.
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-mb"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors, [d for n, d in pipeline_sb.inserts]
+    assert "brief not found" in errors[0]["payload"]["error"]
+    # No Kie / creative insert side effects.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+def test_ideation_image_kie_runtime_error_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When ``KieClient()`` raises RuntimeError (missing API key) the
+    producer must emit a ``task_error`` event and exit cleanly."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-nokey",
+        "status": "ideation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-nokey",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.brief_row = {
+        "id": "ib-nokey",
+        "brief_id_human": "ACM-NOKEY",
+        "status": "approved",
+        "payload": {"market": "X", "offer_text": "Y"},
+        "clients": {},
+    }
+
+    # Ensure KIE_AI_API_KEY is not set → KieClient.__init__ raises.
+    monkeypatch.delenv("KIE_AI_API_KEY", raising=False)
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-nokey"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    assert "KIE_AI_API_KEY" in errors[0]["payload"]["error"]
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+def test_ideation_image_kie_call_failure_emits_task_error_per_concept(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KieClient call that raises mid-render is caught per concept —
+    each concept emits a ``task_error`` but the loop continues."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-kie-fail",
+        "status": "ideation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-fail",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.brief_row = {
+        "id": "ib-fail",
+        "brief_id_human": "ACM-F",
+        "status": "approved",
+        # No angles → falls back to the canned defaults.
+        "payload": {"market": "Boston", "offer_text": "50% off"},
+        "clients": {"slug": "acme", "name": "Acme", "service_type": "roofing"},
+    }
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+    from src.services.kie import KieError
+
+    class _BoomKie:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def generate_image_full(
+            self, prompt: str, ratio: str, *, resolution: str = "2K"
+        ) -> Any:
+            raise KieError("Kie.ai 429")
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _BoomKie)
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-kie-fail"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # One task_error per concept.
+    assert len(errors) == 4
+    # Each error payload carries the concept + ratio + error text.
+    for d in errors:
+        assert d["payload"]["kind"] == "image"
+        assert d["payload"]["ratio"] == "1x1"
+        assert "Kie.ai 429" in d["payload"]["error"]
+    # No creative inserts despite the producer entering the loop.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+def test_ideation_video_track_produces_drafts(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Format=video + video_brief_id set → background producer writes
+    three ``video_creatives`` rows (one per draft) + matching ``task_done``."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-vid",
+        "status": "ideation",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": "vb-1",
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.video_brief_row = {
+        "id": "vb-1",
+        "payload": {"angles": ["urgency", "trust"]},
+        "hook_style": "question",
+        "target_duration_s": 30,
+        "clients": {"slug": "acme", "name": "Acme"},
+    }
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vid"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["image_track"] is False
+    assert body["video_track"] is True
+
+    vc_inserts = [d for n, d in pipeline_sb.inserts if n == "video_creatives"]
+    assert len(vc_inserts) == 3, [(n, d) for n, d in pipeline_sb.inserts]
+    # Each video creative has a script_path set.
+    for row in vc_inserts:
+        assert "script_path" in row
+        assert row["status"] == "script_ready"
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    # Only video task_done events (no image track on this run).
+    video_done = [d for d in done if d["payload"].get("kind") == "video"]
+    assert len(video_done) == 3
+
+
+def test_ideation_video_brief_missing_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """Same ``brief not found`` flow for the video track."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-vmiss",
+        "status": "ideation",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": "vb-miss",
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    # video_brief_row left as None.
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vmiss"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    assert errors[0]["payload"]["kind"] == "video"
+
+
+def test_ideation_video_record_failure_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If ``record_video_stage`` raises, the producer must catch it,
+    emit a ``task_error`` for that draft, and continue with peers."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-vrec-fail",
+        "status": "ideation",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": "vb-fail",
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.video_brief_row = {
+        "id": "vb-fail",
+        # No angles → defaults; non-dict payload exercises the safety net.
+        "payload": "not a dict",
+        "clients": {},
+    }
+
+    from src.routes import pipeline as pipeline_route
+
+    async def _boom(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("simulated video stage failure")
+
+    monkeypatch.setattr(pipeline_route, "record_video_stage", _boom)
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vrec-fail"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # 3 drafts, all fail.
+    video_errors = [d for d in errors if d["payload"].get("kind") == "video"]
+    assert len(video_errors) == 3
+
+
+def test_ideation_video_skips_when_no_video_brief_id(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """Format=video but ``video_brief_id`` is missing → no producer
+    queued, response carries ``video_track=False``."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-novb",
+        "status": "ideation",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-novb"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["video_track"] is False
+    assert not any(
+        n in ("video_creatives", "creatives") for n, _ in pipeline_sb.inserts
+    )
+
+
+# ===========================================================================
+# Internal helpers (_fallback_*) — direct unit coverage
+# ===========================================================================
+
+
+def test_fallback_image_concepts_non_dict_payload_uses_defaults() -> None:
+    """Non-dict ``payload`` is coerced to ``{}`` — covers line 590."""
+    from src.routes.pipeline import _fallback_image_concepts
+
+    concepts = _fallback_image_concepts({"payload": "string-instead"}, count=4)
+    assert len(concepts) == 4
+    # Defaults — "before-and-after" leads the angles list.
+    assert concepts[0]["concept"].startswith("ideation-1-before-and-after")
+
+
+def test_fallback_image_concepts_empty_angles_uses_defaults() -> None:
+    """Missing ``angles`` list — covers line 596 (defaults assignment)."""
+    from src.routes.pipeline import _fallback_image_concepts
+
+    concepts = _fallback_image_concepts(
+        {"payload": {"market": "Boston", "offer_text": "free"}}, count=4
+    )
+    assert len(concepts) == 4
+    # Should use the canonical four-angle default set. Concept format is
+    # ``ideation-{i}-{angle}`` and angles can contain dashes themselves;
+    # strip the ``ideation-{i}-`` prefix to recover the angle.
+    angles = [c["concept"].split("-", 2)[2] for c in concepts]
+    assert angles == ["before-and-after", "trust", "savings", "urgency"]
+
+
+def test_fallback_video_drafts_uses_default_angles_and_hook() -> None:
+    """No angles list + missing hook_style/duration → all defaults."""
+    from src.routes.pipeline import _fallback_video_drafts
+
+    drafts = _fallback_video_drafts({}, count=3)
+    assert len(drafts) == 3
+    # Default angle ordering: before-and-after, trust, urgency.
+    # Concept format: ``video-ideation-{i}-{angle}``; strip the prefix
+    # so an angle that contains dashes ("before-and-after") survives.
+    expected = ["before-and-after", "trust", "urgency"]
+    actual = [d["concept"].split("-", 3)[3] for d in drafts]
+    assert actual == expected
+    # Defaults: hook_style=question, duration=30.
+    assert drafts[0]["script_outline"]["total_duration_s"] == 30
+    assert "question" in drafts[0]["script_outline"]["segments"][0]["voiceover_text"]
+
+
+def test_fallback_video_drafts_with_payload_angles() -> None:
+    """A brief with explicit angles produces matching concept names."""
+    from src.routes.pipeline import _fallback_video_drafts
+
+    drafts = _fallback_video_drafts(
+        {
+            "payload": {"angles": ["aurora", "borealis"]},
+            "hook_style": "statement",
+            "target_duration_s": 15,
+        },
+        count=3,
+    )
+    # Padded angles cycle: aurora, borealis, aurora.
+    assert drafts[0]["concept"] == "video-ideation-1-aurora"
+    assert drafts[1]["concept"] == "video-ideation-2-borealis"
+    assert drafts[2]["concept"] == "video-ideation-3-aurora"
+    assert drafts[0]["script_outline"]["total_duration_s"] == 15
+
+
+def test_fallback_video_drafts_non_dict_payload_uses_defaults() -> None:
+    """Defensive: a non-dict payload still produces drafts using the
+    fallback defaults instead of crashing."""
+    from src.routes.pipeline import _fallback_video_drafts
+
+    drafts = _fallback_video_drafts({"payload": ["not", "a", "dict"]}, count=3)
+    assert len(drafts) == 3
+
+
+# ===========================================================================
+# Generation — image error / branch paths
+# ===========================================================================
+
+
+def test_generation_image_kie_runtime_error_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline_sb.pipeline_row = {
+        "id": "p-gnokey",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-x",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-x",
+        "concept": "alpha",
+        "offer_text": "promo",
+        "prompt_used": {"prompt": "sunny roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "p.png",
+    }
+    pipeline_sb.events_data = []
+    # No KIE_AI_API_KEY → KieClient() raises.
+    monkeypatch.delenv("KIE_AI_API_KEY", raising=False)
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-gnokey"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    assert "KIE_AI_API_KEY" in errors[0]["payload"]["error"]
+
+
+def test_generation_image_parent_creative_missing_continues_to_next(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A single missing parent creative emits a ``task_error`` but the
+    loop continues to peers — exercises lines 1141-1151."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-mp",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-missing"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    # No creative_row set → ``_fetch_creative`` returns None.
+    pipeline_sb.events_data = []
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-mp"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    assert errors[0]["payload"]["error"] == "parent creative not found"
+    # And: no creatives were inserted, since the only pick was missing.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+def test_generation_image_kie_call_failure_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A KieClient call that raises during generation must produce a
+    ``task_error`` per ratio, leaving no creative row behind."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-gboom",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-p"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-p",
+        "brief_id": "ib",
+        "concept": "alpha",
+        # Non-dict prompt_used to exercise the fallback prompt.
+        "prompt_used": "stringified",
+        "offer_text": None,
+        "version": "v0.ideation",
+        "file_path_supabase": "p.png",
+    }
+    pipeline_sb.events_data = []
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    from src.routes import pipeline as pipeline_route
+    from src.services.kie import KieError
+
+    class _BoomKie:
+        def __init__(self, *_a: Any, **_kw: Any) -> None:
+            pass
+
+        async def generate_image_full(
+            self, prompt: str, ratio: str, *, resolution: str = "2K"
+        ) -> Any:
+            raise KieError(f"kie 5xx for {ratio}")
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _BoomKie)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-gboom"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # One error per ratio (1x1 + 9x16).
+    image_errors = [d for d in errors if d["payload"].get("kind") == "image"]
+    assert len(image_errors) == 2
+    ratios = sorted(d["payload"]["ratio"] for d in image_errors)
+    assert ratios == ["1x1", "9x16"]
+
+
+# ===========================================================================
+# Generation — video pick / substages
+# ===========================================================================
+
+
+def _video_pick_pipeline_row() -> dict[str, Any]:
+    return {
+        "id": "p-vp",
+        "status": "generation",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": "vb-1",
+        "config_draft": {},
+        "picks": {"video": ["vc-p"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+
+
+def test_generation_video_pick_missing_creative_emits_task_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """A video pick whose row is missing emits a ``task_error`` before
+    the substage loop starts."""
+    pipeline_sb.pipeline_row = _video_pick_pipeline_row()
+    pipeline_sb.video_creative_row = None
+    pipeline_sb.events_data = []
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vp"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    assert errors[0]["payload"]["error"] == "video creative not found"
+
+
+def test_generation_video_pick_runs_all_substages(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy-path video pick: every substage emits a ``task_done`` and
+    paid substages emit ``cost_recorded``."""
+    pipeline_sb.pipeline_row = _video_pick_pipeline_row()
+    pipeline_sb.video_creative_row = {
+        "id": "vc-p",
+        "brief_id": "vb-1",
+        # ``script_path`` set → script substage short-circuits without
+        # calling the agent.
+        "script_path": "vb-1/script.json",
+        "video_briefs": {"id": "vb-1"},
+    }
+    pipeline_sb.events_data = []
+
+    # Stub every video_route function used by ``_run_video_substage``.
+    from src.routes import video as video_route_mod
+
+    async def _ok_script(req: Any) -> dict[str, Any]:
+        return {"script_path": "p", "creative_id": "vc-p"}
+
+    async def _ok_voiceover(req: Any) -> dict[str, Any]:
+        return {"voiceover_path": "vo.mp3"}
+
+    async def _ok_broll_search(req: Any) -> dict[str, Any]:
+        return {"candidates": [{"id": "x"}]}
+
+    async def _ok_broll_select(req: Any) -> dict[str, Any]:
+        return {"resolved": [{"id": "x"}]}
+
+    async def _ok_compose(req: Any) -> dict[str, Any]:
+        return {"composed_path": "c.mp4"}
+
+    async def _ok_caption(req: Any) -> dict[str, Any]:
+        return {"captioned_path": "cap.mp4"}
+
+    monkeypatch.setattr(video_route_mod, "generate_script", _ok_script)
+    monkeypatch.setattr(video_route_mod, "synthesize_voiceover", _ok_voiceover)
+    monkeypatch.setattr(video_route_mod, "search_broll", _ok_broll_search)
+    monkeypatch.setattr(video_route_mod, "select_broll", _ok_broll_select)
+    monkeypatch.setattr(video_route_mod, "compose_video", _ok_compose)
+    monkeypatch.setattr(video_route_mod, "caption_video", _ok_caption)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vp"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["video_picks"] == 1
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    # 6 substages → 6 task_done events.
+    video_done = [d for d in done if d["payload"].get("kind") == "video"]
+    assert len(video_done) == 6
+    # Cost recorded for 4 paid substages (voiceover, broll_search,
+    # compose, caption — script and broll_pick are free).
+    cost = [d for d in pe if d.get("kind") == "cost_recorded"]
+    assert len(cost) == 4
+    apis = sorted(d["payload"]["api"] for d in cost)
+    assert apis == ["elevenlabs", "hyperframes", "submagic", "yt-dlp"]
+
+
+def test_generation_video_substage_http_exception_short_circuits(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If a substage raises ``HTTPException`` the producer emits a
+    ``task_error`` with the status code + detail and short-circuits the
+    rest of the chain for that concept."""
+    pipeline_sb.pipeline_row = _video_pick_pipeline_row()
+    pipeline_sb.video_creative_row = {
+        "id": "vc-p",
+        "brief_id": "vb-1",
+        # No script_path → script substage will call generate_script.
+        "video_briefs": {"id": "vb-1"},
+    }
+    pipeline_sb.events_data = []
+
+    from src.routes import video as video_route_mod
+
+    async def _http_fail(req: Any) -> dict[str, Any]:
+        raise HTTPException(status_code=502, detail="upstream blew up")
+
+    monkeypatch.setattr(video_route_mod, "generate_script", _http_fail)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vp"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    err = errors[0]
+    assert err["payload"]["substage"] == "script"
+    assert err["payload"]["status_code"] == 502
+    assert "upstream blew up" in err["payload"]["error"]
+
+    # Short-circuit: only the failing substage emits running/error;
+    # the four later substages should not have task_queued events.
+    queued = [
+        d
+        for d in pe
+        if d.get("kind") == "task_queued" and d["payload"].get("kind") == "video"
+    ]
+    # Only one substage attempted.
+    assert len(queued) == 1
+    assert queued[0]["payload"]["substage"] == "script"
+
+
+def test_generation_video_substage_unexpected_exception_short_circuits(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Non-HTTP exceptions inside a substage also short-circuit, with a
+    ``task_error`` carrying the str(exception) — no status_code."""
+    pipeline_sb.pipeline_row = _video_pick_pipeline_row()
+    pipeline_sb.video_creative_row = {
+        "id": "vc-p",
+        "brief_id": "vb-1",
+        "video_briefs": {"id": "vb-1"},
+    }
+    pipeline_sb.events_data = []
+
+    from src.routes import video as video_route_mod
+
+    async def _explodes(req: Any) -> dict[str, Any]:
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(video_route_mod, "generate_script", _explodes)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vp"},
+    )
+    assert resp.status_code == 200
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    assert errors
+    err = errors[0]
+    assert err["payload"]["substage"] == "script"
+    assert "disk full" in err["payload"]["error"]
+    # No status_code field for non-HTTPException paths.
+    assert "status_code" not in err["payload"]
+
+
+# ===========================================================================
+# _run_video_substage direct unit coverage
+# ===========================================================================
+
+
+def test_run_video_substage_script_uses_existing_path() -> None:
+    """If the creative already has a ``script_path`` the helper returns
+    it verbatim and does NOT call ``generate_script``."""
+    from src.routes import pipeline as pipeline_route, video as video_route_mod
+
+    async def _wrap() -> dict[str, Any]:
+        return await pipeline_route._run_video_substage(
+            video_route_mod,
+            substage="script",
+            creative={
+                "id": "c-1",
+                "brief_id": "b-1",
+                "script_path": "existing/script.json",
+            },
+        )
+
+    result = asyncio.run(_wrap())
+    assert result == {"script_path": "existing/script.json"}
+
+
+def test_run_video_substage_each_branch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Smoke-test every substage dispatch by stubbing each route fn."""
+    from src.routes import pipeline as pipeline_route, video as video_route_mod
+
+    async def _script(req: Any) -> dict[str, Any]:
+        return {"script_path": "s.json", "creative_id": "vc-p"}
+
+    async def _voiceover(req: Any) -> dict[str, Any]:
+        return {"voiceover_path": "v.mp3"}
+
+    async def _bsearch(req: Any) -> dict[str, Any]:
+        return {"candidates": ["a"]}
+
+    async def _bselect(req: Any) -> dict[str, Any]:
+        return {"resolved": ["a"]}
+
+    async def _compose(req: Any) -> dict[str, Any]:
+        return {"composed_path": "c.mp4"}
+
+    async def _caption(req: Any) -> dict[str, Any]:
+        return {"captioned_path": "x.mp4"}
+
+    monkeypatch.setattr(video_route_mod, "generate_script", _script)
+    monkeypatch.setattr(video_route_mod, "synthesize_voiceover", _voiceover)
+    monkeypatch.setattr(video_route_mod, "search_broll", _bsearch)
+    monkeypatch.setattr(video_route_mod, "select_broll", _bselect)
+    monkeypatch.setattr(video_route_mod, "compose_video", _compose)
+    monkeypatch.setattr(video_route_mod, "caption_video", _caption)
+
+    base = {"id": "vc", "brief_id": "vb", "video_briefs": {}}
+
+    async def _wrap(sub: str) -> dict[str, Any]:
+        return await pipeline_route._run_video_substage(
+            video_route_mod, substage=sub, creative=base
+        )
+
+    assert asyncio.run(_wrap("script")) == {
+        "script_path": "s.json",
+        "creative_id": "vc-p",
+    }
+    assert asyncio.run(_wrap("voiceover")) == {"voiceover_path": "v.mp3"}
+    assert asyncio.run(_wrap("broll_search")) == {"candidates": ["a"]}
+    assert asyncio.run(_wrap("broll_pick")) == {"selected": ["a"]}
+    assert asyncio.run(_wrap("compose")) == {"composed_path": "c.mp4"}
+    assert asyncio.run(_wrap("caption")) == {"captioned_path": "x.mp4"}
+
+
+def test_run_video_substage_unknown_raises() -> None:
+    """Unknown substage names raise ValueError — covers line 1495."""
+    from src.routes import pipeline as pipeline_route, video as video_route_mod
+
+    async def _wrap() -> dict[str, Any]:
+        return await pipeline_route._run_video_substage(
+            video_route_mod,
+            substage="bogus",
+            creative={"id": "vc", "brief_id": "vb"},
+        )
+
+    with pytest.raises(ValueError, match="unknown video substage"):
+        asyncio.run(_wrap())
+
+
+# ===========================================================================
+# _video_substage_cost direct unit coverage
+# ===========================================================================
+
+
+def test_video_substage_cost_table() -> None:
+    from src.routes.pipeline import _video_substage_cost
+
+    assert _video_substage_cost("voiceover") == {
+        "api": "elevenlabs",
+        "units": 1,
+        "subtotal": 0.05,
+    }
+    assert _video_substage_cost("broll_search") == {
+        "api": "yt-dlp",
+        "units": 1,
+        "subtotal": 0.00,
+    }
+    assert _video_substage_cost("compose") == {
+        "api": "hyperframes",
+        "units": 1,
+        "subtotal": 0.10,
+    }
+    assert _video_substage_cost("caption") == {
+        "api": "submagic",
+        "units": 1,
+        "subtotal": 0.20,
+    }
+    # Script and broll_pick are free — None means "don't emit cost".
+    assert _video_substage_cost("script") is None
+    assert _video_substage_cost("broll_pick") is None
+    assert _video_substage_cost("unknown") is None
+
+
+# ===========================================================================
+# _fetch_video_brief direct unit coverage
+# ===========================================================================
+
+
+def test_fetch_video_brief_returns_dict_when_present(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_video_brief
+
+    pipeline_sb.video_brief_row = {"id": "vb-1", "payload": {}}
+    row = _fetch_video_brief("vb-1")
+    assert row == {"id": "vb-1", "payload": {}}
+
+
+def test_fetch_video_brief_returns_none_when_missing(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_video_brief
+
+    pipeline_sb.video_brief_row = None
+    assert _fetch_video_brief("vb-missing") is None
+
+
+def test_fetch_image_brief_returns_none_when_missing(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_image_brief
+
+    pipeline_sb.brief_row = None
+    assert _fetch_image_brief("ib-x") is None
+
+
+def test_fetch_creative_returns_none_when_missing(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_creative
+
+    pipeline_sb.creative_row = None
+    assert _fetch_creative("cr-x") is None
+
+
+def test_fetch_video_creative_returns_none_when_missing(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_video_creative
+
+    pipeline_sb.video_creative_row = None
+    assert _fetch_video_creative("vc-x") is None
+
+
+def test_fetch_video_creative_returns_dict_when_present(
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    from src.routes.pipeline import _fetch_video_creative
+
+    pipeline_sb.video_creative_row = {"id": "vc-1", "video_briefs": {"id": "vb-1"}}
+    row = _fetch_video_creative("vc-1")
+    assert row == {"id": "vc-1", "video_briefs": {"id": "vb-1"}}
