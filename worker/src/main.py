@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import audit, broll, chat, creative, health, launch, upload
+from .routes import audit, broll, chat, creative, health, launch, upload, video
 from .services.queue import get_queue
 
 
@@ -71,6 +71,14 @@ def create_app() -> FastAPI:
     # the existing `upload` router (registered above); `launch.router` adds
     # the validator endpoint /work/launch/validate.
     app.include_router(launch.router, tags=["launch"])
+
+    # === wave 5 video routes ===
+    # Multi-stage video creative pipeline: script → voiceover → broll
+    # search/select → compose → caption. Every route serializes per
+    # video_brief_id via the same BriefQueue used by the image stages
+    # (V2-16: queue is keyed generically on brief_id so video + image
+    # share the singleton without conflict).
+    app.include_router(video.router, tags=["video"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.
