@@ -1,12 +1,10 @@
-"""Pipeline-stage worker routes (Wave 10 / PF-B).
+"""Pipeline-stage worker routes (Wave 10 / PF-B + Wave 11 / PF-C-2).
 
-The Configuration stage of the pipeline lets the operator either fill in the
-image / video brief forms by hand or run an Ekko "brief-strategist" interview
-that proposes a fully-shaped draft via a single tool call.
+The Pipeline feature is a guided multi-step ad-creation flow. This
+module hosts the worker-side endpoints the Next.js app fires at, one
+per stage of the state machine:
 
-This module currently exposes one endpoint:
-
-  POST /work/pipeline/config-draft
+  POST /work/pipeline/config-draft   (PF-B)
       body: { pipeline_id, format_choice, messages, tools?, system_prompt? }
       Streams SSE chunks (same wire format as the chat_stream routes).
       Ekko asks the operator about service, market, budget, audience, offer,
@@ -15,8 +13,21 @@ This module currently exposes one endpoint:
       ``tool_call_result`` SSE frame so the Next.js modal can hydrate the
       form.
 
-Tool schema (matches the brief / video_brief payload shapes the Next.js form
-parses on submit):
+  POST /work/pipeline/ideation       (PF-C-2)
+      body: { pipeline_id }
+      Returns 200 immediately while a background coroutine produces
+      cheap concept variants (N=4 1:1 Kie.ai renders for the image
+      track, N=3 script-only drafts for the video track). Each variant
+      lands as one ``creatives`` / ``video_creatives`` row plus a
+      ``pipeline_events(kind='task_done', stage='ideation')`` row so
+      the timeline UI updates in realtime. Idempotent: a second click
+      during the same stage entry returns ``{ already_run: true }``
+      without re-producing.
+
+The Generation endpoint (PF-E-1) lands in a follow-up commit.
+
+Tool schema for ``propose_config`` (matches the brief / video_brief
+payload shapes the Next.js form parses on submit):
 
   propose_config({
     format_choice: 'image' | 'video' | 'both',
@@ -25,30 +36,43 @@ parses on submit):
     notes?: str
   })
 
-Future endpoints (Wave 11+):
-
-  POST /work/pipeline/ideation       — kick off the ideation worker.
-  POST /work/pipeline/generation     — fire image/video creative workers.
-
-Both are stubbed out so the Next.js advance route can fire-and-forget without
-breaking when the worker doesn't yet implement them.
+The heavier orchestration helpers live in
+:mod:`worker.src.services.pipeline_runner` so this route file stays
+thin.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..services.atomic_inserts import record_creative_stage
+from ..services.atomic_inserts_video import record_video_stage
 from ..services.chat_abort import get_store
 from ..services.claude_runner import ClaudeRunner, StreamChunk
+from ..services.kie import KieClient, KieError
+from ..services.pipeline_runner import (
+    EVENT_TASK_DONE,
+    EVENT_TASK_ERROR,
+    EVENT_TASK_QUEUED,
+    EVENT_TASK_RUNNING,
+    emit_cost,
+    emit_pipeline_event,
+    fetch_pipeline,
+    ideation_already_ran,
+)
+from ..services.queue import get_queue
+from ..services.storage import BUCKET, build_creative_path
+from ..supabase_client import get_supabase_admin
 
 
 log = structlog.get_logger(__name__)
@@ -374,3 +398,564 @@ async def config_draft_stream(body: ConfigDraftInput) -> StreamingResponse:
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ===========================================================================
+# PF-C-2 — POST /work/pipeline/ideation
+# ===========================================================================
+#
+# Ideation produces *cheap* preview variants the operator picks from at
+# the Review stage. We're explicitly trading variety for spend here:
+#
+#   * Image track: N=4 concepts; ONE 1:1 Kie.ai render per concept (no
+#     9:16 — the operator only needs to see the visual idea; the 9:16
+#     render comes at Generation when the concept is locked).
+#   * Video track: N=3 script + b-roll-plan drafts. NO voiceover /
+#     compose / caption — those are paid stages that don't run until
+#     Generation.
+#
+# Each variant lands as one ``creatives`` / ``video_creatives`` row plus
+# a matching ``pipeline_events(kind='task_done', stage='ideation')``
+# event. The events table is the UI's realtime feed; the rows
+# themselves drive the Review picker.
+#
+# Long-running: we fire-and-forget the producer onto FastAPI's
+# ``BackgroundTasks`` and return 200 immediately. The operator sees
+# progress through the events table (Realtime → Next.js).
+#
+# Status enum note: the image_creative_status enum (migration 0001) has
+# no 'ideation_draft' / 'pending_review' value — its values are
+# 'draft' / 'approved' / 'rejected' / 'live' / 'killed'. We use 'draft'
+# for ideation variants. Same for video_creative_status — the enum has
+# 'draft' / 'script_ready' / ... but no 'script_draft', so we use
+# 'draft' for ideation drafts. ``record_creative_stage`` /
+# ``record_video_stage`` already write 'draft' / stage-appropriate
+# status for us so we don't touch the enum here.
+
+
+# Tuning constants — kept at module scope so they're easy to grep / unit
+# test, and so the operator can change the N values without touching the
+# producer logic itself.
+IDEATION_IMAGE_CONCEPT_COUNT = 4
+IDEATION_VIDEO_DRAFT_COUNT = 3
+
+
+class IdeationInput(BaseModel):
+    """POST body for ``/work/pipeline/ideation``."""
+
+    pipeline_id: str = Field(..., min_length=1)
+
+
+class IdeationAccepted(BaseModel):
+    """Response body for ``/work/pipeline/ideation``.
+
+    ``accepted`` means "we kicked off the background producer"; the
+    operator should poll ``pipeline_events`` / Realtime for progress.
+    """
+
+    pipeline_id: str
+    accepted: bool = True
+    already_run: bool = False
+    image_track: bool = False
+    video_track: bool = False
+
+
+@router.post(
+    "/work/pipeline/ideation", dependencies=[Depends(verify_secret)]
+)
+async def run_ideation(
+    body: IdeationInput, background: BackgroundTasks
+) -> IdeationAccepted:
+    """Kick off cheap concept production for a pipeline's ideation stage.
+
+    Returns 200 immediately. If the latest ``stage_advanced→ideation``
+    has already produced events (any ``task_*`` row), the call is
+    treated as idempotent and ``already_run=true`` is returned without
+    queuing another producer. This matches the PF-D-5-style guard the
+    generation endpoint applies; ideation has the same retrigger
+    problem since the Next.js advance route fires-and-forgets.
+    """
+    pipeline = fetch_pipeline(body.pipeline_id)
+    if not pipeline:
+        raise HTTPException(
+            status_code=404, detail=f"pipeline not found: {body.pipeline_id}"
+        )
+
+    format_choice = str(pipeline.get("format_choice") or "image")
+    image_track = format_choice in ("image", "both") and pipeline.get("image_brief_id")
+    video_track = format_choice in ("video", "both") and pipeline.get("video_brief_id")
+
+    if ideation_already_ran(body.pipeline_id):
+        log.info(
+            "pipeline_ideation_idempotent_skip",
+            pipeline_id=body.pipeline_id,
+            format_choice=format_choice,
+        )
+        return IdeationAccepted(
+            pipeline_id=body.pipeline_id,
+            accepted=True,
+            already_run=True,
+            image_track=bool(image_track),
+            video_track=bool(video_track),
+        )
+
+    # Queue the producer onto BackgroundTasks. Each track runs as its
+    # own coroutine so an image-track failure doesn't block the video
+    # track from running, and vice versa. The producers emit their own
+    # events; the HTTP layer is done after this return.
+    if image_track:
+        background.add_task(
+            _produce_ideation_image_track,
+            pipeline_id=body.pipeline_id,
+            brief_id=str(pipeline["image_brief_id"]),
+        )
+    if video_track:
+        background.add_task(
+            _produce_ideation_video_track,
+            pipeline_id=body.pipeline_id,
+            brief_id=str(pipeline["video_brief_id"]),
+        )
+
+    log.info(
+        "pipeline_ideation_kicked",
+        pipeline_id=body.pipeline_id,
+        image_track=bool(image_track),
+        video_track=bool(video_track),
+    )
+    return IdeationAccepted(
+        pipeline_id=body.pipeline_id,
+        accepted=True,
+        already_run=False,
+        image_track=bool(image_track),
+        video_track=bool(video_track),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Image track ideation producer
+# ---------------------------------------------------------------------------
+
+
+def _fetch_image_brief(brief_id: str) -> dict[str, Any] | None:
+    """Pull the image brief row + client metadata. None if missing."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("briefs")
+        .select(
+            "id, brief_id_human, status, payload, "
+            "clients(id, slug, name, service_type)"
+        )
+        .eq("id", brief_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if isinstance(resp.data, dict) else None
+
+
+def _fetch_video_brief(brief_id: str) -> dict[str, Any] | None:
+    """Pull the video brief row + client metadata. None if missing."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("video_briefs")
+        .select("*, clients(slug, name)")
+        .eq("id", brief_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if isinstance(resp.data, dict) else None
+
+
+def _fallback_image_concepts(
+    brief: dict[str, Any], *, count: int
+) -> list[dict[str, str]]:
+    """Synthesize a deterministic set of concepts from the brief payload.
+
+    Used when the Claude agent path can't be reached (offline tests,
+    CLI not installed) — we still want the operator to see N variants
+    rather than a hard failure. The prompts are simple but on-brief:
+    we pull market / offer / service from the payload and assemble a
+    short prompt per concept.
+    """
+    payload = brief.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    market = str(payload.get("market") or "the local market")
+    offer = str(payload.get("offer_text") or "a special offer")
+    angles_raw = payload.get("angles") or []
+    angles = [str(a) for a in angles_raw if isinstance(a, str)]
+    if not angles:
+        angles = ["before-and-after", "trust", "savings", "urgency"]
+
+    # Pad / trim so we always emit `count` rows.
+    seeds = (angles * ((count // max(1, len(angles))) + 1))[:count]
+    return [
+        {
+            "concept": f"ideation-{i + 1}-{seed}",
+            "prompt": (
+                f"Cheap ideation concept #{i + 1} ({seed}). "
+                f"Marketing image for {market}. Offer: {offer}. "
+                "Square 1:1 framing, clean composition, ad-ready aesthetic."
+            ),
+        }
+        for i, seed in enumerate(seeds)
+    ]
+
+
+async def _produce_ideation_image_track(
+    *,
+    pipeline_id: str,
+    brief_id: str,
+) -> None:
+    """Produce N cheap 1:1 image concepts for the image track.
+
+    Each concept is one Kie.ai render at 1:1 only. The per-brief
+    BriefQueue serializes the Kie.ai calls (image-generation SOP
+    forbids parallel calls within a single brief). After each
+    successful render we write the ``creatives`` row via the existing
+    atomic-insert helper and emit ``task_done`` + ``cost_recorded``
+    pipeline events.
+
+    Failures *per concept* are caught and surfaced as ``task_error``
+    events — one Kie.ai 429 shouldn't take down the entire ideation
+    run.
+    """
+    brief = _fetch_image_brief(brief_id)
+    if brief is None:
+        log.warning(
+            "pipeline_ideation_image_brief_missing",
+            pipeline_id=pipeline_id,
+            brief_id=brief_id,
+        )
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage="ideation",
+            payload={"kind": "image", "error": f"brief not found: {brief_id}"},
+        )
+        return
+
+    # Resolve the prompt pack. We default to the deterministic fallback
+    # rather than spinning up the Claude agent here — ideation needs to
+    # be cheap, fast, and deterministic enough to test without mocks.
+    concepts = _fallback_image_concepts(brief, count=IDEATION_IMAGE_CONCEPT_COUNT)
+
+    try:
+        kie_client = KieClient()
+    except RuntimeError as e:
+        log.warning("pipeline_ideation_no_kie_key", pipeline_id=pipeline_id, error=str(e))
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage="ideation",
+            payload={"kind": "image", "error": str(e)},
+        )
+        return
+
+    sb = get_supabase_admin()
+    queue = get_queue()
+
+    async with queue.acquire(brief_id):
+        for entry in concepts:
+            concept = entry["concept"]
+            prompt = entry["prompt"]
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_QUEUED,
+                stage="ideation",
+                payload={"kind": "image", "concept": concept, "ratio": "1x1"},
+            )
+            running_id = emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_RUNNING,
+                stage="ideation",
+                payload={"kind": "image", "concept": concept, "ratio": "1x1"},
+            )
+            try:
+                result = await kie_client.generate_image_full(
+                    prompt, "1x1", resolution="1K"
+                )
+                storage_path = build_creative_path(
+                    brief_id, concept, "1x1", "v0.ideation"
+                )
+                sb.storage.from_(BUCKET).upload(
+                    path=storage_path,
+                    file=result.image_bytes,
+                    file_options={
+                        "content-type": "image/png",
+                        "x-upsert": "true",
+                    },
+                )
+                insert = await record_creative_stage(
+                    brief_id=brief_id,
+                    file_path_supabase=storage_path,
+                    concept=concept,
+                    offer_text=None,
+                    ratio="1x1",
+                    version="v0.ideation",
+                    prompt_used={
+                        "model": "kie/nano-banana-2",
+                        "prompt": prompt,
+                        "ratio": "1x1",
+                        "resolution": "1K",
+                        "task_id": result.task_id,
+                        "source_url": result.source_url,
+                        "stage": "ideation",
+                    },
+                    iteration_kind="generate",
+                    iteration_content={
+                        "prompt": prompt,
+                        "task_id": result.task_id,
+                        "source_url": result.source_url,
+                        "pipeline_id": pipeline_id,
+                        "stage": "ideation",
+                    },
+                    author="ekko",
+                )
+                done_id = emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_DONE,
+                    stage="ideation",
+                    payload={
+                        "kind": "image",
+                        "concept": concept,
+                        "ratio": "1x1",
+                        "creative_id": insert.creative_id,
+                        "file_path_supabase": storage_path,
+                    },
+                )
+                # 1K Kie.ai render cost — approximate; the aggregator
+                # uses these as estimates. The real per-tenant price
+                # plumbing lands in PF-F.
+                emit_cost(
+                    pipeline_id=pipeline_id,
+                    api="kie.ai",
+                    units=1,
+                    subtotal=0.02,
+                    task_event_id=done_id or running_id,
+                    stage="ideation",
+                    extra={"creative_id": insert.creative_id, "resolution": "1K"},
+                )
+            except (KieError, RuntimeError, Exception) as e:  # noqa: BLE001
+                log.warning(
+                    "pipeline_ideation_image_failed",
+                    pipeline_id=pipeline_id,
+                    brief_id=brief_id,
+                    concept=concept,
+                    error=str(e),
+                )
+                emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_ERROR,
+                    stage="ideation",
+                    payload={
+                        "kind": "image",
+                        "concept": concept,
+                        "ratio": "1x1",
+                        "error": str(e),
+                    },
+                )
+
+    log.info(
+        "pipeline_ideation_image_done",
+        pipeline_id=pipeline_id,
+        brief_id=brief_id,
+        concepts=len(concepts),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Video track ideation producer
+# ---------------------------------------------------------------------------
+
+
+def _fallback_video_drafts(
+    brief: dict[str, Any], *, count: int
+) -> list[dict[str, Any]]:
+    """Synthesize a deterministic set of video script drafts.
+
+    Same logic as the image-side fallback: avoid hard dependency on
+    Claude Code being installed/authenticated so this stage is cheap
+    and testable. The shape mirrors the contract the V2 script route
+    expects (hook + segments + outro + total_duration_s) so downstream
+    stages can read these drafts without translation.
+    """
+    payload = brief.get("payload") or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    angles_raw = payload.get("angles") or []
+    angles = [str(a) for a in angles_raw if isinstance(a, str)]
+    if not angles:
+        angles = ["before-and-after", "trust", "urgency"]
+    hook_style = brief.get("hook_style") or "question"
+    duration = int(brief.get("target_duration_s") or 30)
+
+    seeds = (angles * ((count // max(1, len(angles))) + 1))[:count]
+    drafts: list[dict[str, Any]] = []
+    for i, seed in enumerate(seeds):
+        segments = [
+            {
+                "idx": 0,
+                "topic": seed,
+                "duration_s": max(5, duration // 3),
+                "voiceover_text": (
+                    f"Draft #{i + 1}: {seed} hook delivered in {hook_style} style."
+                ),
+                "voiceover_direction": "natural, confident",
+                "broll_query": f"{seed} marketing b-roll",
+                "broll_intent": f"establish {seed}",
+                "broll_theme": seed,
+                "captions_emphasis": [seed],
+            }
+        ]
+        drafts.append(
+            {
+                "concept": f"video-ideation-{i + 1}-{seed}",
+                "script_outline": {
+                    "hook": f"What if {seed}?",
+                    "segments": segments,
+                    "outro": "Call us today.",
+                    "total_duration_s": duration,
+                },
+                "broll_plan": {
+                    "segments": [
+                        {
+                            "idx": s["idx"],
+                            "theme": s["broll_theme"],
+                            "query": s["broll_query"],
+                        }
+                        for s in segments
+                    ]
+                },
+            }
+        )
+    return drafts
+
+
+async def _produce_ideation_video_track(
+    *,
+    pipeline_id: str,
+    brief_id: str,
+) -> None:
+    """Produce N video script drafts. NO voiceover / compose / caption.
+
+    Each draft writes a ``video_creatives`` row via
+    ``record_video_stage(stage='script')`` so the row carries a
+    ``script_path`` artifact + status='script_ready'. The b-roll-plan
+    note rides on the iteration content. After each draft we emit
+    ``task_done`` on the pipeline_events timeline.
+    """
+    brief = _fetch_video_brief(brief_id)
+    if brief is None:
+        log.warning(
+            "pipeline_ideation_video_brief_missing",
+            pipeline_id=pipeline_id,
+            brief_id=brief_id,
+        )
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage="ideation",
+            payload={"kind": "video", "error": f"brief not found: {brief_id}"},
+        )
+        return
+
+    drafts = _fallback_video_drafts(brief, count=IDEATION_VIDEO_DRAFT_COUNT)
+    sb = get_supabase_admin()
+    queue = get_queue()
+
+    async with queue.acquire(brief_id):
+        for draft in drafts:
+            concept = str(draft["concept"])
+            script = draft["script_outline"]
+            broll_plan = draft["broll_plan"]
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_QUEUED,
+                stage="ideation",
+                payload={"kind": "video", "concept": concept},
+            )
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_RUNNING,
+                stage="ideation",
+                payload={"kind": "video", "concept": concept},
+            )
+            try:
+                # Persist the draft script as a Storage artifact so the
+                # Review UI can fetch and display it the same way the
+                # post-Generation compose path does.
+                storage_path = (
+                    f"{brief_id}/ideation-script-{uuid.uuid4().hex[:8]}.json"
+                )
+                body_json = json.dumps(
+                    {"script_outline": script, "broll_plan": broll_plan},
+                    indent=2,
+                ).encode("utf-8")
+                sb.storage.from_(BUCKET).upload(
+                    path=storage_path,
+                    file=body_json,
+                    file_options={
+                        "content-type": "application/json",
+                        "x-upsert": "true",
+                    },
+                )
+                result = await record_video_stage(
+                    brief_id=brief_id,
+                    stage="script",
+                    paths={"script_path": storage_path},
+                    iteration_kind="generate_script",
+                    iteration_content={
+                        "pipeline_id": pipeline_id,
+                        "stage": "ideation",
+                        "concept": concept,
+                        "script_outline": script,
+                        "broll_plan": broll_plan,
+                    },
+                )
+                emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_DONE,
+                    stage="ideation",
+                    payload={
+                        "kind": "video",
+                        "concept": concept,
+                        "creative_id": result.creative_id,
+                        "script_path": storage_path,
+                    },
+                )
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "pipeline_ideation_video_failed",
+                    pipeline_id=pipeline_id,
+                    brief_id=brief_id,
+                    concept=concept,
+                    error=str(e),
+                )
+                emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_ERROR,
+                    stage="ideation",
+                    payload={
+                        "kind": "video",
+                        "concept": concept,
+                        "error": str(e),
+                    },
+                )
+
+    log.info(
+        "pipeline_ideation_video_done",
+        pipeline_id=pipeline_id,
+        brief_id=brief_id,
+        drafts=len(drafts),
+    )
+
+
+
+__all__ = [
+    "router",
+    "IDEATION_IMAGE_CONCEPT_COUNT",
+    "IDEATION_VIDEO_DRAFT_COUNT",
+    "ConfigDraftInput",
+    "IdeationInput",
+    "IdeationAccepted",
+]
