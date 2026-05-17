@@ -288,7 +288,7 @@ export function BriefForm({ initialClientId }: { initialClientId?: string } = {}
         {errors.market ? <p className="text-xs text-destructive">{errors.market.message}</p> : null}
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid gap-4 sm:grid-cols-2">
         <div className="grid gap-2">
           <Label htmlFor="budget">Total budget (USD)</Label>
           <Input
@@ -323,7 +323,7 @@ export function BriefForm({ initialClientId }: { initialClientId?: string } = {}
 
       <fieldset className="rounded-md border p-4">
         <legend className="px-2 text-sm font-medium">Targeting (optional)</legend>
-        <div className="grid grid-cols-2 gap-4">
+        <div className="grid gap-4 sm:grid-cols-2">
           <div className="grid gap-2">
             <Label htmlFor="radius_km">Radius (km)</Label>
             <Input id="radius_km" type="number" min={1} {...register("radius_km")} />

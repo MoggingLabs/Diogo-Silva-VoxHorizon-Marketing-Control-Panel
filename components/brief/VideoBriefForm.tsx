@@ -206,7 +206,7 @@ export function VideoBriefForm({ clients, defaults }: VideoBriefFormProps) {
           <ul className="flex flex-col gap-3">
             {fields.map((field, idx) => (
               <li key={field.id} className="rounded-md border border-input bg-background p-3">
-                <div className="grid gap-3 md:grid-cols-[2fr_1fr_2fr_auto]">
+                <div className="grid gap-3 sm:grid-cols-2 md:grid-cols-[2fr_1fr_2fr_auto]">
                   <div className="flex flex-col gap-1">
                     <Label htmlFor={`segments.${idx}.topic`} className="text-xs">
                       Topic
@@ -277,7 +277,7 @@ export function VideoBriefForm({ clients, defaults }: VideoBriefFormProps) {
       </section>
 
       {/* Duration + style ------------------------------------------------ */}
-      <section className="grid gap-4 md:grid-cols-3">
+      <section className="grid gap-4 sm:grid-cols-2 md:grid-cols-3">
         <div className="flex flex-col gap-2">
           <Label htmlFor="target_duration_s">Target duration (s)</Label>
           <Input

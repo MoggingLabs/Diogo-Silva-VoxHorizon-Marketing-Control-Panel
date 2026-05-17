@@ -130,7 +130,7 @@ export default async function CreativesByBriefPage({ params, searchParams }: Pag
   const orderedCountKeys: CreativeStatusT[] = ["draft", "approved", "rejected", "live", "killed"];
 
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 py-10">
+    <main className="container mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
       <header className="space-y-3">
         <p className="text-sm text-muted-foreground">
           <Link href="/briefs" className="underline-offset-4 hover:underline">
@@ -139,14 +139,14 @@ export default async function CreativesByBriefPage({ params, searchParams }: Pag
           /{" "}
           <Link
             href={`/briefs/${brief.id}`}
-            className="font-mono text-xs underline-offset-4 hover:underline"
+            className="break-all font-mono text-xs underline-offset-4 hover:underline"
           >
             {brief.brief_id_human}
           </Link>{" "}
           / <span>Creatives</span>
         </p>
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight">Creative variants</h1>
+          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Creative variants</h1>
           <span
             className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${briefPillClass}`}
           >

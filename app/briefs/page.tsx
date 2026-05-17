@@ -68,10 +68,10 @@ export default async function BriefsListPage() {
   }
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-6 py-12">
-      <header className="flex items-center justify-between">
-        <h1 className="text-3xl font-semibold tracking-tight">Briefs</h1>
-        <Button asChild>
+    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Briefs</h1>
+        <Button asChild className="self-start sm:self-auto">
           <Link href="/briefs/new">New brief</Link>
         </Button>
       </header>
@@ -100,8 +100,8 @@ export default async function BriefsListPage() {
                   <h2 className="text-lg font-semibold">{STATUS_LABEL[status]}</h2>
                   <span className="text-xs text-muted-foreground">{rows.length}</span>
                 </div>
-                <div className="overflow-hidden rounded-md border">
-                  <table className="w-full text-sm">
+                <div className="overflow-x-auto rounded-md border">
+                  <table className="w-full min-w-[640px] text-sm">
                     <thead className="bg-muted/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
                       <tr>
                         <th className="px-3 py-2 font-medium">Human ID</th>

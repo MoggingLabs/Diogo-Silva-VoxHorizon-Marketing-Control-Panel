@@ -25,15 +25,18 @@ export default async function NewVideoBriefPage() {
     .map(({ id, name, slug }) => ({ id, name, slug }));
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-6 py-12">
-      <header className="flex items-center justify-between">
+    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-3xl font-semibold tracking-tight">New video brief</h1>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">New video brief</h1>
           <p className="text-sm text-muted-foreground">
             Draft a short-form video brief: hook, segment breakdown, voice, and style.
           </p>
         </div>
-        <Link href="/briefs/video" className="text-sm text-muted-foreground hover:text-foreground">
+        <Link
+          href="/briefs/video"
+          className="text-sm text-muted-foreground hover:text-foreground sm:self-start"
+        >
           ← Back to video briefs
         </Link>
       </header>
