@@ -3,8 +3,9 @@
 # VoxHorizon worker — multi-stage container build.
 #
 # Stage 1 (deps-builder) — produce a self-contained virtualenv from
-# pyproject.toml + uv.lock using uv. Builder stays on python:3.11-slim
-# so the lockfile resolves against the runtime's interpreter major.minor.
+# pyproject.toml + uv.lock using uv. Builder matches the runtime's
+# Python minor (3.12, matching Playwright Noble) so the venv's
+# bin/python3 resolves under the runtime base.
 #
 # Stage 2 (runtime) — start from the Playwright Python base which
 # already has Chromium + every system library it needs preinstalled.
@@ -17,7 +18,9 @@
 # -----------------------------------------------------------------------------
 # Stage 1 — deps-builder
 # -----------------------------------------------------------------------------
-FROM python:3.11-slim AS deps-builder
+# Python 3.12 to match Playwright Noble runtime — a 3.11 venv would
+# leave /opt/venv/bin/python3 as a broken symlink in stage 2.
+FROM python:3.12-slim AS deps-builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
