@@ -331,6 +331,48 @@ This is **not** v1 scope. v1's single-operator threat model is met by `chmod 600
 
 ---
 
+## GitHub Actions deploy secrets
+
+The `deploy-worker` workflow (`.github/workflows/deploy-worker.yml`, lands in VPS-4) builds the worker image on each push to `main`, pushes to GHCR, then SSHes into the VPS as the `deploy` user to roll the compose stack. The workflow needs three repo-level secrets to do its job. Configure them at **Settings → Secrets and variables → Actions → New repository secret**.
+
+| Secret        | Purpose                                                                                                                 | How to populate                                                                                                                                                                         |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VPS_HOST`    | The DNS name or IP the workflow `ssh`s into. Not secret per se, but treat it as one so it's not in git.                 | Production hostname (e.g. `worker.voxhorizon.app`) or the bare VPS IP if DNS isn't wired yet. Match whatever resolves to the box.                                                       |
+| `VPS_USER`    | The unprivileged Linux user the deploy script runs as. Must be in the `docker` group and own `/opt/voxhorizon`.         | Set to `deploy`. Provisioned by `infra/deploy/setup-deploy-user.sh` on a fresh VPS.                                                                                                     |
+| `VPS_SSH_KEY` | The **private** half of a deploy-only SSH keypair. Used to authenticate the GitHub Actions runner into `deploy@<host>`. | Generate fresh: `ssh-keygen -t ed25519 -f ~/.ssh/voxhorizon_deploy -C "github-actions-deploy"`. Paste the **contents** of `~/.ssh/voxhorizon_deploy` (private key, with header/footer). |
+
+### Key handling — non-negotiables
+
+- **Fresh ed25519 keypair, deploy-only.** Do **not** reuse Pedro's admin key, an existing personal key, or a Mac-host key. The deploy key is a single-purpose credential whose blast radius is "rollout the worker on this one VPS." Compromise of this key must not give shell access anywhere else.
+- **No passphrase.** GitHub Actions can't type one. The key's protection is its scope (deploy-only) + the `from=` and `command=` restrictions on the authorized_keys line.
+- **Private key in GHA secret only.** Never commit it. Never paste it into Vercel env, the vault, or 1Password unless you also accept the rotation policy: rotating the GHA secret means rotating every other copy.
+- **Public key on the VPS.** Append `~/.ssh/voxhorizon_deploy.pub` to `~deploy/.ssh/authorized_keys` on the VPS. Lock the line down:
+
+  ```
+  from="140.82.112.0/20,143.55.64.0/20,...",no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... github-actions-deploy
+  ```
+
+  The `from=` CIDR list is GitHub's published Actions IP ranges (`https://api.github.com/meta` → `actions[]`). Refreshing this list quarterly is part of the rotation checklist below.
+
+  If pinning IPs is non-trivial at provisioning time (e.g. the list is large or the operator wants a faster bootstrap), it's acceptable to ship the first cut with just the option flags (`no-port-forwarding,no-agent-forwarding,no-X11-forwarding`) and follow up with the `from=` restriction once the workflow is proven end-to-end. **Track that as an explicit follow-up** — leaving an unrestricted deploy key in place indefinitely is not the target state.
+
+- **`command=` restriction (optional, follow-up).** A tighter posture pins the key to a single forced command (`command="/opt/voxhorizon/deploy.sh"`) so even a compromised private key can only run the rollout script, not an arbitrary shell. The current workflow uses a multi-line inline `script:` block, so a `command=` restriction would require rewriting the workflow to either (a) call a deploy script the VPS already has, or (b) accept its arguments through `$SSH_ORIGINAL_COMMAND`. Worth doing post-v1; not blocking VPS-4.
+
+### Rotation
+
+| Trigger               | Action                                                                                                                                                                                               |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Quarterly review      | Regenerate the keypair (`ssh-keygen ...`); replace the line in `~deploy/.ssh/authorized_keys`; update `VPS_SSH_KEY` in GH repo secrets; trigger one `workflow_dispatch` run to confirm.              |
+| Suspected leak        | Immediately remove the line from `authorized_keys` on the VPS; regenerate; update GH secret; redeploy. The blast radius is scoped to the deploy user and the worker stack, but treat it as serious.  |
+| GitHub IP range drift | If the workflow starts failing with `Permission denied` from a previously-working setup, refresh the `from=` CIDR list against `https://api.github.com/meta`. Track this on the quarterly checklist. |
+
+### Not a secret, but important
+
+- **GHCR access** is via `GITHUB_TOKEN` (auto-provided to the workflow run). No additional PAT needed for `packages:write` against the same repo's GHCR namespace. The token is short-lived and scoped to the run.
+- The VPS-side `docker login ghcr.io` inside the workflow uses the same `GITHUB_TOKEN` over stdin (`--password-stdin`); the credential exists on disk under `~deploy/.docker/config.json` between runs (chmod 600).
+
+---
+
 ## External monitoring accounts (VPS-6)
 
 External uptime monitors live alongside the secrets they alert on. None of them require API keys for v1 — they're all free-tier and configured via the web UI — so there's nothing to put in the vault except the dashboard URLs.
