@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
+import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
 import { StagePlaceholder } from "@/components/pipeline/StagePlaceholder";
 import { getPipeline } from "@/lib/pipeline/client";
 import {
@@ -55,14 +56,31 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   }
 
   let clientName: string | null = null;
+  let clients: {
+    id: string;
+    name: string;
+    slug: string;
+    service_type: "roofing" | "remodeling";
+  }[] = [];
+  const supabase = await createClient();
   if (pipeline.client_id) {
-    const supabase = await createClient();
     const { data } = await supabase
       .from("clients")
       .select("name")
       .eq("id", pipeline.client_id)
       .maybeSingle();
     clientName = data?.name ?? null;
+  }
+  // The StageConfiguration component needs a client list to populate the
+  // picker. Server-fetching avoids the form's first paint flicker and keeps
+  // the auth path consistent with the rest of the app.
+  if (pipeline.status === "configuration") {
+    const { data } = await supabase
+      .from("clients")
+      .select("id, name, slug, service_type")
+      .eq("status", "active")
+      .order("name");
+    clients = (data ?? []) as typeof clients;
   }
 
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
@@ -114,15 +132,19 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         </section>
       )}
 
-      <StagePlaceholder
-        stageLabel={placeholder.label}
-        upcoming={placeholder.wave}
-        subtitle={
-          pipeline.status === "cancelled"
-            ? "Cancelled pipelines do not advance further."
-            : undefined
-        }
-      />
+      {pipeline.status === "configuration" ? (
+        <StageConfiguration pipeline={pipeline} clients={clients} />
+      ) : (
+        <StagePlaceholder
+          stageLabel={placeholder.label}
+          upcoming={placeholder.wave}
+          subtitle={
+            pipeline.status === "cancelled"
+              ? "Cancelled pipelines do not advance further."
+              : undefined
+          }
+        />
+      )}
     </main>
   );
 }

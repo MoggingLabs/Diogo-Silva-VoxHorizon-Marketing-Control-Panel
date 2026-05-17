@@ -10,7 +10,19 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import audit, broll, chat, chat_stream, creative, health, launch, ping, upload, video
+from .routes import (
+    audit,
+    broll,
+    chat,
+    chat_stream,
+    creative,
+    health,
+    launch,
+    pipeline,
+    ping,
+    upload,
+    video,
+)
 from .services.queue import get_queue
 
 
@@ -95,6 +107,12 @@ def create_app() -> FastAPI:
     # its own router so the chat.py placeholder for non-streaming agent
     # work can evolve independently.
     app.include_router(chat_stream.router, tags=["chat-stream"])
+
+    # === wave 10 pipeline routes ===
+    # /work/pipeline/config-draft streams Ekko's brief-strategist
+    # interview for the Configuration stage (PF-B). Future waves add
+    # /work/pipeline/ideation and /work/pipeline/generation.
+    app.include_router(pipeline.router, tags=["pipeline"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.
