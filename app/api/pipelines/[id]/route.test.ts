@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string): NextRequest {
 
 describe("GET /api/pipelines/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("200 with embedded resources", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -53,7 +54,7 @@ describe("GET /api/pipelines/:id", () => {
   });
 
   it("200 with defaulted nulls when embedded values absent", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -72,7 +73,7 @@ describe("GET /api/pipelines/:id", () => {
   });
 
   it("500 on error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await GET(req(`http://localhost/api/pipelines/${id}`), { params });
@@ -80,7 +81,7 @@ describe("GET /api/pipelines/:id", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/pipelines/${id}`), { params });

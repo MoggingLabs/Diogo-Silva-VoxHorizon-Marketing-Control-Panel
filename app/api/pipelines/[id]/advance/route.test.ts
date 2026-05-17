@@ -8,9 +8,10 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -64,7 +65,7 @@ afterEach(() => {
 
 describe("POST /api/pipelines/:id/advance", () => {
   it("500 read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -77,7 +78,7 @@ describe("POST /api/pipelines/:id/advance", () => {
   });
 
   it("404 not found", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -90,7 +91,7 @@ describe("POST /api/pipelines/:id/advance", () => {
   });
 
   it("422 for unsupported status (review)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: { id, status: "review" }, error: null } } },
     });
     const res = await POST(
@@ -105,7 +106,7 @@ describe("POST /api/pipelines/:id/advance", () => {
   describe("configuration → ideation", () => {
     it("happy path image-only (200)", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -140,7 +141,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("happy path video-only (200)", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -172,7 +173,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("happy path with format=both", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -211,7 +212,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 when config_draft missing required payloads", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -235,7 +236,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 on invalid image payload zod failure", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -261,7 +262,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 on invalid video payload zod failure", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -286,7 +287,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 when client_id missing", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -311,7 +312,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("500 when client lookup errors", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -337,7 +338,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 when client not found", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -364,7 +365,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("500 when image RPC fails", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -393,7 +394,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("500 when image brief insert fails", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -423,7 +424,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("500 when video RPC fails (compensating image delete)", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -460,7 +461,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("500 when video brief insert fails (compensating)", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -495,7 +496,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("500 when pipeline update fails (compensating cleans both briefs)", async () => {
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -531,7 +532,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     it("warns when pipeline_events insert fails (still 200)", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -569,7 +570,7 @@ describe("POST /api/pipelines/:id/advance", () => {
       process.env.WORKER_SHARED_SECRET = "secret";
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("oops", { status: 500 }));
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -608,7 +609,7 @@ describe("POST /api/pipelines/:id/advance", () => {
       process.env.WORKER_SHARED_SECRET = "secret";
       vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("nope", { status: 404 }));
       currentSupabase = withRpc(
-        mockSupabaseClient({
+        mockClient({
           pipelines: {
             select: {
               single: {
@@ -641,7 +642,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
   describe("ideation → review", () => {
     it("happy path image (200)", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -667,7 +668,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("happy path both with arrays of strings (200)", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -693,7 +694,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 missing image picks", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -717,7 +718,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("422 with malformed picks (array)", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -741,7 +742,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("filters non-string picks in image array", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -767,7 +768,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
 
     it("500 when update fails", async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {
@@ -793,7 +794,7 @@ describe("POST /api/pipelines/:id/advance", () => {
 
     it("warns but returns 200 when event insert fails", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipelines: {
           select: {
             single: {

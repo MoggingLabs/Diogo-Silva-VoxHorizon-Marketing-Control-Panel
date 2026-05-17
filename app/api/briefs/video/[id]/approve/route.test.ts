@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/briefs/video/:id/approve", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("approves posted brief (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: { id, status: "approved" }, error: null } },
@@ -68,7 +69,7 @@ describe("POST /api/briefs/video/:id/approve", () => {
   });
 
   it("500 on read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -82,7 +83,7 @@ describe("POST /api/briefs/video/:id/approve", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -96,7 +97,7 @@ describe("POST /api/briefs/video/:id/approve", () => {
   });
 
   it("409 when not posted", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: { id, status: "draft" }, error: null } } },
     });
     const res = await POST(
@@ -110,7 +111,7 @@ describe("POST /api/briefs/video/:id/approve", () => {
   });
 
   it("500 on update fail", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: null, error: { message: "no" } } },
@@ -128,7 +129,7 @@ describe("POST /api/briefs/video/:id/approve", () => {
 
   it("logs but returns 200 when event insert fails", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: { id, status: "approved" }, error: null } },

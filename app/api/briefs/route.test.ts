@@ -10,9 +10,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -53,11 +54,11 @@ const validBody = {
 
 describe("GET /api/briefs", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("lists briefs (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: {
           data: [
@@ -82,7 +83,7 @@ describe("GET /api/briefs", () => {
   });
 
   it("applies status + client_id filters", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { data: [], error: null } },
     });
 
@@ -111,7 +112,7 @@ describe("GET /api/briefs", () => {
   });
 
   it("returns 500 when supabase errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { data: null, error: { message: "boom" } } },
     });
     const res = await GET(makeRequest("http://localhost/api/briefs"));
@@ -123,12 +124,12 @@ describe("GET /api/briefs", () => {
 
 describe("POST /api/briefs", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("creates a draft brief (201)", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },
@@ -165,7 +166,7 @@ describe("POST /api/briefs", () => {
 
   it("posts immediately when ?post=1", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },
@@ -223,7 +224,7 @@ describe("POST /api/briefs", () => {
   });
 
   it("500 when clients lookup errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       clients: {
         select: { single: { data: null, error: { message: "db down" } } },
       },
@@ -241,7 +242,7 @@ describe("POST /api/briefs", () => {
   });
 
   it("404 when client doesn't exist", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       clients: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -258,7 +259,7 @@ describe("POST /api/briefs", () => {
 
   it("500 when RPC fails", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },
@@ -279,7 +280,7 @@ describe("POST /api/briefs", () => {
 
   it("500 when RPC returns null", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },
@@ -300,7 +301,7 @@ describe("POST /api/briefs", () => {
 
   it("500 when briefs insert fails", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },
@@ -327,7 +328,7 @@ describe("POST /api/briefs", () => {
   it("still returns 201 when event insert fails (warns)", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { slug: "acme" }, error: null } },
         },

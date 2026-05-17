@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -22,7 +23,7 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 }
 
 beforeEach(() => {
-  currentSupabase = mockSupabaseClient();
+  currentSupabase = mockClient();
   delete process.env.WORKER_URL;
   delete process.env.WORKER_SHARED_SECRET;
 });
@@ -33,7 +34,7 @@ afterEach(() => {
 
 describe("POST /api/pipelines/:id/review/decision", () => {
   it("approves a review-stage pipeline (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -62,7 +63,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("approved_with_changes (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -91,7 +92,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("rejects (cancels) the pipeline (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -139,7 +140,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("500 read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -153,7 +154,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -167,7 +168,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("409 wrong state", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: { id, status: "configuration" }, error: null } } },
     });
     const res = await POST(
@@ -181,7 +182,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("500 when reject update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -203,7 +204,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("500 when approve update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -232,7 +233,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
 
   it("warns when reject event insert fails (still 200)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -258,7 +259,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
 
   it("warns when approve event insert fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -292,7 +293,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     process.env.WORKER_URL = "http://worker.local";
     process.env.WORKER_SHARED_SECRET = "secret";
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 200 }));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -325,7 +326,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     process.env.WORKER_URL = "http://worker.local";
     process.env.WORKER_SHARED_SECRET = "secret";
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("oops", { status: 500 }));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -360,7 +361,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     process.env.WORKER_URL = "http://worker.local";
     process.env.WORKER_SHARED_SECRET = "secret";
     vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 404 }));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -389,7 +390,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
   });
 
   it("treats malformed picks (array) as zero counts", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {

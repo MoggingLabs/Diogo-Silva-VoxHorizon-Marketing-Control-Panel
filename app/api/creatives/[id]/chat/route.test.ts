@@ -9,10 +9,11 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import { sseResponse, stubFetchOnce } from "@/tests/unit/helpers/worker-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 const buildChatContextMock = vi.fn(async () => ({
   brief: { id: "b1", status: "approved", payload: {} },
   creative: {
@@ -32,7 +33,8 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
 vi.mock("@/lib/chat-context", () => ({
-  buildChatContext: (...args: unknown[]) => buildChatContextMock(...args),
+  buildChatContext: (...args: Parameters<typeof buildChatContextMock>) =>
+    buildChatContextMock(...args),
 }));
 vi.mock("@/lib/env", () => ({
   cleanEnv: (name: string) => {
@@ -55,7 +57,7 @@ const validBody = { messages: [{ role: "user", content: "hi" }] };
 
 describe("POST /api/creatives/:id/chat", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
     buildChatContextMock.mockClear();
   });
 
@@ -79,7 +81,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 500 when creative lookup errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: null, error: { message: "down" } } } },
     });
     const res = await POST(
@@ -93,7 +95,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 404 when creative missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -107,7 +109,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 500 on chat-context build failure", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: { id, brief_id: "b1" }, error: null } } },
     });
     buildChatContextMock.mockRejectedValueOnce(new Error("brief missing"));
@@ -124,7 +126,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 502 when worker fetch throws", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: { id, brief_id: "b1" }, error: null } } },
     });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {
@@ -144,7 +146,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 502 when worker returns non-2xx", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: { id, brief_id: "b1" }, error: null } } },
     });
     const fetchSpy = stubFetchOnce(new Response("oops", { status: 500 }));
@@ -160,7 +162,7 @@ describe("POST /api/creatives/:id/chat", () => {
   });
 
   it("returns 200 with SSE pass-through on happy path", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       creatives: { select: { single: { data: { id, brief_id: "b1" }, error: null } } },
     });
     const fetchSpy = stubFetchOnce(sseResponse([{ type: "message_stop" }]));

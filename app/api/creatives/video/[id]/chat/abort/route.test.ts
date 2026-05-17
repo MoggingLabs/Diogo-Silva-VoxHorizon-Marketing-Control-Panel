@@ -4,10 +4,11 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import { jsonResponse, stubFetchOnce } from "@/tests/unit/helpers/worker-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -31,11 +32,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/creatives/video/:id/chat/abort", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("200 happy path", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: { id }, error: null } } },
     });
     const fetchSpy = stubFetchOnce(jsonResponse({ ok: true }));
@@ -48,7 +49,7 @@ describe("POST /api/creatives/video/:id/chat/abort", () => {
   });
 
   it("500 on fetch error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -59,7 +60,7 @@ describe("POST /api/creatives/video/:id/chat/abort", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -70,7 +71,7 @@ describe("POST /api/creatives/video/:id/chat/abort", () => {
   });
 
   it("502 worker non-2xx", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: { id }, error: null } } },
     });
     const fetchSpy = stubFetchOnce(new Response("oops", { status: 500 }));
@@ -83,7 +84,7 @@ describe("POST /api/creatives/video/:id/chat/abort", () => {
   });
 
   it("502 worker fetch throws", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: { id }, error: null } } },
     });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () => {

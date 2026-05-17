@@ -9,9 +9,10 @@
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 const callWorkerMock = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -44,7 +45,7 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 }
 
 beforeEach(() => {
-  currentSupabase = mockSupabaseClient();
+  currentSupabase = mockClient();
   callWorkerMock.mockReset();
 });
 afterEach(() => {
@@ -53,7 +54,7 @@ afterEach(() => {
 
 describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => {
   it("500 on read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -64,7 +65,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("404 missing task", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -75,7 +76,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 when source kind isn't task_error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: { data: { id: taskId, kind: "task_running", stage: "generation" }, error: null },
@@ -90,7 +91,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 when source stage isn't generation", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: { data: { id: taskId, kind: "task_error", stage: "ideation" }, error: null },
@@ -105,7 +106,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 unknown task kind", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -128,7 +129,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 image task missing parent_creative_id", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -151,7 +152,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 image task unsupported ratio", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -174,7 +175,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 video task missing creative_id", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -197,7 +198,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("422 video task missing substage", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -220,7 +221,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 
   it("500 when queued insert fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -246,7 +247,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
 
 describe("POST retry — image happy path + worker behaviour", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -323,7 +324,7 @@ describe("POST retry — image happy path + worker behaviour", () => {
 
   it("handles parent creative read error in background", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -351,7 +352,7 @@ describe("POST retry — image happy path + worker behaviour", () => {
 
   it("handles missing parent creative in background", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -378,7 +379,7 @@ describe("POST retry — image happy path + worker behaviour", () => {
   });
 
   it("uses fallback prompt when prompt_used has no prompt", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -430,7 +431,7 @@ describe("POST retry — image happy path + worker behaviour", () => {
 describe("POST retry — video dispatchers", () => {
   for (const substage of ["voiceover", "broll_search", "compose", "caption"]) {
     it(`dispatches video substage=${substage} (202)`, async () => {
-      currentSupabase = mockSupabaseClient({
+      currentSupabase = mockClient({
         pipeline_events: {
           select: {
             single: {
@@ -464,7 +465,7 @@ describe("POST retry — video dispatchers", () => {
   }
 
   it("dispatches video substage=broll_pick with resolved array", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -490,7 +491,7 @@ describe("POST retry — video dispatchers", () => {
   });
 
   it("dispatches video substage=script — reads brief_id from creative", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -518,7 +519,7 @@ describe("POST retry — video dispatchers", () => {
 
   it("handles video script lookup error in background", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -546,7 +547,7 @@ describe("POST retry — video dispatchers", () => {
 
   it("unknown substage throws (background, logged)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -576,7 +577,7 @@ describe("POST retry — video dispatchers", () => {
     const { WorkerError } = (await import("@/lib/worker")) as unknown as {
       WorkerError: new (msg: string, status?: number) => Error;
     };
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {
@@ -604,7 +605,7 @@ describe("POST retry — video dispatchers", () => {
 
   it("rethrows non-WorkerError from video worker call", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipeline_events: {
         select: {
           single: {

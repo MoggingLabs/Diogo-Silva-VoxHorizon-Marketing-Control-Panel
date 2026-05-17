@@ -15,9 +15,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -34,11 +35,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("GET /api/briefs/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("returns the brief + events (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
       },
@@ -57,7 +58,7 @@ describe("GET /api/briefs/:id", () => {
   });
 
   it("returns 500 when brief select errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: { message: "boom" } } } },
     });
     const res = await GET(req(`http://localhost/api/briefs/${briefId}`), {
@@ -69,7 +70,7 @@ describe("GET /api/briefs/:id", () => {
   });
 
   it("returns 404 when brief is missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/briefs/${briefId}`), {
@@ -79,7 +80,7 @@ describe("GET /api/briefs/:id", () => {
   });
 
   it("returns 500 when events select errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
       },
@@ -96,11 +97,11 @@ describe("GET /api/briefs/:id", () => {
 
 describe("PATCH /api/briefs/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("updates payload only and emits a payload-updated event (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
         update: {
@@ -125,7 +126,7 @@ describe("PATCH /api/briefs/:id", () => {
   });
 
   it("transitions status draft → posted and stamps posted_at (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
         update: { single: { data: { id: briefId, status: "posted" }, error: null } },
@@ -144,7 +145,7 @@ describe("PATCH /api/briefs/:id", () => {
   });
 
   it("returns 409 on a disallowed transition", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "approved" }, error: null } },
       },
@@ -187,7 +188,7 @@ describe("PATCH /api/briefs/:id", () => {
   });
 
   it("returns 500 when fetch fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: { message: "down" } } } },
     });
     const res = await PATCH(
@@ -201,7 +202,7 @@ describe("PATCH /api/briefs/:id", () => {
   });
 
   it("returns 404 when brief is missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await PATCH(
@@ -216,7 +217,7 @@ describe("PATCH /api/briefs/:id", () => {
 
   it("returns 400 when the merged update is empty (no transition + no payload)", async () => {
     // current.status === input.status so update stays empty.
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
       },
@@ -234,7 +235,7 @@ describe("PATCH /api/briefs/:id", () => {
   });
 
   it("returns 500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
         update: { single: { data: null, error: { message: "violated" } } },
@@ -254,7 +255,7 @@ describe("PATCH /api/briefs/:id", () => {
 
   it("warns but returns 200 when the event insert fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
         update: {

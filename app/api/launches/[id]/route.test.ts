@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string): NextRequest {
 
 describe("GET /api/launches/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("200 returns the launch", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { single: { data: { id, status: "posted" }, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/launches/${id}`), { params });
@@ -35,7 +36,7 @@ describe("GET /api/launches/:id", () => {
   });
 
   it("500 on error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await GET(req(`http://localhost/api/launches/${id}`), { params });
@@ -43,7 +44,7 @@ describe("GET /api/launches/:id", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { single: { data: null, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/launches/${id}`), { params });

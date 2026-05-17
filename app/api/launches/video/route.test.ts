@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 const callWorkerMock = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -69,13 +70,13 @@ const copyVariant = {
 
 describe("POST /api/launches/video", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
     callWorkerMock.mockReset();
   });
 
   it("happy path (201)", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: [copyVariant], error: null } },
@@ -111,7 +112,7 @@ describe("POST /api/launches/video", () => {
   });
 
   it("500 brief read err", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -124,7 +125,7 @@ describe("POST /api/launches/video", () => {
   });
 
   it("404 brief missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -137,7 +138,7 @@ describe("POST /api/launches/video", () => {
   });
 
   it("409 wrong brief state", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { single: { data: { ...baseBrief, status: "draft" }, error: null } },
       },
@@ -152,7 +153,7 @@ describe("POST /api/launches/video", () => {
   });
 
   it("500 video_creatives read err", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: null, error: { message: "x" } } },
     });
@@ -166,7 +167,7 @@ describe("POST /api/launches/video", () => {
   });
 
   it("500 copy_variants read err", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: null, error: { message: "x" } } },
@@ -182,7 +183,7 @@ describe("POST /api/launches/video", () => {
 
   it("422 preflight failure (no creatives)", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [], error: null } },
       video_launch_packages: {
@@ -201,7 +202,7 @@ describe("POST /api/launches/video", () => {
 
   it("422 missing captioned/drive/copy (preflight)", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: {
         select: {
@@ -236,7 +237,7 @@ describe("POST /api/launches/video", () => {
       WorkerError: new (msg: string, status?: number) => Error;
     };
     callWorkerMock.mockRejectedValueOnce(new WorkerError("offline", 503));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: [copyVariant], error: null } },
@@ -258,7 +259,7 @@ describe("POST /api/launches/video", () => {
   it("logs but degrades on plain Error worker reject", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     callWorkerMock.mockRejectedValueOnce(new Error("rando"));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: [copyVariant], error: null } },
@@ -279,7 +280,7 @@ describe("POST /api/launches/video", () => {
 
   it("422 when worker reports not-ok", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: false, issues: ["bad"] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: [copyVariant], error: null } },
@@ -299,7 +300,7 @@ describe("POST /api/launches/video", () => {
 
   it("500 when insert fails", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: baseBrief, error: null } } },
       video_creatives: { select: { data: [approvedVideoCreative], error: null } },
       video_copy_variants: { select: { data: [copyVariant], error: null } },
@@ -319,11 +320,11 @@ describe("POST /api/launches/video", () => {
 
 describe("GET /api/launches/video", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("200 list", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_launch_packages: { select: { data: [{ id: "vlp1" }], error: null } },
     });
     const res = await GET(req("http://localhost/api/launches/video"));
@@ -331,7 +332,7 @@ describe("GET /api/launches/video", () => {
   });
 
   it("200 with filters", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_launch_packages: { select: { data: [], error: null } },
     });
     const res = await GET(
@@ -341,7 +342,7 @@ describe("GET /api/launches/video", () => {
   });
 
   it("500 on error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_launch_packages: { select: { data: null, error: { message: "x" } } },
     });
     const res = await GET(req("http://localhost/api/launches/video"));

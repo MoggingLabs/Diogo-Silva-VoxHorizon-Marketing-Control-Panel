@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/creatives/video/:id/decision", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("approves a captioned video (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, status: "captioned" }, error: null } },
         update: { single: { data: { id, status: "approved" }, error: null } },
@@ -45,7 +46,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
   });
 
   it("rejects from draft (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, status: "draft" }, error: null } },
         update: { single: { data: { id, status: "rejected" }, error: null } },
@@ -85,7 +86,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
   });
 
   it("500 on fetch error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -99,7 +100,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -113,7 +114,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
   });
 
   it("409 when approving from non-captioned", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: { id, status: "draft" }, error: null } } },
     });
     const res = await POST(
@@ -127,7 +128,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
   });
 
   it("500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, status: "captioned" }, error: null } },
         update: { single: { data: null, error: { message: "nope" } } },
@@ -145,7 +146,7 @@ describe("POST /api/creatives/video/:id/decision", () => {
 
   it("warns but returns 200 when event insert fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, status: "captioned" }, error: null } },
         update: { single: { data: { id, status: "approved" }, error: null } },

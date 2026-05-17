@@ -14,10 +14,10 @@ vi.mock("@/lib/worker", () => {
   }
   return {
     worker: {
-      health: (...args: unknown[]) =>
+      health: () =>
         (
-          globalThis as unknown as { __workerHealthMock: ReturnType<typeof vi.fn> }
-        ).__workerHealthMock(...args),
+          globalThis as unknown as { __workerHealthMock: () => Promise<unknown> }
+        ).__workerHealthMock(),
     },
     WorkerError,
     callWorker: () => Promise.resolve({}),

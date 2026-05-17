@@ -9,9 +9,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => currentSupabase,
@@ -47,12 +48,12 @@ function withRpc(
 
 describe("POST /api/briefs/video", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("creates a draft video brief (201)", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: {
             single: { data: { id: "c1", slug: "acme" }, error: null },
@@ -84,7 +85,7 @@ describe("POST /api/briefs/video", () => {
 
   it("posts immediately when ?post=1", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { id: "c1", slug: "acme" }, error: null } },
         },
@@ -127,7 +128,7 @@ describe("POST /api/briefs/video", () => {
   });
 
   it("500 when clients read errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       clients: { select: { single: { data: null, error: { message: "bork" } } } },
     });
     const res = await POST(
@@ -142,7 +143,7 @@ describe("POST /api/briefs/video", () => {
   });
 
   it("404 when client missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       clients: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -156,7 +157,7 @@ describe("POST /api/briefs/video", () => {
 
   it("500 when RPC fails", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { id: "c1", slug: "acme" }, error: null } },
         },
@@ -176,7 +177,7 @@ describe("POST /api/briefs/video", () => {
 
   it("500 when video_briefs insert fails", async () => {
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { id: "c1", slug: "acme" }, error: null } },
         },
@@ -198,7 +199,7 @@ describe("POST /api/briefs/video", () => {
   it("returns 201 even when event insert fails (logs)", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     currentSupabase = withRpc(
-      mockSupabaseClient({
+      mockClient({
         clients: {
           select: { single: { data: { id: "c1", slug: "acme" }, error: null } },
         },
@@ -226,11 +227,11 @@ describe("POST /api/briefs/video", () => {
 
 describe("GET /api/briefs/video", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("returns list (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { data: [{ id: "v1" }], error: null },
       },
@@ -242,7 +243,7 @@ describe("GET /api/briefs/video", () => {
   });
 
   it("returns 500 on supabase error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { data: null, error: { message: "down" } } },
     });
     const res = await GET();

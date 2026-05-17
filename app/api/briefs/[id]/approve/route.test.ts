@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/briefs/:id/approve", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("approves a posted brief without notes (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "posted" }, error: null } },
         update: {
@@ -50,7 +51,7 @@ describe("POST /api/briefs/:id/approve", () => {
   });
 
   it("records notes on rejection (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "posted" }, error: null } },
         update: {
@@ -95,7 +96,7 @@ describe("POST /api/briefs/:id/approve", () => {
   });
 
   it("500 when brief fetch errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: { message: "boom" } } } },
     });
     const res = await POST(
@@ -109,7 +110,7 @@ describe("POST /api/briefs/:id/approve", () => {
   });
 
   it("404 when brief missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -123,7 +124,7 @@ describe("POST /api/briefs/:id/approve", () => {
   });
 
   it("409 when not in posted state", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "draft" }, error: null } },
       },
@@ -142,7 +143,7 @@ describe("POST /api/briefs/:id/approve", () => {
   });
 
   it("500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "posted" }, error: null } },
         update: { single: { data: null, error: { message: "no go" } } },
@@ -160,7 +161,7 @@ describe("POST /api/briefs/:id/approve", () => {
 
   it("warns but returns 200 when event insert fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { id: briefId, status: "posted" }, error: null } },
         update: {

@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -25,11 +26,11 @@ const existingDraft = { notes: "old" };
 
 describe("PATCH /api/pipelines/:id/config", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("merges a notes patch (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -58,7 +59,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("deletes a key when value=null", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -87,7 +88,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("accepts format_choice + client_id top-level passthroughs", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -112,7 +113,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("starts from empty object when config_draft is an array", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -153,7 +154,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("500 on read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await PATCH(
@@ -167,7 +168,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await PATCH(
@@ -181,7 +182,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("409 when not in configuration", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -204,7 +205,7 @@ describe("PATCH /api/pipelines/:id/config", () => {
   });
 
   it("500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {

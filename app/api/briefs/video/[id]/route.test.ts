@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("GET /api/briefs/video/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("returns the brief (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: { id, status: "draft" }, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/briefs/video/${id}`), {
@@ -37,7 +38,7 @@ describe("GET /api/briefs/video/:id", () => {
   });
 
   it("500 on supabase error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: { message: "boom" } } } },
     });
     const res = await GET(req(`http://localhost/api/briefs/video/${id}`), {
@@ -47,7 +48,7 @@ describe("GET /api/briefs/video/:id", () => {
   });
 
   it("404 when not found", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await GET(req(`http://localhost/api/briefs/video/${id}`), {
@@ -59,11 +60,11 @@ describe("GET /api/briefs/video/:id", () => {
 
 describe("PATCH /api/briefs/video/:id", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("updates a single field (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: {
@@ -92,7 +93,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("transitions draft → posted and stamps posted_at", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: { data: { id, status: "draft", payload: {} }, error: null },
@@ -113,7 +114,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("merges notes into payload (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: {
@@ -137,7 +138,7 @@ describe("PATCH /api/briefs/video/:id", () => {
 
   it("merges payload object onto existing array-payload by replacing", async () => {
     // current.payload is an array — coerce to empty object.
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: { single: { data: { id, status: "draft", payload: [] }, error: null } },
         update: { single: { data: { id, status: "draft" }, error: null } },
@@ -174,7 +175,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("500 on read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: { message: "down" } } } },
     });
     const res = await PATCH(
@@ -188,7 +189,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await PATCH(
@@ -202,7 +203,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("409 on disallowed transition", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: { data: { id, status: "approved", payload: {} }, error: null },
@@ -220,7 +221,7 @@ describe("PATCH /api/briefs/video/:id", () => {
   });
 
   it("500 on update fail", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: { data: { id, status: "draft", payload: {} }, error: null },
@@ -240,7 +241,7 @@ describe("PATCH /api/briefs/video/:id", () => {
 
   it("logs but returns 200 when event insert fails", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_briefs: {
         select: {
           single: { data: { id, status: "draft", payload: {} }, error: null },

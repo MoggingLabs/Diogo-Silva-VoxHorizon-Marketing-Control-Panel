@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -23,11 +24,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/launches/:id/decision", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("approves a posted launch (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: { id, status: "approved" }, error: null } },
@@ -45,7 +46,7 @@ describe("POST /api/launches/:id/decision", () => {
   });
 
   it("approves_with_changes with notes (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: { id, status: "approved_with_changes" }, error: null } },
@@ -82,7 +83,7 @@ describe("POST /api/launches/:id/decision", () => {
   });
 
   it("500 read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -96,7 +97,7 @@ describe("POST /api/launches/:id/decision", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -110,7 +111,7 @@ describe("POST /api/launches/:id/decision", () => {
   });
 
   it("409 wrong state", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: {
         select: { single: { data: { id, status: "approved" }, error: null } },
       },
@@ -126,7 +127,7 @@ describe("POST /api/launches/:id/decision", () => {
   });
 
   it("500 update fail", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: {
         select: { single: { data: { id, status: "posted" }, error: null } },
         update: { single: { data: null, error: { message: "no" } } },

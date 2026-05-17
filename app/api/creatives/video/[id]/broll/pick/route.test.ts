@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -32,11 +33,11 @@ const validPick = {
 
 describe("POST /api/creatives/video/:id/broll/pick", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("happy path persists picks (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, brief_id: "b1", broll_clips: [] }, error: null } },
         update: { single: { data: { id, broll_clips: [validPick] }, error: null } },
@@ -79,7 +80,7 @@ describe("POST /api/creatives/video/:id/broll/pick", () => {
   });
 
   it("500 when read errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -93,7 +94,7 @@ describe("POST /api/creatives/video/:id/broll/pick", () => {
   });
 
   it("404 when missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -107,7 +108,7 @@ describe("POST /api/creatives/video/:id/broll/pick", () => {
   });
 
   it("500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, brief_id: "b1" }, error: null } },
         update: { single: { data: null, error: { message: "no" } } },
@@ -125,7 +126,7 @@ describe("POST /api/creatives/video/:id/broll/pick", () => {
 
   it("warns when iteration insert fails (still 200)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, brief_id: "b1" }, error: null } },
         update: { single: { data: { id }, error: null } },
@@ -147,7 +148,7 @@ describe("POST /api/creatives/video/:id/broll/pick", () => {
 
   it("warns when event insert fails (still 200)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       video_creatives: {
         select: { single: { data: { id, brief_id: "b1" }, error: null } },
         update: { single: { data: { id }, error: null } },

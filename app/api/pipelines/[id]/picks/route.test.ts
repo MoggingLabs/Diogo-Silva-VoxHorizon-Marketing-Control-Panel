@@ -4,9 +4,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -24,11 +25,11 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 describe("POST /api/pipelines/:id/picks", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("records image picks (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -60,7 +61,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("records video picks (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -110,7 +111,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("500 read error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -124,7 +125,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -138,7 +139,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("409 when not in ideation", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "review", format_choice: "image" }, error: null } },
       },
@@ -154,7 +155,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when image track inactive (format=video) but image present", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -181,7 +182,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when video track inactive but video present", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -208,7 +209,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when image_brief_id is null but image picks supplied", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -235,7 +236,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when video_brief_id is null but video picks supplied", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -262,7 +263,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("500 when image creatives lookup errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -290,7 +291,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when image creatives don't all match", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -318,7 +319,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("500 when video creatives lookup errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -346,7 +347,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("422 when video creatives mismatch", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -374,7 +375,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("500 when update fails", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -404,7 +405,7 @@ describe("POST /api/pipelines/:id/picks", () => {
 
   it("warns when pipeline_events insert fails (still 200)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -436,7 +437,7 @@ describe("POST /api/pipelines/:id/picks", () => {
   });
 
   it("accepts empty image picks (no validation needed)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {

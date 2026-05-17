@@ -10,9 +10,10 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 const callWorkerMock = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({
@@ -75,7 +76,7 @@ const copyVariant = {
 
 describe("POST /api/launches", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
     callWorkerMock.mockReset();
   });
 
@@ -86,7 +87,7 @@ describe("POST /api/launches", () => {
       raw_stdout: "",
       raw_stderr: "",
     });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: [copyVariant], error: null } },
@@ -109,7 +110,7 @@ describe("POST /api/launches", () => {
 
   it("422 when preflight reports issues (no creatives)", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [], error: null } },
       launch_packages: {
@@ -131,7 +132,7 @@ describe("POST /api/launches", () => {
       ok: false,
       issues: ["bad copy"],
     });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: [copyVariant], error: null } },
@@ -155,7 +156,7 @@ describe("POST /api/launches", () => {
       WorkerError: new (msg: string, status?: number) => Error;
     };
     callWorkerMock.mockRejectedValueOnce(new WorkerError("offline", 503));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: [copyVariant], error: null } },
@@ -177,7 +178,7 @@ describe("POST /api/launches", () => {
   it("logs but degrades on non-WorkerError throws", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     callWorkerMock.mockRejectedValueOnce(new Error("rando"));
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: [copyVariant], error: null } },
@@ -209,7 +210,7 @@ describe("POST /api/launches", () => {
   });
 
   it("500 when brief select errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -222,7 +223,7 @@ describe("POST /api/launches", () => {
   });
 
   it("404 when brief missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -235,7 +236,7 @@ describe("POST /api/launches", () => {
   });
 
   it("409 when brief in wrong state", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: {
         select: { single: { data: { ...baseBrief, status: "draft" }, error: null } },
       },
@@ -250,7 +251,7 @@ describe("POST /api/launches", () => {
   });
 
   it("500 when creatives select errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: null, error: { message: "x" } } },
     });
@@ -264,7 +265,7 @@ describe("POST /api/launches", () => {
   });
 
   it("500 when copy_variants select errors", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: null, error: { message: "x" } } },
@@ -279,7 +280,7 @@ describe("POST /api/launches", () => {
   });
 
   it("validates pipeline_id — 500 on read err", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -292,7 +293,7 @@ describe("POST /api/launches", () => {
   });
 
   it("404 when pipeline_id is unknown", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -305,7 +306,7 @@ describe("POST /api/launches", () => {
   });
 
   it("422 when pipeline_id not in `done`", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id: pipelineId, status: "review" }, error: null } },
       },
@@ -323,7 +324,7 @@ describe("POST /api/launches", () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
     // Multiple `pipelines` selects (initial guard + update) — both return
     // `done`. The mock builder reuses the same response across calls.
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id: pipelineId, status: "done" }, error: null } },
         update: { data: null, error: null },
@@ -349,7 +350,7 @@ describe("POST /api/launches", () => {
   it("warns when pipeline back-link update fails (still 201)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id: pipelineId, status: "done" }, error: null } },
         update: { data: null, error: { message: "link broke" } },
@@ -376,7 +377,7 @@ describe("POST /api/launches", () => {
 
   it("500 when launch_packages insert fails", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: { select: { data: [approvedCreative], error: null } },
       copy_variants: { select: { data: [copyVariant], error: null } },
@@ -395,7 +396,7 @@ describe("POST /api/launches", () => {
 
   it("appends issues for creatives missing drive URL or copy variants", async () => {
     callWorkerMock.mockResolvedValueOnce({ ok: true, issues: [] });
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       briefs: { select: { single: { data: baseBrief, error: null } } },
       creatives: {
         select: {
@@ -421,11 +422,11 @@ describe("POST /api/launches", () => {
 
 describe("GET /api/launches", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("returns list (200)", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { data: [{ id: "lp1" }], error: null } },
     });
     const res = await GET(req("http://localhost/api/launches"));
@@ -435,7 +436,7 @@ describe("GET /api/launches", () => {
   });
 
   it("applies brief_id + status filters", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { data: [], error: null } },
     });
     const res = await GET(req(`http://localhost/api/launches?brief_id=${briefId}&status=posted`));
@@ -443,7 +444,7 @@ describe("GET /api/launches", () => {
   });
 
   it("500 on supabase error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       launch_packages: { select: { data: null, error: { message: "x" } } },
     });
     const res = await GET(req("http://localhost/api/launches"));

@@ -4,10 +4,11 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockClient } from "@/tests/unit/helpers/api-mock";
+import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import { sseResponse, stubFetchOnce } from "@/tests/unit/helpers/worker-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+let currentSupabase: SupabaseClientMock = mockClient();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
@@ -33,7 +34,7 @@ const validBody = { messages: [{ role: "user", content: "hi" }] };
 
 describe("POST /api/pipelines/:id/config/draft", () => {
   beforeEach(() => {
-    currentSupabase = mockSupabaseClient();
+    currentSupabase = mockClient();
   });
 
   it("400 invalid JSON", async () => {
@@ -56,7 +57,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("500 fetch error", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: { message: "x" } } } },
     });
     const res = await POST(
@@ -70,7 +71,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("404 missing", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
@@ -84,7 +85,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("409 when not in configuration", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "review", format_choice: "image" }, error: null } },
       },
@@ -100,7 +101,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("502 worker unreachable", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -125,7 +126,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("502 worker non-2xx", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
@@ -148,7 +149,7 @@ describe("POST /api/pipelines/:id/config/draft", () => {
   });
 
   it("200 SSE passthrough", async () => {
-    currentSupabase = mockSupabaseClient({
+    currentSupabase = mockClient({
       pipelines: {
         select: {
           single: {
