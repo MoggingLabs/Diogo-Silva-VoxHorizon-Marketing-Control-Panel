@@ -204,3 +204,129 @@ def test_args_include_optional_flags(
     assert "--accent-color" in args and "#e94560" in args
     assert "--style" in args and "offer-banner" in args
     assert "--format" in args and "9x16" in args
+
+
+def test_logo_flag_is_propagated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When `logo_path` is provided, the script gets `--logo <path>`."""
+    root = _stub_scripts(tmp_path)
+    in_path = _stub_input(tmp_path)
+    out_path = tmp_path / "composed.png"
+    logo = tmp_path / "logo.png"
+    logo.write_bytes(b"L")
+
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+        out_path.write_bytes(b"OK")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr(ic.asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(
+        composite(
+            in_path,
+            out_path,
+            headline="H",
+            logo_path=logo,
+            scripts_root=root,
+        )
+    )
+    args = captured["args"]
+    assert "--logo" in args
+    assert str(logo) in args
+
+
+def test_format_both_resolves_to_1x1_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`format=both` → resolver prefers the `_1x1.png` sibling when present."""
+    root = _stub_scripts(tmp_path)
+    in_path = _stub_input(tmp_path)
+    out_stem = tmp_path / "composed.png"
+
+    cand_1 = out_stem.parent / f"{out_stem.stem}_1x1.png"
+    cand_2 = out_stem.parent / f"{out_stem.stem}_9x16.png"
+
+    async def fake_exec(*args, **kwargs):
+        cand_1.write_bytes(b"ONE")
+        cand_2.write_bytes(b"TWO")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr(ic.asyncio, "create_subprocess_exec", fake_exec)
+
+    result = asyncio.run(
+        composite(
+            in_path,
+            out_stem,
+            headline="H",
+            output_format="both",
+            scripts_root=root,
+        )
+    )
+    assert result.output_path == cand_1
+
+
+def test_format_both_falls_back_to_9x16_when_only_that_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When only the 9x16 sibling exists, the resolver picks it."""
+    root = _stub_scripts(tmp_path)
+    in_path = _stub_input(tmp_path)
+    out_stem = tmp_path / "composed.png"
+    cand_2 = out_stem.parent / f"{out_stem.stem}_9x16.png"
+
+    async def fake_exec(*args, **kwargs):
+        cand_2.write_bytes(b"TWO")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr(ic.asyncio, "create_subprocess_exec", fake_exec)
+
+    result = asyncio.run(
+        composite(
+            in_path,
+            out_stem,
+            headline="H",
+            output_format="both",
+            scripts_root=root,
+        )
+    )
+    assert result.output_path == cand_2
+
+
+def test_raises_compositor_error_when_output_not_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Zero exit but no file → CompositorError."""
+    root = _stub_scripts(tmp_path)
+    in_path = _stub_input(tmp_path)
+    out_path = tmp_path / "never-written.png"
+
+    async def fake_exec(*args, **kwargs):
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"hi", b""))
+        return proc
+
+    monkeypatch.setattr(ic.asyncio, "create_subprocess_exec", fake_exec)
+
+    with pytest.raises(CompositorError, match="reported success but"):
+        asyncio.run(
+            composite(
+                in_path,
+                out_path,
+                headline="H",
+                scripts_root=root,
+            )
+        )
