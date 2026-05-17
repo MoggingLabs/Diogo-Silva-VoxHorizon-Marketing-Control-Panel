@@ -1,4 +1,4 @@
-"""Pipeline-stage worker routes (Wave 10 / PF-B + Wave 11 / PF-C-2).
+"""Pipeline-stage worker routes (Wave 10 / PF-B + Wave 11 / PF-C/E).
 
 The Pipeline feature is a guided multi-step ad-creation flow. This
 module hosts the worker-side endpoints the Next.js app fires at, one
@@ -24,7 +24,14 @@ per stage of the state machine:
       during the same stage entry returns ``{ already_run: true }``
       without re-producing.
 
-The Generation endpoint (PF-E-1) lands in a follow-up commit.
+  POST /work/pipeline/generation     (PF-E-1 + PF-D-5 idempotency)
+      body: { pipeline_id }
+      Orchestrates the *final* renders for everything in ``pipeline.picks``.
+      Image picks get two Kie.ai renders each (1:1 + 9:16, serial
+      per-brief). Video picks fan out through voiceover → broll-search →
+      broll-pick → compose → caption with per-substage task events.
+      Each paid external call emits a ``cost_recorded`` event. Two
+      back-to-back calls reduce to one run via the idempotency probe.
 
 Tool schema for ``propose_config`` (matches the brief / video_brief
 payload shapes the Next.js form parses on submit):
@@ -68,7 +75,9 @@ from ..services.pipeline_runner import (
     emit_cost,
     emit_pipeline_event,
     fetch_pipeline,
+    generation_state,
     ideation_already_ran,
+    picks_from_pipeline,
 )
 from ..services.queue import get_queue
 from ..services.storage import BUCKET, build_creative_path
@@ -950,6 +959,557 @@ async def _produce_ideation_video_track(
     )
 
 
+# ===========================================================================
+# PF-E-1 + PF-D-5 — POST /work/pipeline/generation
+# ===========================================================================
+#
+# Generation produces the *final* assets for everything the operator
+# picked at Review. We re-use the same external services as
+# /work/creative/generate and /work/video/* (Kie.ai, ElevenLabs,
+# Submagic, ffmpeg, Hyperframes) rather than re-implementing them.
+# Substages within one concept are sequential (script → voiceover →
+# broll → compose → caption); across concepts we run in parallel where
+# the queue allows.
+#
+# PF-D-5 idempotency:
+#   * If any non-terminal task events exist since the latest
+#     stage_advanced→generation event, return ``{ already_running: true }``.
+#   * If only terminal events exist, return ``{ already_complete: true }``
+#     — auto-advance lands in PF-E-5 so a "stuck at generation" status
+#     after every task finished is valid for now.
+
+
+class GenerationInput(BaseModel):
+    """POST body for ``/work/pipeline/generation``."""
+
+    pipeline_id: str = Field(..., min_length=1)
+
+
+class GenerationAccepted(BaseModel):
+    """Response body for ``/work/pipeline/generation``."""
+
+    pipeline_id: str
+    accepted: bool = True
+    already_running: bool = False
+    already_complete: bool = False
+    started_at: str | None = None
+    image_picks: int = 0
+    video_picks: int = 0
+
+
+@router.post(
+    "/work/pipeline/generation", dependencies=[Depends(verify_secret)]
+)
+async def run_generation(
+    body: GenerationInput, background: BackgroundTasks
+) -> GenerationAccepted:
+    """Fan out the final renders for every pick on this pipeline.
+
+    The producer runs in the background; this route returns 200
+    immediately with whichever idempotency outcome applies. The
+    background tasks emit ``task_queued`` / ``task_running`` /
+    ``task_done`` / ``task_error`` events for every substage so the
+    Pipeline detail page can show progress in realtime.
+    """
+    pipeline = fetch_pipeline(body.pipeline_id)
+    if not pipeline:
+        raise HTTPException(
+            status_code=404, detail=f"pipeline not found: {body.pipeline_id}"
+        )
+
+    image_picks, video_picks = picks_from_pipeline(pipeline)
+
+    # Idempotency check — PF-D-5.
+    state = generation_state(body.pipeline_id)
+    if state.already_running:
+        log.info(
+            "pipeline_generation_already_running",
+            pipeline_id=body.pipeline_id,
+            started_at=state.started_at,
+        )
+        return GenerationAccepted(
+            pipeline_id=body.pipeline_id,
+            accepted=True,
+            already_running=True,
+            started_at=state.started_at,
+            image_picks=len(image_picks),
+            video_picks=len(video_picks),
+        )
+    if state.already_complete:
+        log.info(
+            "pipeline_generation_already_complete",
+            pipeline_id=body.pipeline_id,
+            started_at=state.started_at,
+        )
+        return GenerationAccepted(
+            pipeline_id=body.pipeline_id,
+            accepted=True,
+            already_complete=True,
+            started_at=state.started_at,
+            image_picks=len(image_picks),
+            video_picks=len(video_picks),
+        )
+
+    # Fire the producer for each pick. Image renders are queued
+    # per-brief (the SOP forbids parallel kie.ai); video renders fan
+    # out per concept. We start a separate background task per concept
+    # so a single failure doesn't kill peers.
+    if image_picks:
+        background.add_task(
+            _produce_generation_image_picks,
+            pipeline_id=body.pipeline_id,
+            creative_ids=image_picks,
+        )
+    for vid in video_picks:
+        background.add_task(
+            _produce_generation_video_pick,
+            pipeline_id=body.pipeline_id,
+            creative_id=vid,
+        )
+
+    log.info(
+        "pipeline_generation_kicked",
+        pipeline_id=body.pipeline_id,
+        image_picks=len(image_picks),
+        video_picks=len(video_picks),
+    )
+    return GenerationAccepted(
+        pipeline_id=body.pipeline_id,
+        accepted=True,
+        already_running=False,
+        already_complete=False,
+        started_at=state.started_at,
+        image_picks=len(image_picks),
+        video_picks=len(video_picks),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Image picks: produce 1:1 + 9:16 finals from each picked ideation
+# ---------------------------------------------------------------------------
+
+
+def _fetch_creative(creative_id: str) -> dict[str, Any] | None:
+    """Pull a single ``creatives`` row by id. None if missing."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("creatives")
+        .select(
+            "id, brief_id, concept, offer_text, prompt_used, version, "
+            "file_path_supabase"
+        )
+        .eq("id", creative_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if isinstance(resp.data, dict) else None
+
+
+async def _produce_generation_image_picks(
+    *,
+    pipeline_id: str,
+    creative_ids: list[str],
+) -> None:
+    """For each picked ideation creative, render 1:1 + 9:16 finals.
+
+    Each pick re-uses the original ideation concept's prompt (read off
+    the parent ``prompt_used`` jsonb) and runs Kie.ai twice — one per
+    ratio. The two ratios are serialized via the per-brief queue
+    because the image SOP forbids parallel kie.ai per brief; renders
+    for *different* briefs can interleave.
+    """
+    try:
+        kie_client = KieClient()
+    except RuntimeError as e:
+        log.warning(
+            "pipeline_generation_no_kie_key", pipeline_id=pipeline_id, error=str(e)
+        )
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage="generation",
+            payload={"kind": "image", "error": str(e)},
+        )
+        return
+
+    sb = get_supabase_admin()
+    queue = get_queue()
+
+    for creative_id in creative_ids:
+        parent = _fetch_creative(creative_id)
+        if not parent:
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_ERROR,
+                stage="generation",
+                payload={
+                    "kind": "image",
+                    "creative_id": creative_id,
+                    "error": "parent creative not found",
+                },
+            )
+            continue
+
+        brief_id = str(parent.get("brief_id") or "")
+        concept = str(parent.get("concept") or "concept")
+        prompt_used = parent.get("prompt_used") or {}
+        prompt_text = (
+            prompt_used.get("prompt") if isinstance(prompt_used, dict) else None
+        ) or f"Final render of concept {concept}"
+
+        async with queue.acquire(brief_id):
+            for ratio in ("1x1", "9x16"):
+                emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_QUEUED,
+                    stage="generation",
+                    payload={
+                        "kind": "image",
+                        "concept": concept,
+                        "ratio": ratio,
+                        "parent_creative_id": creative_id,
+                    },
+                )
+                running_id = emit_pipeline_event(
+                    pipeline_id=pipeline_id,
+                    kind=EVENT_TASK_RUNNING,
+                    stage="generation",
+                    payload={
+                        "kind": "image",
+                        "concept": concept,
+                        "ratio": ratio,
+                        "parent_creative_id": creative_id,
+                    },
+                )
+                try:
+                    result = await kie_client.generate_image_full(
+                        prompt_text, ratio, resolution="2K"
+                    )
+                    storage_path = build_creative_path(
+                        brief_id, concept, ratio, "v1.0"
+                    )
+                    sb.storage.from_(BUCKET).upload(
+                        path=storage_path,
+                        file=result.image_bytes,
+                        file_options={
+                            "content-type": "image/png",
+                            "x-upsert": "true",
+                        },
+                    )
+                    insert = await record_creative_stage(
+                        brief_id=brief_id,
+                        file_path_supabase=storage_path,
+                        concept=concept,
+                        offer_text=parent.get("offer_text"),
+                        ratio=ratio,
+                        version="v1.0",
+                        prompt_used={
+                            "model": "kie/nano-banana-2",
+                            "prompt": prompt_text,
+                            "ratio": ratio,
+                            "resolution": "2K",
+                            "task_id": result.task_id,
+                            "source_url": result.source_url,
+                            "stage": "generation",
+                            "parent_creative_id": creative_id,
+                        },
+                        iteration_kind="generate",
+                        iteration_content={
+                            "prompt": prompt_text,
+                            "task_id": result.task_id,
+                            "source_url": result.source_url,
+                            "pipeline_id": pipeline_id,
+                            "stage": "generation",
+                        },
+                        author="ekko",
+                        parent_creative_id=creative_id,
+                    )
+                    done_id = emit_pipeline_event(
+                        pipeline_id=pipeline_id,
+                        kind=EVENT_TASK_DONE,
+                        stage="generation",
+                        payload={
+                            "kind": "image",
+                            "concept": concept,
+                            "ratio": ratio,
+                            "creative_id": insert.creative_id,
+                            "file_path_supabase": storage_path,
+                            "parent_creative_id": creative_id,
+                        },
+                    )
+                    emit_cost(
+                        pipeline_id=pipeline_id,
+                        api="kie.ai",
+                        units=1,
+                        subtotal=0.05,
+                        task_event_id=done_id or running_id,
+                        stage="generation",
+                        extra={
+                            "creative_id": insert.creative_id,
+                            "ratio": ratio,
+                            "resolution": "2K",
+                        },
+                    )
+                except (KieError, RuntimeError, Exception) as e:  # noqa: BLE001
+                    log.warning(
+                        "pipeline_generation_image_failed",
+                        pipeline_id=pipeline_id,
+                        creative_id=creative_id,
+                        ratio=ratio,
+                        error=str(e),
+                    )
+                    emit_pipeline_event(
+                        pipeline_id=pipeline_id,
+                        kind=EVENT_TASK_ERROR,
+                        stage="generation",
+                        payload={
+                            "kind": "image",
+                            "concept": concept,
+                            "ratio": ratio,
+                            "parent_creative_id": creative_id,
+                            "error": str(e),
+                        },
+                    )
+
+
+# ---------------------------------------------------------------------------
+# Video picks: orchestrate the substage chain
+# ---------------------------------------------------------------------------
+
+
+# The substages we run for each picked video concept. Kept as a tuple
+# so the order is explicit and grep-able; each entry has an "api" /
+# "units" / "subtotal" used by the cost emitter.
+_VIDEO_SUBSTAGES: tuple[str, ...] = (
+    "script",
+    "voiceover",
+    "broll_search",
+    "broll_pick",
+    "compose",
+    "caption",
+)
+
+
+def _fetch_video_creative(creative_id: str) -> dict[str, Any] | None:
+    """Pull one video_creatives row + its parent brief. None if missing."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("video_creatives")
+        .select("*, video_briefs(*)")
+        .eq("id", creative_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if isinstance(resp.data, dict) else None
+
+
+async def _produce_generation_video_pick(
+    *,
+    pipeline_id: str,
+    creative_id: str,
+) -> None:
+    """Run the substage chain for one picked video concept.
+
+    For each substage:
+      1. Emit ``task_queued`` then ``task_running``.
+      2. Call the underlying worker route's helper (delegated to the
+         existing video route handlers so we don't re-implement the
+         ElevenLabs / yt-dlp / Hyperframes / Submagic plumbing).
+      3. Emit ``task_done`` with the resulting path / creative_id, OR
+         ``task_error`` if the substage failed.
+      4. Emit ``cost_recorded`` after each paid call.
+
+    A substage failure within one concept short-circuits the rest of
+    that concept's chain (you can't compose without a voiceover) but
+    doesn't affect peer concepts — each peer runs in its own
+    background task.
+
+    For the v1 wave we delegate the actual heavy lifting to the
+    existing /work/video/* endpoints via direct function calls rather
+    than an HTTP round-trip. The route handlers are async, raise
+    HTTPException on failure, and write to the same tables we want, so
+    catching their exceptions is sufficient error handling here.
+    """
+    creative = _fetch_video_creative(creative_id)
+    if not creative:
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage="generation",
+            payload={
+                "kind": "video",
+                "creative_id": creative_id,
+                "error": "video creative not found",
+            },
+        )
+        return
+
+    # Lazy import to avoid a circular dep at module load.
+    from ..routes import video as video_route  # noqa: PLC0415
+
+    for substage in _VIDEO_SUBSTAGES:
+        emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_QUEUED,
+            stage="generation",
+            payload={
+                "kind": "video",
+                "substage": substage,
+                "creative_id": creative_id,
+            },
+        )
+        running_id = emit_pipeline_event(
+            pipeline_id=pipeline_id,
+            kind=EVENT_TASK_RUNNING,
+            stage="generation",
+            payload={
+                "kind": "video",
+                "substage": substage,
+                "creative_id": creative_id,
+            },
+        )
+        try:
+            payload = await _run_video_substage(
+                video_route, substage=substage, creative=creative
+            )
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_DONE,
+                stage="generation",
+                payload={
+                    "kind": "video",
+                    "substage": substage,
+                    "creative_id": creative_id,
+                    **payload,
+                },
+            )
+            cost = _video_substage_cost(substage)
+            if cost is not None:
+                emit_cost(
+                    pipeline_id=pipeline_id,
+                    api=cost["api"],
+                    units=cost["units"],
+                    subtotal=cost["subtotal"],
+                    task_event_id=running_id,
+                    stage="generation",
+                    extra={"creative_id": creative_id, "substage": substage},
+                )
+        except HTTPException as e:
+            log.warning(
+                "pipeline_generation_video_substage_failed",
+                pipeline_id=pipeline_id,
+                creative_id=creative_id,
+                substage=substage,
+                status=e.status_code,
+                error=str(e.detail),
+            )
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_ERROR,
+                stage="generation",
+                payload={
+                    "kind": "video",
+                    "substage": substage,
+                    "creative_id": creative_id,
+                    "error": str(e.detail),
+                    "status_code": e.status_code,
+                },
+            )
+            # Short-circuit: downstream substages need this one's output.
+            return
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "pipeline_generation_video_substage_failed",
+                pipeline_id=pipeline_id,
+                creative_id=creative_id,
+                substage=substage,
+                error=str(e),
+            )
+            emit_pipeline_event(
+                pipeline_id=pipeline_id,
+                kind=EVENT_TASK_ERROR,
+                stage="generation",
+                payload={
+                    "kind": "video",
+                    "substage": substage,
+                    "creative_id": creative_id,
+                    "error": str(e),
+                },
+            )
+            return
+
+
+async def _run_video_substage(
+    video_route: Any,
+    *,
+    substage: str,
+    creative: dict[str, Any],
+) -> dict[str, Any]:
+    """Dispatch one video substage to the existing /work/video/* handlers.
+
+    Returns the subset of the route's response payload we want to
+    surface on the ``task_done`` event (paths + ids — never the raw
+    binary bytes).
+    """
+    creative_id = str(creative["id"])
+    brief_id = str(creative.get("brief_id") or "")
+    brief = creative.get("video_briefs") or {}
+
+    if substage == "script":
+        # The script may already exist from ideation. If so, re-confirm
+        # and skip the agent call to avoid burning tokens. Otherwise
+        # invoke the script route as a fresh call.
+        if creative.get("script_path"):
+            return {"script_path": creative["script_path"]}
+        req = video_route.ScriptRequest(brief_id=brief_id)
+        result = await video_route.generate_script(req)
+        return {
+            "script_path": result.get("script_path"),
+            "creative_id": result.get("creative_id"),
+        }
+    if substage == "voiceover":
+        req = video_route.VoiceoverRequest(creative_id=creative_id)
+        result = await video_route.synthesize_voiceover(req)
+        return {"voiceover_path": result.get("voiceover_path")}
+    if substage == "broll_search":
+        req = video_route.BrollSearchRequest(creative_id=creative_id)
+        result = await video_route.search_broll(req)
+        return {"candidates": result.get("candidates")}
+    if substage == "broll_pick":
+        # Force ``auto`` selection mode for the pipeline generation
+        # path — the operator picks at Review *before* generation, so
+        # picking again at the brief level would block on UI input.
+        req = video_route.BrollSelectRequest(
+            creative_id=creative_id, mode="auto"
+        )
+        result = await video_route.select_broll(req)
+        return {"selected": result.get("resolved")}
+    if substage == "compose":
+        req = video_route.ComposeRequest(creative_id=creative_id)
+        result = await video_route.compose_video(req)
+        return {"composed_path": result.get("composed_path")}
+    if substage == "caption":
+        req = video_route.CaptionRequest(creative_id=creative_id)
+        result = await video_route.caption_video(req)
+        return {"captioned_path": result.get("captioned_path")}
+    raise ValueError(f"unknown video substage: {substage!r}")
+
+
+def _video_substage_cost(substage: str) -> dict[str, Any] | None:
+    """Return the cost record for one video substage, or None if free.
+
+    Placeholder figures while PF-F (cost aggregator) is still in
+    flight — these get summed into ``pipelines.cost_actual``. Real
+    per-tenant pricing replaces these in PF-F.
+    """
+    table: dict[str, dict[str, Any]] = {
+        "voiceover": {"api": "elevenlabs", "units": 1, "subtotal": 0.05},
+        "broll_search": {"api": "yt-dlp", "units": 1, "subtotal": 0.00},
+        "compose": {"api": "hyperframes", "units": 1, "subtotal": 0.10},
+        "caption": {"api": "submagic", "units": 1, "subtotal": 0.20},
+    }
+    return table.get(substage)
+
 
 __all__ = [
     "router",
@@ -958,4 +1518,6 @@ __all__ = [
     "ConfigDraftInput",
     "IdeationInput",
     "IdeationAccepted",
+    "GenerationInput",
+    "GenerationAccepted",
 ]

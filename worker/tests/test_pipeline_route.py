@@ -1,14 +1,15 @@
 """Tests for the pipeline worker routes.
 
-Covers the endpoints on the pipeline router shipping in PF-B / PF-C:
+Covers the endpoints shipping in PF-B / PF-C / PF-E-1:
 
   * /work/pipeline/config-draft — PF-B-3 (existing, Wave 10).
   * /work/pipeline/ideation     — PF-C-2 (Wave 11).
+  * /work/pipeline/generation   — PF-E-1 (Wave 11) happy path.
 
 The config-draft cases drive a stubbed ClaudeRunner; the ideation
-cases stub Kie.ai + Supabase so the background producer can run
-without external network calls. Generation route tests land in a
-follow-up commit (PF-E-1).
+and generation cases stub Kie.ai + Supabase so the background
+producer can run without external network calls. The dedicated
+idempotency tests (PF-D-5) land in a follow-up commit.
 """
 
 from __future__ import annotations
@@ -539,5 +540,106 @@ def test_ideation_idempotent_on_retrigger(
     assert body["already_run"] is True
     # No fresh inserts to ``creatives`` — the producer was skipped.
     assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+
+
+# ===========================================================================
+# /work/pipeline/generation
+# ===========================================================================
+
+
+def test_generation_requires_auth(client: TestClient) -> None:
+    resp = client.post("/work/pipeline/generation", json={"pipeline_id": "p"})
+    assert resp.status_code == 401
+
+
+def test_generation_404_when_pipeline_missing(
+    client: TestClient, pipeline_sb: _PipelineSupabase
+) -> None:
+    pipeline_sb.pipeline_row = None
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-nope"},
+    )
+    assert resp.status_code == 404
+
+
+def test_generation_image_picks_render_both_ratios(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One image pick → two final renders (1x1 + 9x16) + cost events."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-g1",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-3",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"], "video": []},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-3",
+        "concept": "sunny",
+        "offer_text": "$99",
+        "prompt_used": {
+            "prompt": "sunny roof, square aspect, vibrant",
+        },
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-3/sunny-1x1-v0.ideation.png",
+    }
+    # No prior generation events yet.
+    pipeline_sb.events_data = [
+        {
+            "id": "ev-g0",
+            "pipeline_id": "p-g1",
+            "kind": "stage_advanced",
+            "stage": "generation",
+            "payload": {},
+            "created_at": "2025-01-02T00:00:00Z",
+        }
+    ]
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-g1"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["accepted"] is True
+    assert body["already_running"] is False
+    assert body["already_complete"] is False
+    assert body["image_picks"] == 1
+    assert body["video_picks"] == 0
+
+    # After background-tasks complete: two creative rows (one per
+    # ratio) + matching pipeline_events.
+    creative_inserts = [
+        d for n, d in pipeline_sb.inserts if n == "creatives"
+    ]
+    assert len(creative_inserts) == 2
+    ratios = sorted(d["ratio"] for d in creative_inserts)
+    assert ratios == ["1x1", "9x16"]
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    assert len(done) == 2
+    cost = [d for d in pe if d.get("kind") == "cost_recorded"]
+    assert len(cost) == 2
+    for ev in cost:
+        assert ev["payload"]["api"] == "kie.ai"
 
 
