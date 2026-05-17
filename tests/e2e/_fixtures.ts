@@ -3,6 +3,21 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types.gen";
 
+import {
+  cleanupCampaignPerf,
+  cleanupCreatives,
+  cleanupLaunchPackages,
+  seedApprovedBrief,
+  seedCampaignPerf,
+  seedCreative,
+  seedPushedLaunch,
+  seedVideoCreative,
+  type BriefFormat,
+  type SeedCampaignPerfRow,
+  type SeedCreativeOpts,
+  type SeedVideoCreativeOpts,
+} from "./_seed";
+
 /**
  * Shared e2e test fixtures.
  *
@@ -105,11 +120,43 @@ export async function cleanupBriefs(clientId: string): Promise<void> {
 
 export { expect };
 
+// Re-export the seed/cleanup helpers so spec files can import everything
+// from a single module (`./_fixtures`) rather than juggling two imports.
+export {
+  cleanupCampaignPerf,
+  cleanupCreatives,
+  cleanupLaunchPackages,
+  seedApprovedBrief,
+  seedCampaignPerf,
+  seedCreative,
+  seedPushedLaunch,
+  seedVideoCreative,
+};
+export type { BriefFormat, SeedCampaignPerfRow, SeedCreativeOpts, SeedVideoCreativeOpts };
+
+/**
+ * Aggregate teardown: wipes everything the Wave 5 specs may have seeded for
+ * the given client. Order matters — campaign_perf rows aren't FK-linked to
+ * briefs, so we can drop them first. Launch packages reference briefs via
+ * FK, and `cleanupBriefs` cascades creatives + iterations + events, so once
+ * launches + perf rows are gone the brief delete sweeps the rest.
+ */
+async function cleanupAll(clientId: string): Promise<void> {
+  await cleanupCampaignPerf(clientId);
+  await cleanupLaunchPackages(clientId);
+  await cleanupCreatives(clientId);
+  await cleanupBriefs(clientId);
+}
+
 /**
  * Extended test fixture exposing `clientId` — the uuid of the upserted
  * `test-e2e-client`. The fixture wipes briefs both before and after each test
  * so leftover rows from a previous (possibly failed) run don't contaminate the
  * current one.
+ *
+ * Cleanup covers the Wave 5 surface too — launch packages and campaign_perf
+ * rows — so specs only ever need to call `seedXxx` and let teardown handle
+ * the rest.
  */
 // Playwright fixtures expose a function parameter named `use`, which the
 // react-hooks/rules-of-hooks ESLint rule (enabled by eslint-config-next)
@@ -119,9 +166,9 @@ export { expect };
 export const test = base.extend<{ clientId: string }>({
   clientId: async ({}, use) => {
     const id = await ensureTestClient();
-    await cleanupBriefs(id);
+    await cleanupAll(id);
     await use(id);
-    await cleanupBriefs(id);
+    await cleanupAll(id);
   },
 });
 /* eslint-enable react-hooks/rules-of-hooks */
