@@ -4,6 +4,8 @@ import { notFound } from "next/navigation";
 import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
 import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
+import { StageDone } from "@/components/pipeline/StageDone";
+import { StageGeneration } from "@/components/pipeline/StageGeneration";
 import { StageIdeation } from "@/components/pipeline/StageIdeation";
 import { StagePlaceholder } from "@/components/pipeline/StagePlaceholder";
 import { StageReview } from "@/components/pipeline/StageReview";
@@ -15,6 +17,7 @@ import {
   PIPELINE_STATUS_BADGE,
   PIPELINE_STATUS_LABEL,
   type Pipeline,
+  type PipelineEvent,
   type PipelineStatus,
 } from "@/lib/pipeline/types";
 import { createClient } from "@/lib/supabase/server";
@@ -46,9 +49,11 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   const { id } = await params;
 
   let pipeline: Pipeline;
+  let initialEvents: PipelineEvent[] = [];
   try {
     const res = await getPipeline(id);
     pipeline = res.pipeline;
+    initialEvents = res.events ?? [];
   } catch (err) {
     const status = (err as { status?: number }).status;
     if (status === 404) {
@@ -144,6 +149,14 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         />
       ) : pipeline.status === "review" ? (
         <StageReview
+          pipeline={pipeline}
+          imageBriefId={pipeline.image_brief_id}
+          videoBriefId={pipeline.video_brief_id}
+        />
+      ) : pipeline.status === "generation" ? (
+        <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
+      ) : pipeline.status === "done" ? (
+        <StageDone
           pipeline={pipeline}
           imageBriefId={pipeline.image_brief_id}
           videoBriefId={pipeline.video_brief_id}
