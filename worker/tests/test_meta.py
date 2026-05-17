@@ -323,5 +323,95 @@ def test_fetch_insights_window_to_date_preset(fake_token: str) -> None:
     assert _date_preset_for_window(1) == "yesterday"
     assert _date_preset_for_window(7) == "last_7d"
     assert _date_preset_for_window(30) == "last_30d"
+    # 8–14 window → last_14d (covers line 385).
+    assert _date_preset_for_window(14) == "last_14d"
     # Unknown windows fall back to last_30d.
     assert _date_preset_for_window(45) == "last_30d"
+
+
+# ---------------------------------------------------------------------------
+# _sum_action_value branch coverage
+# ---------------------------------------------------------------------------
+
+
+def test_sum_action_value_skips_non_dict_entries() -> None:
+    """Garbage entries in the actions list are silently skipped (line 136)."""
+    from src.services.meta import _sum_action_value
+
+    actions = ["not-a-dict", {"action_type": "lead", "value": "3"}, 42]
+    assert _sum_action_value(actions, "lead") == 3.0
+
+
+def test_sum_action_value_handles_invalid_value() -> None:
+    """A non-numeric ``value`` returns 0 via the except branch (lines 140-141)."""
+    from src.services.meta import _sum_action_value
+
+    actions = [{"action_type": "lead", "value": "not-a-number"}]
+    assert _sum_action_value(actions, "lead") == 0.0
+
+
+def test_sum_action_value_returns_zero_when_action_type_missing() -> None:
+    from src.services.meta import _sum_action_value
+
+    actions = [{"action_type": "page_engagement", "value": "9"}]
+    assert _sum_action_value(actions, "lead") == 0.0
+
+
+def test_sum_action_value_value_none_treated_as_zero() -> None:
+    """Explicit ``value: None`` short-circuits to 0.0."""
+    from src.services.meta import _sum_action_value
+
+    actions = [{"action_type": "lead", "value": None}]
+    assert _sum_action_value(actions, "lead") == 0.0
+
+
+# ---------------------------------------------------------------------------
+# _client_or_default fallback (line 268)
+# ---------------------------------------------------------------------------
+
+
+def test_client_or_default_lazily_constructs_httpx_client(
+    fake_token: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Calling fetch_* without an async-with constructs a fresh AsyncClient."""
+    import src.services.meta as meta_mod
+
+    constructed: list[str] = []
+
+    def fake_async_client(*_args: Any, **_kwargs: Any) -> AsyncMock:
+        constructed.append("ok")
+        return _make_async_client(
+            AsyncMock(
+                side_effect=lambda url, params=None: _mock_response(
+                    200, {"data": [], "paging": {}}
+                )
+            )
+        )
+
+    monkeypatch.setattr(meta_mod.httpx, "AsyncClient", fake_async_client)
+
+    async def _run() -> None:
+        # Direct construction, no context manager.
+        client = MetaAdsClient()
+        await client.fetch_campaign_insights("act_1", 7)
+
+    asyncio.run(_run())
+    assert constructed == ["ok"]
+
+
+# ---------------------------------------------------------------------------
+# aclose idempotence
+# ---------------------------------------------------------------------------
+
+
+def test_aclose_is_idempotent(fake_token: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """aclose() with no open client is a no-op."""
+
+    async def _run() -> None:
+        client = MetaAdsClient()
+        # No internal client → aclose returns cleanly.
+        await client.aclose()
+        # And again — still fine.
+        await client.aclose()
+
+    asyncio.run(_run())

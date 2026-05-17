@@ -297,3 +297,111 @@ def test_fanout_push_mixed_results(
     assert failed == 1
     # Only the surviving subscription remains.
     assert [r["endpoint"] for r in fake_sb.rows] == ["https://push.example/ok"]
+
+
+# ---------------------------------------------------------------------------
+# Edge cases — supabase query / delete failures, garbage rows, dict payload
+# ---------------------------------------------------------------------------
+
+
+def test_fanout_push_swallows_supabase_query_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Supabase exception on the select → (0, 0) without raising."""
+
+    class _BrokenSB:
+        def table(self, _name: str) -> Any:
+            raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(pd, "get_supabase_admin", lambda: _BrokenSB())
+
+    sent, failed = asyncio.run(fanout_push(PushPayload(title="t", body="b")))
+    assert (sent, failed) == (0, 0)
+
+
+def test_fanout_push_skips_rows_without_endpoint(
+    monkeypatch: pytest.MonkeyPatch, fake_sb: _FakeSupabase, vapid_env: None
+) -> None:
+    """Garbage rows in the table (missing endpoint, non-dict) are skipped (line 162)."""
+    fake_sb.rows.extend(
+        [
+            "not-a-dict",  # type: ignore[arg-type]
+            {"keys": {}},  # missing endpoint
+            {"endpoint": "", "keys": {}},  # empty endpoint
+            {"endpoint": "https://push.example/real", "keys": {"p256dh": "p", "auth": "a"}},
+        ]
+    )
+
+    seen: list[str] = []
+
+    def fake_webpush(*, subscription_info: Any, **_kw: Any) -> None:
+        seen.append(subscription_info["endpoint"])
+
+    monkeypatch.setattr(_fake_pywebpush, "webpush", fake_webpush)
+
+    sent, failed = asyncio.run(fanout_push(PushPayload(title="t", body="b")))
+    assert sent == 1
+    assert failed == 0
+    assert seen == ["https://push.example/real"]
+
+
+def test_send_push_accepts_dict_payload(
+    monkeypatch: pytest.MonkeyPatch, fake_sb: _FakeSupabase, vapid_env: None
+) -> None:
+    """A pre-formed dict payload is accepted (covers the ``else`` branch in payload conversion)."""
+    captured: dict[str, Any] = {}
+
+    def fake_webpush(*, data: Any, **_kw: Any) -> None:
+        captured["data"] = data
+
+    monkeypatch.setattr(_fake_pywebpush, "webpush", fake_webpush)
+
+    raw = {"title": "raw", "body": "b", "url": "/x", "kind": "manual"}
+    ok = asyncio.run(send_push_notification(_sub(), raw))
+    assert ok is True
+    import json
+
+    assert json.loads(captured["data"]) == raw
+
+
+def test_delete_subscription_swallows_errors(
+    monkeypatch: pytest.MonkeyPatch, vapid_env: None
+) -> None:
+    """Best-effort delete: a Supabase exception is logged but doesn't raise (lines 76-77)."""
+
+    class _BrokenSB:
+        def table(self, _name: str) -> Any:
+            raise RuntimeError("supabase write down")
+
+    monkeypatch.setattr(pd, "get_supabase_admin", lambda: _BrokenSB())
+
+    def fake_webpush(**_kw: Any) -> None:
+        resp = MagicMock()
+        resp.status_code = 410
+        raise _FakeWebPushException("gone", response=resp)
+
+    monkeypatch.setattr(_fake_pywebpush, "webpush", fake_webpush)
+
+    # Must not raise — the 410 path tries to delete and the delete blew up,
+    # but the function still returns False cleanly.
+    ok = asyncio.run(send_push_notification(_sub(), PushPayload(title="t", body="b")))
+    assert ok is False
+
+
+def test_send_push_with_empty_endpoint_does_not_attempt_delete(
+    monkeypatch: pytest.MonkeyPatch, fake_sb: _FakeSupabase, vapid_env: None
+) -> None:
+    """410/404 with no endpoint string → skip the delete call entirely."""
+
+    def fake_webpush(**_kw: Any) -> None:
+        resp = MagicMock()
+        resp.status_code = 410
+        raise _FakeWebPushException("gone", response=resp)
+
+    monkeypatch.setattr(_fake_pywebpush, "webpush", fake_webpush)
+
+    sub = {"endpoint": "", "keys": {}}
+    ok = asyncio.run(send_push_notification(sub, PushPayload(title="t", body="b")))
+    assert ok is False
+    # No row was ever in the table — nothing to delete.
+    assert fake_sb.rows == []

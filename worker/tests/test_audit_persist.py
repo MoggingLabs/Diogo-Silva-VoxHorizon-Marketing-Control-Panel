@@ -245,3 +245,34 @@ def test_upsert_video_perf_payload_excludes_helper_only_fields(
     payload = tables["campaign_perf_video"].upsert.call_args.args[0][0]
     assert "cpl_target" not in payload
     assert "days_since_launch" not in payload
+
+
+def test_upsert_video_perf_empty_list_is_a_noop(
+    mock_sb: tuple[MagicMock, dict[str, MagicMock]],
+) -> None:
+    """Empty list short-circuits before touching Supabase."""
+    client, _ = mock_sb
+    n = asyncio.run(upsert_video_perf([]))
+    assert n == 0
+    client.table.assert_not_called()
+
+
+def test_upsert_video_perf_handles_none_data_result(
+    mock_sb: tuple[MagicMock, dict[str, MagicMock]],
+) -> None:
+    """If Supabase returns None data we still produce a 0 count without crashing."""
+    _, tables = mock_sb
+    # Override the mock so execute returns a result with .data = None
+    tables["campaign_perf_video"].upsert.return_value.execute.return_value.data = None
+    n = asyncio.run(upsert_video_perf([_video_row()]))
+    assert n == 0
+
+
+def test_upsert_image_perf_handles_none_data_result(
+    mock_sb: tuple[MagicMock, dict[str, MagicMock]],
+) -> None:
+    """If Supabase returns None for image we still produce a 0 count gracefully."""
+    _, tables = mock_sb
+    tables["campaign_perf_image"].upsert.return_value.execute.return_value.data = None
+    n = asyncio.run(upsert_image_perf([_image_row()]))
+    assert n == 0

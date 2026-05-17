@@ -304,3 +304,137 @@ def test_translate_event_tool_use_block() -> None:
 def test_translate_event_unknown_returns_none() -> None:
     e = SimpleNamespace(delta=None, content_block=None)
     assert _translate_event(e) is None
+
+
+def test_translate_event_partial_json_input_emits_tool_call_start() -> None:
+    """An input_json_delta-style event becomes a partial-input tool_call_start."""
+    e = SimpleNamespace(
+        delta=SimpleNamespace(
+            text=None, partial_json='{"prompt": "hi"}', name="regen"
+        ),
+    )
+    chunk = _translate_event(e)
+    assert chunk is not None
+    assert chunk.type == "tool_call_start"
+    assert chunk.tool == "regen"
+    assert chunk.input == '{"prompt": "hi"}'
+
+
+def test_translate_event_partial_json_without_name_falls_back_to_tool() -> None:
+    """If the delta lacks a ``name`` attribute we still emit a labelled chunk."""
+    # A delta object with neither ``text`` nor a ``name`` attribute. We give it
+    # ``partial_json`` and the fallback string "tool" should kick in.
+    class _D:
+        text = None
+        partial_json = '{"a": 1}'
+        # No ``name`` attribute at all — getattr default kicks in.
+
+    e = SimpleNamespace(delta=_D())
+    chunk = _translate_event(e)
+    assert chunk is not None
+    assert chunk.type == "tool_call_start"
+    assert chunk.tool == "tool"
+
+
+def test_translate_event_empty_text_falls_through() -> None:
+    """Empty-string text doesn't emit anything (falls through to content_block)."""
+    e = SimpleNamespace(delta=SimpleNamespace(text="", partial_json=None), content_block=None)
+    assert _translate_event(e) is None
+
+
+# ---------------------------------------------------------------------------
+# StreamChunk message field — drops nothing when set
+# ---------------------------------------------------------------------------
+
+
+def test_stream_chunk_to_dict_includes_message_when_set() -> None:
+    """``message`` field on an error chunk lands in to_dict output."""
+    c = StreamChunk(type="error", message="boom")
+    d = c.to_dict()
+    assert d == {"type": "error", "message": "boom"}
+
+
+def test_stream_chunk_to_dict_result_field() -> None:
+    """``result`` field on a tool_call_result chunk also propagates."""
+    c = StreamChunk(type="tool_call_result", tool="regen", result={"ok": True})
+    assert c.to_dict() == {
+        "type": "tool_call_result",
+        "tool": "regen",
+        "result": {"ok": True},
+    }
+
+
+# ---------------------------------------------------------------------------
+# stream — ImportError + general exception
+# ---------------------------------------------------------------------------
+
+
+def test_stream_yields_error_when_anthropic_sdk_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Missing anthropic SDK → single error chunk with the message."""
+    import builtins
+    import sys
+
+    # Wipe any cached anthropic module so the ``from anthropic import``
+    # statement falls through to the ImportError branch.
+    monkeypatch.delitem(sys.modules, "anthropic", raising=False)
+
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "anthropic":
+            raise ImportError("no anthropic sdk on this host")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    runner = ClaudeRunner(anthropic_api_key="ak")
+
+    async def collect():
+        out = []
+        async for c in runner.stream([{"role": "user", "content": "go"}]):
+            out.append(c)
+        return out
+
+    chunks = asyncio.run(collect())
+    assert len(chunks) == 1
+    assert chunks[0].type == "error"
+    assert "anthropic SDK missing" in (chunks[0].message or "")
+
+
+def test_stream_yields_error_on_sdk_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Errors raised inside the SDK ``stream`` context propagate as an error chunk."""
+    import sys
+    from types import SimpleNamespace as SN
+
+    class FakeStream:
+        async def __aenter__(self):
+            raise RuntimeError("upstream rate limit")
+
+        async def __aexit__(self, *a):
+            return False
+
+    class FakeMessages:
+        def stream(self, **kwargs):
+            return FakeStream()
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            self.messages = FakeMessages()
+
+    monkeypatch.setitem(sys.modules, "anthropic", SN(AsyncAnthropic=FakeClient))
+    runner = ClaudeRunner(anthropic_api_key="ak")
+
+    async def collect():
+        out = []
+        async for c in runner.stream([{"role": "user", "content": "x"}]):
+            out.append(c)
+        return out
+
+    chunks = asyncio.run(collect())
+    assert len(chunks) == 1
+    assert chunks[0].type == "error"
+    assert "rate limit" in (chunks[0].message or "")
