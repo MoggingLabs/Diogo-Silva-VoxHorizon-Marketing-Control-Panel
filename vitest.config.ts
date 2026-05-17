@@ -55,6 +55,7 @@ export default defineConfig({
             "components/**/*.{test,spec}.{ts,tsx}",
             "hooks/**/*.{test,spec}.{ts,tsx}",
             "app/**/*.{test,spec}.{ts,tsx}",
+            "middleware.{test,spec}.{ts,tsx}",
           ],
           exclude: ["node_modules/**", "tests/e2e/**", ".next/**"],
         },
@@ -70,6 +71,7 @@ export default defineConfig({
         "components/**/*.{ts,tsx}",
         "hooks/**/*.{ts,tsx}",
         "app/**/*.{ts,tsx}",
+        "middleware.{ts,tsx}",
       ],
       exclude: [
         "**/*.test.{ts,tsx}",
