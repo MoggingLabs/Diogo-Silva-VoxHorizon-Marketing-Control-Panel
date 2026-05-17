@@ -37,8 +37,17 @@ type SupabaseClient = ReturnType<typeof createAdminClient>;
  *       worker route doesn't exist yet (Wave 11); we wrap the call in a
  *       try/catch so a connection refusal doesn't block the advance.
  *
+ *   ideation → review
+ *     - Gate: `pipelines.picks` must contain ≥1 uuid for each active
+ *       track (image, video, or both depending on `format_choice`).
+ *     - Updates the pipeline: status → review, `advanced_at.review`
+ *       stamped.
+ *     - Emits `pipeline_events(kind='stage_advanced', stage='review')`.
+ *     - Insufficient picks return 422 with a field-level "picks" error so
+ *       the UI can surface which track is unmet.
+ *
  * Other transitions return 422 with a structured error — the matching
- * milestones (PF-C through PF-F) will fill those branches in.
+ * milestones (PF-D through PF-F) will fill those branches in.
  *
  * Atomicity: Supabase doesn't expose multi-table transactions through the
  * JS client. We insert briefs first, then the pipeline update, then the
@@ -64,6 +73,9 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
 
   if (pipeline.status === "configuration") {
     return advanceFromConfiguration(supabase, pipeline);
+  }
+  if (pipeline.status === "ideation") {
+    return advanceFromIdeation(supabase, pipeline);
   }
 
   // Every other status is a stage gate we haven't wired up yet.
@@ -316,6 +328,108 @@ async function advanceFromConfiguration(
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
   });
+}
+
+/**
+ * Handle the `ideation → review` transition. The gate is purely a read of
+ * `pipelines.picks`: every active track must have ≥1 uuid recorded.
+ *
+ * We don't re-validate the uuids here — the `/picks` route already enforced
+ * that they belong to this pipeline's brief at write time. Re-checking on
+ * advance would be a courtesy at best and would couple this route to the
+ * creatives tables for no operational benefit.
+ */
+async function advanceFromIdeation(
+  supabase: SupabaseClient,
+  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+): Promise<NextResponse> {
+  // 1. Read the per-track pick arrays from the jsonb column. Defensive
+  //    parse — the column defaults to `{}` and an older row might have
+  //    odd-shaped data.
+  const picks = readPicksJsonb(pipeline.picks);
+  const tracks = activeTracksLocal(pipeline.format_choice);
+
+  const missing: string[] = [];
+  if (tracks.image && (picks.image?.length ?? 0) < 1) {
+    missing.push("image");
+  }
+  if (tracks.video && (picks.video?.length ?? 0) < 1) {
+    missing.push("video");
+  }
+  if (missing.length > 0) {
+    return NextResponse.json(
+      {
+        error: "insufficient picks",
+        field: "picks",
+        missing,
+        reason: `each active track needs ≥1 pick (missing: ${missing.join(", ")})`,
+      },
+      { status: 422 },
+    );
+  }
+
+  // 2. Stamp the advance timestamp and update the row. Re-assert
+  //    status=ideation so a concurrent second advance can't double-promote.
+  const now = new Date().toISOString();
+  const advancedAt =
+    (pipeline.advanced_at &&
+    typeof pipeline.advanced_at === "object" &&
+    !Array.isArray(pipeline.advanced_at)
+      ? (pipeline.advanced_at as Record<string, string>)
+      : {}) ?? {};
+  const nextAdvancedAt = { ...advancedAt, review: now };
+  const update: PipelineUpdate = {
+    status: "review",
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  const { data: updated, error: updateErr } = await supabase
+    .from("pipelines")
+    .update(update)
+    .eq("id", pipeline.id)
+    .eq("status", "ideation")
+    .select()
+    .single();
+  if (updateErr || !updated) {
+    return NextResponse.json(
+      { error: updateErr?.message ?? "pipeline advance failed" },
+      { status: 500 },
+    );
+  }
+
+  // 3. Emit the timeline event. Failure is non-fatal.
+  const event: PipelineEventInsert = {
+    pipeline_id: pipeline.id,
+    kind: "stage_advanced",
+    stage: "review",
+    payload: {
+      image_picks: picks.image?.length ?? 0,
+      video_picks: picks.video?.length ?? 0,
+    } as Json,
+  };
+  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
+  if (evErr) {
+    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+  }
+
+  return NextResponse.json({ pipeline: updated });
+}
+
+/**
+ * Read the `pipelines.picks` jsonb into a typed shape, dropping anything
+ * that doesn't look like the agreed `{ image?: string[], video?: string[] }`
+ * contract. Older rows / hand-edited columns degrade gracefully.
+ */
+function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const obj = value as Record<string, unknown>;
+  const out: { image?: string[]; video?: string[] } = {};
+  if (Array.isArray(obj.image)) {
+    out.image = obj.image.filter((v): v is string => typeof v === "string");
+  }
+  if (Array.isArray(obj.video)) {
+    out.video = obj.video.filter((v): v is string => typeof v === "string");
+  }
+  return out;
 }
 
 /**
