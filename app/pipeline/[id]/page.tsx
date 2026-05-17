@@ -4,7 +4,9 @@ import { notFound } from "next/navigation";
 import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
 import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
+import { StageIdeation } from "@/components/pipeline/StageIdeation";
 import { StagePlaceholder } from "@/components/pipeline/StagePlaceholder";
+import { StageReview } from "@/components/pipeline/StageReview";
 import { getPipeline } from "@/lib/pipeline/client";
 import {
   PIPELINE_FORMAT_BADGE,
@@ -134,6 +136,18 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
 
       {pipeline.status === "configuration" ? (
         <StageConfiguration pipeline={pipeline} clients={clients} />
+      ) : pipeline.status === "ideation" ? (
+        <StageIdeation
+          pipeline={pipeline}
+          imageBriefId={pipeline.image_brief_id}
+          videoBriefId={pipeline.video_brief_id}
+        />
+      ) : pipeline.status === "review" ? (
+        <StageReview
+          pipeline={pipeline}
+          imageBriefId={pipeline.image_brief_id}
+          videoBriefId={pipeline.video_brief_id}
+        />
       ) : (
         <StagePlaceholder
           stageLabel={placeholder.label}
