@@ -38,14 +38,39 @@ services:
       start_period: 30s
       retries: 3
 
-  # caddy: added in VPS-3 (#160)
+  # caddy: VPS-3 (#160)
   #   Fronts the worker over HTTPS (Let's Encrypt), terminates TLS,
   #   forwards Authorization headers through to the worker, and exposes
-  #   :80 + :443 publicly. Until then, the worker is reachable only via
-  #   the compose network.
+  #   :80 + :443 publicly.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      worker:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      # Set by the VPS's /opt/voxhorizon/.env at deploy time. The worker
+      # process itself does not read this — Caddy substitutes it into the
+      # Caddyfile site address at startup.
+      VOXHORIZON_WORKER_HOST: ${VOXHORIZON_WORKER_HOST:-worker.voxhorizon.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data # ACME certs
+      - caddy-config:/config # Caddy state
+      - caddy-logs:/var/log/caddy
 
 volumes:
   worker-broll-pool:
     name: voxhorizon-worker-broll-pool
   worker-logs:
     name: voxhorizon-worker-logs
+  caddy-data:
+    name: voxhorizon-caddy-data
+  caddy-config:
+    name: voxhorizon-caddy-config
+  caddy-logs:
+    name: voxhorizon-caddy-logs
