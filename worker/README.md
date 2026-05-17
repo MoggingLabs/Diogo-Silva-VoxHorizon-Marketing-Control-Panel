@@ -31,6 +31,24 @@ bash scripts/serve.sh
 uv run pytest
 ```
 
+## Running in Docker
+
+For VPS deployment the worker is containerised. From the repo root:
+
+```bash
+docker compose up -d
+```
+
+That builds the multi-stage `worker/Dockerfile` (Python 3.11 + uv + Playwright Chromium + Node 22 + ffmpeg + yt-dlp + Hyperframes), runs uvicorn on `:8000`, exposes the port only on the compose network (Caddy fronts it — see [VPS-3 / #160](../../issues/160)), and reads env from `/opt/voxhorizon/.env` on the VPS.
+
+Local one-off build:
+
+```bash
+./worker/scripts/docker-build.sh
+```
+
+Bigger picture (CI image push, Caddy reverse proxy, `.env` provisioning) is in [`ARCHITECTURE.md` § Containerization (VPS path)](../ARCHITECTURE.md#containerization-vps-path).
+
 ## Auth
 
 Every route (including `/work/health`) requires:

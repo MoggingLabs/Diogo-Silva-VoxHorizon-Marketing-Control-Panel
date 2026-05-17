@@ -313,6 +313,21 @@ Layered. No single failure removes all defenses.
 
 ---
 
+### Containerization (VPS path)
+
+The Mac+Tailscale topology above is the v1 default. The VPS path runs the same worker code on a remote Linux host, containerised — used for staging, demo environments, or when the operator wants the worker decoupled from the Mac being on.
+
+- **Worker in Docker.** `worker/Dockerfile` is a multi-stage build: stage 1 produces a `uv`-frozen virtualenv from `pyproject.toml` + `uv.lock`; stage 2 runs on the Playwright Python base (Chromium + system deps preinstalled) plus Node 22 (Hyperframes CLI), `ffmpeg`, `yt-dlp`, and the prebuilt venv. Final image stays under 2 GB. Uvicorn binds `:8000` inside the container; non-root `app` user; healthcheck hits `/work/health` with the bearer secret read from env at runtime.
+- **Caddy fronts.** [VPS-3 / #160](../../issues/160) lands a `caddy` service in the same `docker-compose.yml` to terminate TLS (Let's Encrypt), forward `Authorization` headers, and expose `:80` + `:443`. Until then the worker has `expose: ["8000"]` only — reachable on the compose network, never the public internet.
+- **GHCR image pipeline.** [VPS-4 / #161](../../issues/161) wires a GitHub Actions workflow that builds `worker/Dockerfile` on push to `main` and tags `ghcr.io/pveloso01/voxhorizon-worker:{latest,main,<sha>}`. The VPS pulls instead of building.
+- **Env on the VPS.** [VPS-5 / #162](../../issues/162) provisions `/opt/voxhorizon/.env` (chmod 600, owned by the deploy user). `docker-compose.yml` mounts it via `env_file: /opt/voxhorizon/.env`. Locally the dev override is `env_file: ./worker/.env`.
+- **Health route.** [VPS-6 / #163](../../issues/163) keeps `/work/health` cheap and bearer-authed so the container healthcheck and Caddy upstream probes can both rely on it.
+- **State.** Named volumes (`voxhorizon-worker-broll-pool`, `voxhorizon-worker-logs`) keep the b-roll pool and runtime sidecars across image rebuilds. Supabase / Drive / GHCR stay external — the container is stateless beyond those volumes.
+
+The container path is opt-in; the Mac path remains supported.
+
+---
+
 ## 8. Decision log
 
 Locked decisions from the six discovery rounds. Dated. **Master Tracker [#72](../../issues/72) is the canonical source if anything below drifts.**
