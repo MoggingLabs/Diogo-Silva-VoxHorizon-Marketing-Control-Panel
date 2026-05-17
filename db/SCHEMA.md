@@ -288,9 +288,9 @@ Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197).
 
 `pipeline_events_cost_actual_trg` (AFTER INSERT WHEN `kind = 'cost_recorded'`):
 
-- Folds every `cost_recorded` payload (`{ api, units, subtotal,
-  task_event_id?, extra? }`) into `pipelines.cost_actual` via a single
-  atomic UPDATE. Output shape:
+- Folds every `cost_recorded` payload
+  (`{ api, units, subtotal, task_event_id?, extra? }`) into
+  `pipelines.cost_actual` via a single atomic UPDATE. Output shape:
 
   ```jsonc
   {
