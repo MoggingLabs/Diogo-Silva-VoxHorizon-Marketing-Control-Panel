@@ -537,6 +537,124 @@ export type Database = {
         };
         Relationships: [];
       };
+      pipeline_events: {
+        Row: {
+          created_at: string;
+          id: string;
+          kind: string;
+          payload: Json | null;
+          pipeline_id: string;
+          stage: Database["public"]["Enums"]["pipeline_status_enum"] | null;
+        };
+        Insert: {
+          created_at?: string;
+          id?: string;
+          kind: string;
+          payload?: Json | null;
+          pipeline_id: string;
+          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null;
+        };
+        Update: {
+          created_at?: string;
+          id?: string;
+          kind?: string;
+          payload?: Json | null;
+          pipeline_id?: string;
+          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "pipeline_events_pipeline_id_fkey";
+            columns: ["pipeline_id"];
+            isOneToOne: false;
+            referencedRelation: "pipelines";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      pipelines: {
+        Row: {
+          advanced_at: Json;
+          approval: Json | null;
+          client_id: string | null;
+          config_draft: Json;
+          cost_actual: Json | null;
+          cost_estimate: Json | null;
+          created_at: string;
+          format_choice: Database["public"]["Enums"]["pipeline_format_enum"];
+          id: string;
+          image_brief_id: string | null;
+          launch_package_id: string | null;
+          picks: Json;
+          status: Database["public"]["Enums"]["pipeline_status_enum"];
+          updated_at: string;
+          video_brief_id: string | null;
+        };
+        Insert: {
+          advanced_at?: Json;
+          approval?: Json | null;
+          client_id?: string | null;
+          config_draft?: Json;
+          cost_actual?: Json | null;
+          cost_estimate?: Json | null;
+          created_at?: string;
+          format_choice: Database["public"]["Enums"]["pipeline_format_enum"];
+          id?: string;
+          image_brief_id?: string | null;
+          launch_package_id?: string | null;
+          picks?: Json;
+          status?: Database["public"]["Enums"]["pipeline_status_enum"];
+          updated_at?: string;
+          video_brief_id?: string | null;
+        };
+        Update: {
+          advanced_at?: Json;
+          approval?: Json | null;
+          client_id?: string | null;
+          config_draft?: Json;
+          cost_actual?: Json | null;
+          cost_estimate?: Json | null;
+          created_at?: string;
+          format_choice?: Database["public"]["Enums"]["pipeline_format_enum"];
+          id?: string;
+          image_brief_id?: string | null;
+          launch_package_id?: string | null;
+          picks?: Json;
+          status?: Database["public"]["Enums"]["pipeline_status_enum"];
+          updated_at?: string;
+          video_brief_id?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "pipelines_client_id_fkey";
+            columns: ["client_id"];
+            isOneToOne: false;
+            referencedRelation: "clients";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "pipelines_image_brief_id_fkey";
+            columns: ["image_brief_id"];
+            isOneToOne: false;
+            referencedRelation: "briefs";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "pipelines_launch_package_id_fkey";
+            columns: ["launch_package_id"];
+            isOneToOne: false;
+            referencedRelation: "launch_packages";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "pipelines_video_brief_id_fkey";
+            columns: ["video_brief_id"];
+            isOneToOne: false;
+            referencedRelation: "video_briefs";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       push_subscriptions: {
         Row: {
           created_at: string;
@@ -907,6 +1025,14 @@ export type Database = {
         | "comment"
         | "user_edit";
       iteration_author: "user" | "ekko";
+      pipeline_format_enum: "image" | "video" | "both";
+      pipeline_status_enum:
+        | "configuration"
+        | "ideation"
+        | "review"
+        | "generation"
+        | "done"
+        | "cancelled";
       ratio: "1x1" | "9x16" | "16x9";
       service_type: "roofing" | "remodeling";
       sync_status: "running" | "ok" | "error";

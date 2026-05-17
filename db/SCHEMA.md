@@ -10,6 +10,7 @@ Migration sources:
 - `db/migrations/0003_storage_buckets.sql` — added in #17 (M0-17)
 - `db/migrations/0004_v1_video_brief_constraints.sql` — added in #78 (V1-1)
 - `db/migrations/0005_chat_messages.sql` — added in #143 (Wave 5.5-1)
+- `db/migrations/0006_pipelines.sql` — added in #171 (PF-A-1)
 
 ---
 
@@ -214,6 +215,74 @@ Same shape as `launch_packages` but FK to `video_briefs`.
 
 ---
 
+## Pipeline / Ad Factory
+
+The Pipeline feature is a guided multi-step ad-creation flow with its own
+state table. Briefs (image and/or video) referenced by a pipeline still
+live in the `briefs` / `video_briefs` tables; the `pipelines` row tracks
+which stage the run is in and what choices the operator has made.
+
+State machine:
+
+```
+configuration → ideation → review → generation → done
+                                                ↘ cancelled
+```
+
+### `pipelines`
+
+One row per Pipeline run. Added in #171 per PF-A-1.
+
+| Column              | Type                                                    | Notes                                                                               |
+| ------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `id`                | `uuid` PK                                               | `gen_random_uuid()` default.                                                        |
+| `status`            | `pipeline_status_enum` NOT NULL default `configuration` | `configuration` \| `ideation` \| `review` \| `generation` \| `done` \| `cancelled`. |
+| `format_choice`     | `pipeline_format_enum` NOT NULL                         | `image` \| `video` \| `both`. Locked at creation.                                   |
+| `client_id`         | `uuid` FK → `clients.id`                                | Optional at creation; the operator may pick a client later in configuration.        |
+| `image_brief_id`    | `uuid` FK → `briefs.id`                                 | Set when the pipeline mints / adopts an image brief.                                |
+| `video_brief_id`    | `uuid` FK → `video_briefs.id`                           | Set when the pipeline mints / adopts a video brief.                                 |
+| `config_draft`      | `jsonb` NOT NULL default `{}`                           | Operator-edited configuration before it's committed to the brief row.               |
+| `picks`             | `jsonb` NOT NULL default `{}`                           | Selections from the ideation / review stages.                                       |
+| `cost_estimate`     | `jsonb`                                                 | Up-front cost projection (null until computed).                                     |
+| `cost_actual`       | `jsonb`                                                 | Realized cost after generation.                                                     |
+| `approval`          | `jsonb`                                                 | Approval decision + notes.                                                          |
+| `launch_package_id` | `uuid` FK → `launch_packages.id`                        | Set at handoff (image side).                                                        |
+| `advanced_at`       | `jsonb` NOT NULL default `{}`                           | `{ <stage>: <iso timestamp> }` cache — `pipeline_events` remains source of truth.   |
+| `created_at`        | `timestamptz` NOT NULL default `now()`                  |                                                                                     |
+| `updated_at`        | `timestamptz` NOT NULL default `now()`                  |                                                                                     |
+
+Indexes:
+
+- `pipelines (status) WHERE status <> 'done'` — partial index for the
+  active-pipelines list (most dashboard queries).
+- `pipelines (client_id)`.
+- `pipelines (image_brief_id) WHERE image_brief_id IS NOT NULL`.
+- `pipelines (video_brief_id) WHERE video_brief_id IS NOT NULL`.
+
+The two FK partial indexes back the brief→pipeline reverse-lookup in
+`lib/pipeline/lookup.ts` (Kanban deep-link routing).
+
+### `pipeline_events`
+
+Append-only per-pipeline timeline. Added in #171 per PF-A-1.
+
+| Column        | Type                                         | Notes                                                                              |
+| ------------- | -------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `id`          | `uuid` PK                                    |                                                                                    |
+| `pipeline_id` | `uuid` FK → `pipelines.id` ON DELETE CASCADE | The owning pipeline.                                                               |
+| `kind`        | `text` NOT NULL                              | `stage_advanced` \| `stage_rejected` \| `pick_made` \| `approval_recorded` \| etc. |
+| `stage`       | `pipeline_status_enum`                       | Destination stage for `stage_advanced`; null where not applicable.                 |
+| `payload`     | `jsonb`                                      | Free-form event-specific payload.                                                  |
+| `created_at`  | `timestamptz` NOT NULL default `now()`       |                                                                                    |
+
+Indexes: `(pipeline_id, created_at desc)` — primary timeline lookup.
+
+Separate from the top-level `events` table so per-pipeline timelines are
+a single indexed lookup and pipeline-only Realtime subscriptions aren't
+polluted with other domain events.
+
+---
+
 ## Audit
 
 ### `campaign_perf_image`
@@ -351,6 +420,8 @@ Both functions are non-strict and safely callable as defaults:
 | `video_creative_status` | `draft`, `script_ready`, `voiceover_ready`, `broll_ready`, `composed`, `captioned`, `approved`, `rejected`               |
 | `video_iteration_kind`  | `generate_script`, `regenerate_voiceover`, `search_broll`, `swap_broll`, `rerender`, `recaption`, `comment`, `user_edit` |
 | `broll_store_backend`   | `local`, `supabase`                                                                                                      |
+| `pipeline_status_enum`  | `configuration`, `ideation`, `review`, `generation`, `done`, `cancelled`                                                 |
+| `pipeline_format_enum`  | `image`, `video`, `both`                                                                                                 |
 
 ---
 
@@ -362,6 +433,7 @@ Added by `0002_realtime_publication.sql` (#17):
 - `video_briefs`, `video_creatives`, `video_iterations`, `video_copy_variants`, `video_launch_packages`
 - `campaign_perf_image`, `campaign_perf_video`
 - `overrides`
+- `pipelines`, `pipeline_events`
 
 Intentionally excluded: `events`, `sync_log` (high-volume / not useful in
 the live operator UI).

@@ -18,8 +18,8 @@ type CommonBrief = {
 };
 
 export type KanbanCardProps =
-  | { kind: "image"; brief: DashboardImageBrief }
-  | { kind: "video"; brief: DashboardVideoBrief };
+  | { kind: "image"; brief: DashboardImageBrief; pipelineId?: string | null }
+  | { kind: "video"; brief: DashboardVideoBrief; pipelineId?: string | null };
 
 /**
  * Shared status-pill palette used across both verticals. Keeping the keys as
@@ -72,20 +72,36 @@ function timeSince(iso: string): string {
 }
 
 /**
- * Single Kanban card. Format-agnostic shell; only the link target differs
- * between image (`/briefs/[id]`) and video (`/briefs/video/[id]`). Click
- * surface is the full card via `<Link>`.
+ * Single Kanban card. Format-agnostic shell. The link target depends on
+ * provenance:
+ *   - If the brief was created via the Pipeline feature, `pipelineId` is set
+ *     and the card jumps into `/pipeline/[pipelineId]`.
+ *   - Otherwise (standalone brief), the link falls back to today's
+ *     `/briefs/[id]` (image) or `/briefs/video/[id]` (video).
+ *
+ * The dashboard server component pre-fetches the brief→pipeline map in a
+ * single Supabase round-trip and threads `pipelineId` in here — see
+ * `lib/pipeline/lookup.ts` and `app/page.tsx`.
+ *
+ * Click surface is the full card via `<Link>`.
  */
 export function KanbanCard(props: KanbanCardProps) {
   const { kind, brief }: { kind: KanbanCardKind; brief: CommonBrief } = props;
+  const pipelineId = props.pipelineId ?? null;
   const pillClass = STATUS_PILL[brief.status] ?? "bg-zinc-100 text-zinc-700";
   const pillLabel = STATUS_LABEL[brief.status] ?? brief.status;
   const kindBadge = KIND_BADGE[kind];
 
+  const href = pipelineId
+    ? `/pipeline/${pipelineId}`
+    : kind === "image"
+      ? `/briefs/${brief.id}`
+      : `/briefs/video/${brief.id}`;
+
   return (
     <li className="list-none">
       <Link
-        href={kind === "image" ? `/briefs/${brief.id}` : `/briefs/video/${brief.id}`}
+        href={href}
         className={cn(
           "flex min-h-[88px] flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm",
           "transition-colors transition-shadow hover:border-zinc-300 hover:shadow active:bg-muted/40",

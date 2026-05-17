@@ -20,10 +20,24 @@ import { createClient } from "@/lib/supabase/browser";
 import { KanbanCard } from "./KanbanCard";
 import { KanbanColumn } from "./KanbanColumn";
 
+/**
+ * Brief id → pipeline id map, pre-fetched by the dashboard server
+ * component. When a brief was created via the Pipeline feature, the value
+ * is the owning pipeline's id and the KanbanCard deep-links into
+ * `/pipeline/[id]`; otherwise the card falls back to the standalone brief
+ * page. See `lib/pipeline/lookup.ts`.
+ *
+ * Plain objects (not `Map`) because the props cross the server→client
+ * boundary and Maps are not serializable across the RSC payload.
+ */
+export type BriefPipelineMap = Record<string, string>;
+
 export type KanbanBoardProps = {
   format: DashboardFormat;
   imageBriefs: DashboardImageBrief[];
   videoBriefs: DashboardVideoBrief[];
+  imagePipelineMap?: BriefPipelineMap;
+  videoPipelineMap?: BriefPipelineMap;
 };
 
 /**
@@ -41,7 +55,13 @@ const BRIEF_COLUMN_STATUSES = new Set(["draft", "posted", "approved", "approved_
  * row on `briefs` or `video_briefs` changes we call `router.refresh()`, which
  * re-runs the server component on `/` and rehydrates the snapshot props.
  */
-export function KanbanBoard({ format, imageBriefs, videoBriefs }: KanbanBoardProps) {
+export function KanbanBoard({
+  format,
+  imageBriefs,
+  videoBriefs,
+  imagePipelineMap,
+  videoPipelineMap,
+}: KanbanBoardProps) {
   const router = useRouter();
 
   useEffect(() => {
@@ -77,6 +97,7 @@ export function KanbanBoard({ format, imageBriefs, videoBriefs }: KanbanBoardPro
           accentClass="bg-violet-500"
           kind="image"
           briefs={imageBriefs}
+          pipelineMap={imagePipelineMap}
         />
       ) : null}
       {renderVideoTrack ? (
@@ -85,6 +106,7 @@ export function KanbanBoard({ format, imageBriefs, videoBriefs }: KanbanBoardPro
           accentClass="bg-cyan-500"
           kind="video"
           briefs={videoBriefs}
+          pipelineMap={videoPipelineMap}
         />
       ) : null}
     </div>
@@ -92,11 +114,23 @@ export function KanbanBoard({ format, imageBriefs, videoBriefs }: KanbanBoardPro
 }
 
 type KanbanTrackProps =
-  | { title: string; accentClass: string; kind: "image"; briefs: DashboardImageBrief[] }
-  | { title: string; accentClass: string; kind: "video"; briefs: DashboardVideoBrief[] };
+  | {
+      title: string;
+      accentClass: string;
+      kind: "image";
+      briefs: DashboardImageBrief[];
+      pipelineMap?: BriefPipelineMap;
+    }
+  | {
+      title: string;
+      accentClass: string;
+      kind: "video";
+      briefs: DashboardVideoBrief[];
+      pipelineMap?: BriefPipelineMap;
+    };
 
 function KanbanTrack(props: KanbanTrackProps) {
-  const { title, accentClass, kind, briefs } = props;
+  const { title, accentClass, kind, briefs, pipelineMap } = props;
   const briefColumn = briefs.filter((b) => BRIEF_COLUMN_STATUSES.has(b.status));
   const trackIsEmpty = briefs.length === 0;
 
@@ -149,12 +183,14 @@ function KanbanTrack(props: KanbanTrackProps) {
                           key={brief.id}
                           kind="image"
                           brief={brief as DashboardImageBrief}
+                          pipelineId={pipelineMap?.[brief.id] ?? null}
                         />
                       ) : (
                         <KanbanCard
                           key={brief.id}
                           kind="video"
                           brief={brief as DashboardVideoBrief}
+                          pipelineId={pipelineMap?.[brief.id] ?? null}
                         />
                       ),
                     )
