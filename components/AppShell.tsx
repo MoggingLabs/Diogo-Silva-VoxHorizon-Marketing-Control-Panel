@@ -7,6 +7,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import {
   Activity,
   ClipboardList,
+  Factory,
   LayoutDashboard,
   Menu,
   Sparkles,
@@ -48,6 +49,12 @@ const NAV: NavItem[] = [
     label: "Dashboard",
     icon: <LayoutDashboard className="h-4 w-4" aria-hidden="true" />,
     match: (p) => p === "/",
+  },
+  {
+    href: "/pipeline" as Route,
+    label: "Pipeline",
+    icon: <Factory className="h-4 w-4" aria-hidden="true" />,
+    match: (p) => p === "/pipeline" || p.startsWith("/pipeline/"),
   },
   {
     href: "/briefs" as Route,
