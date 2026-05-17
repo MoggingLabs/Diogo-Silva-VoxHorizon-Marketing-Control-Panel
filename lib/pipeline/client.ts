@@ -133,6 +133,51 @@ export async function updatePicks(
   }
 }
 
+/**
+ * Body shape for `POST /api/launches` when handing off from a pipeline.
+ *
+ * The launch route accepts the same shape with or without `pipeline_id`;
+ * passing it triggers the back-link side effects (pipeline.launch_package_id
+ * UPDATE + pipeline_events row) and a 422 if the pipeline isn't in `done`.
+ */
+export type LaunchFromPipelineInput = {
+  brief_id: string;
+  pipeline_id?: string;
+};
+
+/**
+ * Light-weight launch row returned by `POST /api/launches`. We only need
+ * the id for the post-create redirect — the launch detail page does its
+ * own deeper fetch.
+ */
+export type LaunchCreated = { id: string };
+
+/**
+ * Build a launch package — `pipeline_id` is the optional pipeline handoff.
+ *
+ * Throws on 4xx/5xx with the error body inlined. The launch route returns
+ * 201 on a clean posted package, 422 on validation issues (in which case
+ * the response body contains an `error` + a `launch` row in `failed`
+ * status). Callers should surface the message and let the operator decide
+ * whether to retry.
+ */
+export async function createLaunchPackage(input: LaunchFromPipelineInput): Promise<LaunchCreated> {
+  const res = await fetch(`${resolveBaseUrl()}/api/launches`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/launches failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+  const data = await readJson<{ launch: LaunchCreated }>(res);
+  return data.launch;
+}
+
 /** Body shape for `POST /api/pipelines/:id/review/decision`. */
 export type ReviewDecisionInput = {
   decision: "approved" | "approved_with_changes" | "rejected";

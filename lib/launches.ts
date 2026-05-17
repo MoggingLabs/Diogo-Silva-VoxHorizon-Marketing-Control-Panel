@@ -31,6 +31,14 @@ import type { Database, Json } from "@/lib/supabase/types.gen";
 /** POST /api/launches body. */
 export const LaunchInput = z.object({
   brief_id: z.string().uuid("brief_id must be a uuid"),
+  /**
+   * Optional pipeline handoff: when present, the launch package is linked
+   * back to the originating pipeline by updating
+   * ``pipelines.launch_package_id`` after insertion (and a
+   * ``pipeline_events(kind='launch_linked')`` row is emitted). The pipeline
+   * MUST be in status ``done`` — otherwise the route returns 422.
+   */
+  pipeline_id: z.string().uuid("pipeline_id must be a uuid").optional(),
 });
 export type LaunchInputT = z.infer<typeof LaunchInput>;
 
