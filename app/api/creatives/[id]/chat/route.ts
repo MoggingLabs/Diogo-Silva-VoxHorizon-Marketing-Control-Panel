@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
+import { buildChatContext } from "@/lib/chat-context";
 import { cleanEnv } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -21,6 +22,9 @@ type RouteContext = { params: Promise<{ id: string }> };
  *   - Authorisation (does this creative belong to a brief?) lives here
  *     rather than on the worker.
  *   - The Next.js side owns retry / heartbeat / error normalization.
+ *   - The Next.js side hydrates the agent context (brief + creative +
+ *     iteration tail + chat tail + tool catalog) via `buildChatContext`
+ *     so the worker doesn't need its own service-role Supabase client.
  *
  * Request body shape: see `lib/chat.ts` (`ChatRequest`).
  * Response shape: `text/event-stream` per `lib/chat.ts` doc.
@@ -59,6 +63,19 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  // Build the agent context payload — brief + creative + last-N iterations
+  // + last-N chat messages + tool catalog. Failures here are unexpected
+  // (the creative exists) so we surface them as 500s.
+  let context;
+  try {
+    context = await buildChatContext(supabase, {
+      creative_id: id,
+      creative_type: "image",
+    });
+  } catch (e) {
+    return NextResponse.json({ error: "context_build_failed", detail: String(e) }, { status: 500 });
+  }
+
   const workerBase = cleanEnv("WORKER_URL").replace(/\/$/, "");
   const secret = cleanEnv("WORKER_SHARED_SECRET");
 
@@ -76,6 +93,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         messages: parsed.data.messages,
         tools: parsed.data.tools,
         system_prompt: parsed.data.system_prompt,
+        context,
       }),
       // Disable Next.js fetch caching for streamed responses.
       cache: "no-store",

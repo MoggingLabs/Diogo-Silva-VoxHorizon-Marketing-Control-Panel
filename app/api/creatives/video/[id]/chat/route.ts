@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
+import { buildChatContext } from "@/lib/chat-context";
 import { cleanEnv } from "@/lib/env";
 import { createAdminClient } from "@/lib/supabase/admin";
 
@@ -17,6 +18,10 @@ type RouteContext = { params: Promise<{ id: string }> };
  * forwards to `/work/chat/video-creative` which exposes the
  * video-pipeline tool set (regenerate_voiceover, swap_broll,
  * rerender_video).
+ *
+ * Like the image-side route, this proxy hydrates the agent context
+ * (brief + creative + iteration tail + chat tail + tool catalog) via
+ * `buildChatContext` before forwarding to the worker.
  */
 export async function POST(req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -49,6 +54,17 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
+  // Hydrate the agent context payload before invoking the worker.
+  let context;
+  try {
+    context = await buildChatContext(supabase, {
+      creative_id: id,
+      creative_type: "video",
+    });
+  } catch (e) {
+    return NextResponse.json({ error: "context_build_failed", detail: String(e) }, { status: 500 });
+  }
+
   const workerBase = cleanEnv("WORKER_URL").replace(/\/$/, "");
   const secret = cleanEnv("WORKER_SHARED_SECRET");
 
@@ -66,6 +82,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         messages: parsed.data.messages,
         tools: parsed.data.tools,
         system_prompt: parsed.data.system_prompt,
+        context,
       }),
       cache: "no-store",
       signal: req.signal,
