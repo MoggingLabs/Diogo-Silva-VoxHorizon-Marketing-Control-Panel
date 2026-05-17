@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 
+import { createRealtimeQueue } from "@/lib/realtime-queue";
 import { createClient } from "@/lib/supabase/browser";
 import {
   CREATIVES_BUCKET,
@@ -134,6 +135,10 @@ export function VideoVariantsGrid({
   );
 
   useEffect(() => {
+    // Video pipeline writes a chatty stream of `video_creatives`
+    // updates (script → voiceover → broll → composed → captioned).
+    // Debounce them so each pipeline transition is one render.
+    const queue = createRealtimeQueue();
     const supabase = createClient();
     const channel = supabase
       .channel(`video-creatives:${brief.id}`)
@@ -147,11 +152,13 @@ export function VideoVariantsGrid({
         },
         (payload) => {
           const next = payload.new as VideoCreative;
-          setCreatives((prev) => {
-            if (prev.some((c) => c.id === next.id)) return prev;
-            return [...prev, next];
+          queue.queue(`insert:${next.id}`, () => {
+            setCreatives((prev) => {
+              if (prev.some((c) => c.id === next.id)) return prev;
+              return [...prev, next];
+            });
+            void fetchMissingUrls(next);
           });
-          void fetchMissingUrls(next);
         },
       )
       .on(
@@ -164,8 +171,10 @@ export function VideoVariantsGrid({
         },
         (payload) => {
           const next = payload.new as VideoCreative;
-          setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-          void fetchMissingUrls(next);
+          queue.queue(`update:${next.id}`, () => {
+            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+            void fetchMissingUrls(next);
+          });
         },
       )
       .on(
@@ -179,18 +188,21 @@ export function VideoVariantsGrid({
         (payload) => {
           const old = payload.old as Partial<VideoCreative>;
           if (!old?.id) return;
-          setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-          setSignedUrls((prev) => {
-            if (!(old.id! in prev)) return prev;
-            const next = { ...prev };
-            delete next[old.id!];
-            return next;
+          queue.queue(`delete:${old.id}`, () => {
+            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+            setSignedUrls((prev) => {
+              if (!(old.id! in prev)) return prev;
+              const next = { ...prev };
+              delete next[old.id!];
+              return next;
+            });
           });
         },
       )
       .subscribe();
 
     return () => {
+      queue.dispose();
       void supabase.removeChannel(channel);
     };
   }, [brief.id, fetchMissingUrls]);

@@ -6,6 +6,7 @@ import type { Route } from "next";
 import { ImageIcon } from "lucide-react";
 
 import { EmptyState } from "@/components/EmptyState";
+import { createRealtimeQueue } from "@/lib/realtime-queue";
 import { createClient } from "@/lib/supabase/browser";
 import type { Creative } from "@/lib/creatives";
 
@@ -76,6 +77,12 @@ export function VariantsGrid({
   }, []);
 
   useEffect(() => {
+    // Debounce realtime invalidations: the worker can write several
+    // `creatives` rows in a tight burst (e.g. four-variant fan-out),
+    // and we don't want each row to trigger its own React render.
+    // INSERT/UPDATE/DELETE handlers stage state mutations into the
+    // queue and the 200ms flush runs them in a single batch.
+    const queue = createRealtimeQueue();
     const supabase = createClient();
     const channel = supabase
       .channel(`creatives:${briefId}`)
@@ -89,13 +96,15 @@ export function VariantsGrid({
         },
         (payload) => {
           const next = payload.new as Creative;
-          setCreatives((prev) => {
-            if (prev.some((c) => c.id === next.id)) return prev;
-            return [...prev, next];
+          queue.queue(`insert:${next.id}`, () => {
+            setCreatives((prev) => {
+              if (prev.some((c) => c.id === next.id)) return prev;
+              return [...prev, next];
+            });
+            if (next.file_path_supabase) {
+              void fetchSignedUrl(next.id, next.file_path_supabase);
+            }
           });
-          if (next.file_path_supabase) {
-            void fetchSignedUrl(next.id, next.file_path_supabase);
-          }
         },
       )
       .on(
@@ -108,11 +117,13 @@ export function VariantsGrid({
         },
         (payload) => {
           const next = payload.new as Creative;
-          setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-          // If the file path changed and we don't have a URL yet, fetch one.
-          if (next.file_path_supabase && !signedUrls[next.id]) {
-            void fetchSignedUrl(next.id, next.file_path_supabase);
-          }
+          queue.queue(`update:${next.id}`, () => {
+            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+            // If the file path changed and we don't have a URL yet, fetch one.
+            if (next.file_path_supabase && !signedUrls[next.id]) {
+              void fetchSignedUrl(next.id, next.file_path_supabase);
+            }
+          });
         },
       )
       .on(
@@ -126,18 +137,21 @@ export function VariantsGrid({
         (payload) => {
           const old = payload.old as Partial<Creative>;
           if (!old?.id) return;
-          setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-          setSignedUrls((prev) => {
-            if (!(old.id! in prev)) return prev;
-            const next = { ...prev };
-            delete next[old.id!];
-            return next;
+          queue.queue(`delete:${old.id}`, () => {
+            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+            setSignedUrls((prev) => {
+              if (!(old.id! in prev)) return prev;
+              const next = { ...prev };
+              delete next[old.id!];
+              return next;
+            });
           });
         },
       )
       .subscribe();
 
     return () => {
+      queue.dispose();
       void supabase.removeChannel(channel);
     };
   }, [briefId, fetchSignedUrl, signedUrls]);

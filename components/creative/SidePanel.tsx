@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Copy, ExternalLink, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Copy, ExternalLink, Loader2, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -12,6 +12,9 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { EkkoChat } from "@/components/chat/EkkoChat";
+import { ThreadSearch, useThreadSearchShortcut } from "@/components/chat/ThreadSearch";
+import { UnreadDivider } from "@/components/chat/UnreadDivider";
+import { countUnread, getLastSeen, markRead } from "@/lib/chat-read-status";
 import { createClient } from "@/lib/supabase/browser";
 import { STATUS_LABEL, STATUS_PILL, type Creative, type CreativeIteration } from "@/lib/creatives";
 import { cn } from "@/lib/utils";
@@ -65,6 +68,9 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
   const [loadingIterations, setLoadingIterations] = useState(false);
   const [iterationsError, setIterationsError] = useState<string | null>(null);
   const [promptCopied, setPromptCopied] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [lastSeen, setLastSeen] = useState<string | null>(null);
+  const sheetScopeRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!creative) return;
@@ -95,7 +101,48 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
 
   useEffect(() => {
     setPromptCopied(false);
+    setSearchOpen(false);
   }, [creative?.id]);
+
+  // Pull the last-seen marker for the current creative before
+  // computing unread counts. We snapshot the value so subsequent
+  // markRead calls (e.g. when the panel closes) don't make the divider
+  // jump.
+  useEffect(() => {
+    if (!creative) {
+      setLastSeen(null);
+      return;
+    }
+    let cancelled = false;
+    void getLastSeen(creative.id).then((iso) => {
+      if (!cancelled) setLastSeen(iso);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [creative]);
+
+  // Stamp "last read" when the panel closes — that mirrors how an
+  // operator interacts with the side sheet (open, scan, close).
+  useEffect(() => {
+    if (!creative) return;
+    if (open) return;
+    void markRead(creative.id);
+  }, [creative, open]);
+
+  // Wire Cmd+F (Ctrl+F on Windows). The hook ignores the shortcut
+  // when focus is outside the side-panel scope.
+  const openSearch = useCallback(() => setSearchOpen(true), []);
+  useThreadSearchShortcut(sheetScopeRef, openSearch);
+
+  const unreadCount = useMemo(
+    () =>
+      countUnread(
+        lastSeen,
+        iterations.map((i) => ({ createdAt: i.created_at })),
+      ),
+    [iterations, lastSeen],
+  );
 
   if (!creative) {
     return (
@@ -136,13 +183,25 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent>
+      <SheetContent ref={sheetScopeRef}>
         <SheetHeader className="pr-8">
           <div className="flex flex-wrap items-center gap-2">
             <SheetTitle className="truncate">{concept}</SheetTitle>
             <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-medium", pillClass)}>
               {pillLabel}
             </span>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setSearchOpen((v) => !v)}
+              className="ml-auto h-7 gap-1 text-xs"
+              title="Search this thread (Cmd/Ctrl+F)"
+              aria-label="Search this thread"
+            >
+              <Search aria-hidden="true" className="h-3.5 w-3.5" />
+              Find
+            </Button>
           </div>
           <SheetDescription className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
             <span className="font-mono">{creative.version}</span>
@@ -155,6 +214,12 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
               </>
             ) : null}
           </SheetDescription>
+          <ThreadSearch
+            open={searchOpen}
+            onClose={() => setSearchOpen(false)}
+            searchScope={sheetScopeRef}
+            label="Search iterations + chat"
+          />
         </SheetHeader>
 
         <div className="mt-6 flex flex-col gap-6">
@@ -250,7 +315,10 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
                 Failed to load iterations: {iterationsError}
               </p>
             ) : (
-              <IterationThread creativeId={creative.id} initialIterations={iterations} />
+              <>
+                <UnreadDivider count={unreadCount} />
+                <IterationThread creativeId={creative.id} initialIterations={iterations} />
+              </>
             )}
           </Section>
 
