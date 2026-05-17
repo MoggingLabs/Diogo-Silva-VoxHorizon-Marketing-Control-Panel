@@ -255,7 +255,7 @@ function ImagePicksGrid({ pickIds, emptyMessage }: { pickIds: string[]; emptyMes
   }
 
   return (
-    <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
+    <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4">
       {rows.map((row) => (
         <li key={row.id} className="flex flex-col gap-2 overflow-hidden rounded-md border bg-card">
           <div className="relative aspect-square w-full overflow-hidden bg-muted/40">
@@ -426,7 +426,10 @@ function VideoPicksGrid({ pickIds, emptyMessage }: { pickIds: string[]; emptyMes
 
 function SkeletonCardRow({ count }: { count: number }) {
   return (
-    <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4" aria-hidden="true">
+    <ul
+      className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4"
+      aria-hidden="true"
+    >
       {Array.from({ length: count }).map((_, idx) => (
         <li
           key={idx}

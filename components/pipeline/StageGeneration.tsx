@@ -407,7 +407,11 @@ function RetryButton({ pipelineId, taskEventId }: { pipelineId: string; taskEven
 
 function EmptyState() {
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center">
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center"
+    >
       <div className="relative">
         <Sparkles aria-hidden="true" className="h-7 w-7 text-muted-foreground" />
         <Loader2

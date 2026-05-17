@@ -638,7 +638,7 @@ export function StageConfiguration({ pipeline, clients: initialClients }: StageC
                 <RadioGroup
                   value={format}
                   onValueChange={(v) => onFormatChange(v as PipelineFormat)}
-                  className="flex flex-wrap gap-4"
+                  className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-4"
                 >
                   <FormatRadio id="fmt-image" value="image" label="Image" />
                   <FormatRadio id="fmt-video" value="video" label="Video" />
@@ -758,7 +758,7 @@ function ImageBriefFields({
         <RadioGroup
           value={values.service}
           onValueChange={(v) => onField("service", v as ImageFormValues["service"])}
-          className="flex gap-6"
+          className="flex flex-col gap-2 sm:flex-row sm:gap-6"
         >
           <FormatRadio id="img-service-roofing" value="roofing" label="Roofing" />
           <FormatRadio id="img-service-remodeling" value="remodeling" label="Remodeling" />
@@ -1044,7 +1044,7 @@ function VideoBriefFields({
           <RadioGroup
             value={values.dimensions}
             onValueChange={(v) => onField("dimensions", v as VideoFormValues["dimensions"])}
-            className="flex gap-4"
+            className="flex flex-col gap-2 sm:flex-row sm:gap-4"
           >
             {RATIO_OPTIONS.map((r) => (
               <FormatRadio key={r} id={`vid-ratio-${r}`} value={r} label={r} />

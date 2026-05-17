@@ -222,6 +222,8 @@ type ImageTrackColumnProps = {
 function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProps) {
   const [creatives, setCreatives] = useState<Creative[]>([]);
   const [signedUrls, setSignedUrls] = useState<Record<string, string | null>>({});
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const pendingSignedUrlsRef = useRef(new Set<string>());
 
   const fetchSignedUrl = useCallback(async (creativeId: string, filePath: string) => {
@@ -247,21 +249,40 @@ function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProp
   // and do an initial select to backfill anything written before the
   // subscription was active.
   useEffect(() => {
-    if (!briefId) return;
+    if (!briefId) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
+    setLoading(true);
+    setFetchError(null);
     const supabase = createClient();
     void (async () => {
-      const { data } = await supabase
-        .from("creatives")
-        .select("*")
-        .eq("brief_id", briefId)
-        .order("created_at", { ascending: true });
-      if (cancelled || !data) return;
-      setCreatives(data);
-      for (const c of data) {
-        if (c.file_path_supabase) {
-          void fetchSignedUrl(c.id, c.file_path_supabase);
+      try {
+        const { data, error } = await supabase
+          .from("creatives")
+          .select("*")
+          .eq("brief_id", briefId)
+          .order("created_at", { ascending: true });
+        if (cancelled) return;
+        if (error) {
+          setFetchError(error.message);
+          setLoading(false);
+          return;
         }
+        if (data) {
+          setCreatives(data);
+          for (const c of data) {
+            if (c.file_path_supabase) {
+              void fetchSignedUrl(c.id, c.file_path_supabase);
+            }
+          }
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setFetchError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -355,8 +376,11 @@ function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProp
   return (
     <div className="flex flex-col gap-3">
       <TrackHeader label="Image concepts" picked={picks.size} total={sorted.length} />
-      {sorted.length === 0 ? (
-        <IdeationEmptyState />
+      {fetchError ? <IdeationErrorBanner track="image" message={fetchError} /> : null}
+      {loading && sorted.length === 0 ? (
+        <IdeationLoadingState />
+      ) : sorted.length === 0 ? (
+        <IdeationEmptyState track="image" />
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {sorted.map((c) => (
@@ -444,6 +468,8 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
   // card render on it: the broll-plan summary alone is useful, and
   // the script blob trickles in once the file becomes available.
   const [scriptExcerpts, setScriptExcerpts] = useState<Record<string, string>>({});
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const pendingScriptsRef = useRef(new Set<string>());
 
   const fetchScriptExcerpt = useCallback(async (creativeId: string, scriptPath: string) => {
@@ -472,21 +498,40 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
   }, []);
 
   useEffect(() => {
-    if (!briefId) return;
+    if (!briefId) {
+      setLoading(false);
+      return;
+    }
     let cancelled = false;
+    setLoading(true);
+    setFetchError(null);
     const supabase = createClient();
     void (async () => {
-      const { data } = await supabase
-        .from("video_creatives")
-        .select("*")
-        .eq("brief_id", briefId)
-        .order("created_at", { ascending: true });
-      if (cancelled || !data) return;
-      setCreatives(data);
-      for (const c of data) {
-        if (c.script_path) {
-          void fetchScriptExcerpt(c.id, c.script_path);
+      try {
+        const { data, error } = await supabase
+          .from("video_creatives")
+          .select("*")
+          .eq("brief_id", briefId)
+          .order("created_at", { ascending: true });
+        if (cancelled) return;
+        if (error) {
+          setFetchError(error.message);
+          setLoading(false);
+          return;
         }
+        if (data) {
+          setCreatives(data);
+          for (const c of data) {
+            if (c.script_path) {
+              void fetchScriptExcerpt(c.id, c.script_path);
+            }
+          }
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setFetchError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -580,8 +625,11 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
   return (
     <div className="flex flex-col gap-3">
       <TrackHeader label="Video concepts" picked={picks.size} total={sorted.length} />
-      {sorted.length === 0 ? (
-        <IdeationEmptyState />
+      {fetchError ? <IdeationErrorBanner track="video" message={fetchError} /> : null}
+      {loading && sorted.length === 0 ? (
+        <IdeationLoadingState />
+      ) : sorted.length === 0 ? (
+        <IdeationEmptyState track="video" />
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
           {sorted.map((c) => (
@@ -659,11 +707,14 @@ function VideoPickCard({ creative, scriptExcerpt, picked, onToggle }: VideoPickC
 // ---------------------------------------------------------------------------
 
 function PickIndicator({ picked }: { picked: boolean }) {
+  // The full card is the hit target (44px+ on all sides via the image/script
+  // body), so the indicator itself is purely visual. Sized at 28px to be
+  // visible at glance distance without crowding the card content.
   return (
     <span
       aria-hidden="true"
       className={cn(
-        "absolute right-2 top-2 inline-flex h-6 w-6 items-center justify-center rounded-full border shadow",
+        "absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border shadow",
         picked
           ? "border-emerald-500 bg-emerald-500 text-white"
           : "border-zinc-300 bg-white/90 text-transparent",
@@ -674,9 +725,55 @@ function PickIndicator({ picked }: { picked: boolean }) {
   );
 }
 
-function IdeationEmptyState() {
+function IdeationLoadingState() {
+  // Skeleton tiles mirroring the eventual 1-up / 2-up grid so the layout
+  // doesn't reflow when the first creative lands. Each tile is the
+  // approximate aspect ratio of an image variant card.
   return (
-    <div className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center">
+    <div
+      role="status"
+      aria-busy="true"
+      aria-label="Loading concepts"
+      className="grid grid-cols-1 gap-3 sm:grid-cols-2"
+    >
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div
+          key={i}
+          className="flex animate-pulse flex-col gap-2 overflow-hidden rounded-md border bg-card"
+        >
+          <div className="aspect-square w-full bg-muted/50" />
+          <div className="flex flex-col gap-1 px-3 pb-3 pt-1">
+            <div className="h-3 w-3/4 rounded bg-muted/60" />
+            <div className="h-2.5 w-1/3 rounded bg-muted/40" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function IdeationErrorBanner({ track, message }: { track: PipelineTrack; message: string }) {
+  const label = track === "image" ? "image" : "video";
+  return (
+    <div
+      role="alert"
+      className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive"
+    >
+      Couldn&apos;t load {label} concepts — {message}. New variants will still stream in via
+      realtime; reload to retry the initial fetch.
+    </div>
+  );
+}
+
+function IdeationEmptyState({ track }: { track?: PipelineTrack }) {
+  const label =
+    track === "video" ? "video concepts" : track === "image" ? "image concepts" : "concepts";
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center"
+    >
       <div className="relative">
         <Sparkles aria-hidden="true" className="h-7 w-7 text-muted-foreground" />
         <Loader2
@@ -685,7 +782,7 @@ function IdeationEmptyState() {
         />
       </div>
       <div className="space-y-1">
-        <p className="text-sm font-medium text-foreground">Ekko is sketching concepts…</p>
+        <p className="text-sm font-medium text-foreground">Ekko is sketching {label}…</p>
         <p className="text-xs text-muted-foreground">
           Picks: <span className="font-mono">0</span>. Variants stream in as they&apos;re ready.
         </p>
