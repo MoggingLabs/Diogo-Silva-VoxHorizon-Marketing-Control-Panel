@@ -216,6 +216,21 @@ Same grouping as `worker/.env.example`. For each entry: var name, what it does f
 | -------------------- | ----------------------------------------------------------- | ---------------------------- |
 | `TAILSCALE_HOSTNAME` | MagicDNS hostname surfaced for log correlation. Not secret. | Edit `/opt/voxhorizon/.env`. |
 
+#### Reverse proxy (VPS-3)
+
+| Var                      | Purpose                                                                                   | Rotate at                    |
+| ------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------- |
+| `VOXHORIZON_WORKER_HOST` | Hostname Caddy obtains a Let's Encrypt cert for and matches in its Caddyfile. Not secret. | Edit `/opt/voxhorizon/.env`. |
+
+##### Cloudflare DNS setup (operator)
+
+There is no Cloudflare credential to manage for v1 — Caddy speaks ACME directly to Let's Encrypt — but the operator's one-time Cloudflare wiring is recorded here so the dependency is auditable.
+
+- **DNS.** Create an A record `worker.voxhorizon.com` → VPS public IP. Proxy status: **ON** (orange cloud). Cloudflare's edge fronts the user-facing TLS leg.
+- **SSL/TLS mode.** Cloudflare dashboard → SSL/TLS → Overview → **Full (strict)**. Cloudflare validates the upstream Let's Encrypt cert that Caddy presents. _Flexible_ would terminate TLS at the edge and talk plaintext to Caddy — never use it. _Full_ (non-strict) would accept any cert from the origin including self-signed — avoid; Let's Encrypt makes strict trivial.
+- **No API token required.** Cloudflare API tokens would only be needed if v2 moves to DNS-01 ACME challenges (e.g. for wildcard certs). v1 uses HTTP-01 over the Cloudflare edge, which works out of the box once the proxy is ON and SSL mode is Full (strict).
+- **Cert renewal.** Caddy renews ~30 days before expiry. State persists in the `voxhorizon-caddy-data` named volume across container restarts.
+
 ### VAPID note
 
 `VAPID_PRIVATE_KEY` (and its public counterpart `NEXT_PUBLIC_VAPID_PUBLIC_KEY` on Vercel) is **never rotated on a schedule.** The keypair identifies the push origin to every browser that has subscribed. Rotating the private key forces **every subscriber** to re-subscribe — the old push endpoint becomes unusable for the existing subscription records in `push_subscriptions`. Only rotate on confirmed leak, and only after planning the re-subscribe migration (clear `push_subscriptions`, prompt every active client to re-permission Web Push).

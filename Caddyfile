@@ -1,0 +1,24 @@
+{$VOXHORIZON_WORKER_HOST:worker.voxhorizon.example.com} {
+	encode zstd gzip
+
+	reverse_proxy worker:8000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+
+		# SSE: disable Caddy's response buffering so chat-stream tokens
+		# arrive at the client in real time, not at the end of the agent
+		# turn. -1 means "flush after every write" — required for the
+		# chat-with-Ekko SSE endpoint to feel interactive.
+		flush_interval -1
+	}
+
+	log {
+		output file /var/log/caddy/access.log {
+			roll_size 50mb
+			roll_keep 5
+		}
+		format json
+	}
+}
