@@ -1,3 +1,4 @@
+import type { Route } from "next";
 import Link from "next/link";
 
 import type {
@@ -92,11 +93,13 @@ export function KanbanCard(props: KanbanCardProps) {
   const pillLabel = STATUS_LABEL[brief.status] ?? brief.status;
   const kindBadge = KIND_BADGE[kind];
 
-  const href = pipelineId
-    ? `/pipeline/${pipelineId}`
-    : kind === "image"
-      ? `/briefs/${brief.id}`
-      : `/briefs/video/${brief.id}`;
+  const href = (
+    pipelineId
+      ? `/pipeline/${pipelineId}`
+      : kind === "image"
+        ? `/briefs/${brief.id}`
+        : `/briefs/video/${brief.id}`
+  ) as Route;
 
   return (
     <li className="list-none">
