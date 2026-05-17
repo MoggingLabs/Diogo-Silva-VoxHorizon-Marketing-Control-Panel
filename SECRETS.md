@@ -313,3 +313,19 @@ When the operator count goes above one — or when audit / compliance demands it
 - Rotation becomes a `sops updatekeys` operation; new operators are onboarded by adding their public key and re-encrypting.
 
 This is **not** v1 scope. v1's single-operator threat model is met by `chmod 600 /opt/voxhorizon/.env` + tight SSH ACLs. Revisit when (a) a second operator needs commit-level access, or (b) the worker fleet grows past one VPS and provisioning needs a shared, auditable source for the env file.
+
+---
+
+## External monitoring accounts (VPS-6)
+
+External uptime monitors live alongside the secrets they alert on. None of them require API keys for v1 — they're all free-tier and configured via the web UI — so there's nothing to put in the vault except the dashboard URLs.
+
+| Service              | Account                          | Dashboard                   | API key needed? | Notes                                                                                                                                    |
+| -------------------- | -------------------------------- | --------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Uptime Robot         | `diogosilvaenterprise@gmail.com` | https://uptimerobot.com     | No (free tier)  | Polls `https://worker.<domain>/work/ping` every 5 min. See [`infra/monitoring/README.md`](./infra/monitoring/README.md) for setup.       |
+| Healthchecks.io      | `diogosilvaenterprise@gmail.com` | https://healthchecks.io     | No              | One check per scheduled job. Ping URLs are per-check (treat like secrets — anyone with one can fake a heartbeat). Store on the VPS only. |
+| Supabase status page | (public, no account)             | https://status.supabase.com | No              | Email subscription added for `diogosilvaenterprise@gmail.com`; also mirrored in Uptime Robot as an independent monitor.                  |
+
+The Healthchecks.io ping URLs are the only monitoring-related thing that needs handling — they live on the VPS inside the systemd unit files / wrapper scripts (lands with #59). Treat them like service credentials: don't commit them to git, copy them out of the Healthchecks dashboard at provisioning time.
+
+See [`infra/monitoring/README.md`](./infra/monitoring/README.md) for the full setup runbook and alert response procedure.
