@@ -11,6 +11,7 @@ Migration sources:
 - `db/migrations/0004_v1_video_brief_constraints.sql` — added in #78 (V1-1)
 - `db/migrations/0005_chat_messages.sql` — added in #143 (Wave 5.5-1)
 - `db/migrations/0006_pipelines.sql` — added in #171 (PF-A-1)
+- `db/migrations/0007_pipeline_triggers.sql` — added in #196 / #197 (PF-E-4 / PF-E-5)
 
 ---
 
@@ -280,6 +281,50 @@ Indexes: `(pipeline_id, created_at desc)` — primary timeline lookup.
 Separate from the top-level `events` table so per-pipeline timelines are
 a single indexed lookup and pipeline-only Realtime subscriptions aren't
 polluted with other domain events.
+
+#### Triggers on `pipeline_events`
+
+Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197).
+
+`pipeline_events_cost_actual_trg` (AFTER INSERT WHEN `kind = 'cost_recorded'`):
+
+- Folds every `cost_recorded` payload (`{ api, units, subtotal,
+  task_event_id?, extra? }`) into `pipelines.cost_actual` via a single
+  atomic UPDATE. Output shape:
+
+  ```jsonc
+  {
+    "items": [
+      {
+        "api": "kie.ai",
+        "units": 1,
+        "subtotal": 0.05,
+        "actual_cost": 0.05, // canonical key, matches cost_estimate.items[].cost
+        "task_event_id": "…", // optional, links back to the task_done row
+        "extra": { … } // optional, copied verbatim from the worker payload
+      }
+      // …
+    ],
+    "total": 1.74 // sum of items[].actual_cost
+  }
+  ```
+
+- Race-condition-safe: the items append + total recompute live inside
+  one SQL UPDATE so concurrent emitters serialise behind Postgres's
+  per-row write lock.
+
+`pipeline_events_auto_advance_done_trg` (AFTER INSERT WHEN `kind IN
+('task_done', 'task_error')`):
+
+- Scoped to `stage = 'generation'`. Counts task events since the most
+  recent `stage_advanced → generation` (cutoff identified by event id,
+  not timestamp, because `now()` is statement-stable within a
+  transaction).
+- Flips the pipeline to `status = 'done'`, stamps `advanced_at.done`,
+  and emits a `stage_advanced → done` event once
+  `task_done + task_error ≥ task_queued`.
+- Idempotent: the UPDATE is gated on `status = 'generation'`, so a
+  late retry or duplicate `task_done` after closure is a no-op.
 
 ---
 
