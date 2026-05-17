@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import audit, broll, chat, chat_stream, creative, health, launch, upload, video
+from .routes import audit, broll, chat, chat_stream, creative, health, launch, ping, upload, video
 from .services.queue import get_queue
 
 
@@ -60,6 +60,10 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(health.router, tags=["health"])
+    # Public, unauthenticated liveness probe for external uptime monitors
+    # (Uptime Robot etc.). MUST stay free of auth dependencies — see
+    # routes/ping.py and infra/monitoring/README.md (VPS-6).
+    app.include_router(ping.router, tags=["ping"])
     app.include_router(creative.router, tags=["creative"])
     app.include_router(upload.router, tags=["upload"])
     app.include_router(chat.router, tags=["chat"])
