@@ -129,3 +129,187 @@ The vault is **not** an authoritative source for production — Vercel's env-var
 4. **Redeploy.** Vercel: trigger a redeploy so new env vars take effect. Worker: restart (`launchctl kickstart -k gui/<uid>/voxhorizon-worker` once M0-22 lands; otherwise `Ctrl+C` and re-run `bash scripts/serve.sh`).
 5. **Smoke test.** `curl http://localhost:3000/api/worker/health`; if 401, the new shared secret didn't sync.
 6. **Post-mortem.** Write down in a Tracker comment: what leaked, how it leaked, what changed in handling.
+
+---
+
+## VPS production secrets
+
+The worker container runs on a Linux VPS (see VPS-2 / VPS-3). Secrets for the worker process live on disk on the VPS — **not** in the Docker image, **never** in git, and **never** baked into the build.
+
+### Where secrets live on the VPS
+
+```
+/opt/voxhorizon/
+├── .env          # env file consumed by docker compose
+└── docker-compose.yml
+```
+
+- **Path:** `/opt/voxhorizon/.env`
+- **Owner:** `deploy:deploy`
+- **Mode:** `chmod 600` (only the `deploy` user can read or write)
+- **Template:** `worker/.env.example` in this repo is the single source of truth for the list of required keys. Run `worker/scripts/check-env.sh` at container start to fail fast on any missing var.
+- **Build invariant:** the Dockerfile (VPS-2) does **not** copy any `.env*` file into the image. `docker compose up` mounts `/opt/voxhorizon/.env` as `env_file:` so secrets are runtime-only.
+- **Git invariant:** `.gitignore` blocks every `.env*` pattern except `.env.example`. There is zero overlap between the secret values and any tracked file.
+
+### Full secret inventory (VPS scope)
+
+Same grouping as `worker/.env.example`. For each entry: var name, what it does for the worker, where to rotate it.
+
+#### Identity
+
+| Var                      | Purpose                                                                                                                     | Rotate at                                                                                                                                |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `WORKER_SHARED_SECRET`   | Bearer token compared (constant-time) on every request from Vercel to the worker. **Shared with Vercel env.**               | Regenerate locally: `python -c "import secrets; print(secrets.token_hex(64))"`. Apply to **both** Vercel env and `/opt/voxhorizon/.env`. |
+| `WORKER_PUBLIC_BASE_URL` | The URL the Next.js app uses to reach this worker (also used in signed b-roll URLs). Not secret, but environment-dependent. | Change if the VPS domain / Tailscale Funnel URL changes.                                                                                 |
+| `WORKER_CORS_ORIGIN`     | CORS allow-origin for the Next.js app. Not secret.                                                                          | Change if the Vercel production URL changes.                                                                                             |
+| `WORKER_VERSION`         | Build / image tag surfaced on `/health`. Not secret.                                                                        | Updated by the deploy pipeline.                                                                                                          |
+
+#### Supabase
+
+| Var                         | Purpose                                                             | Rotate at                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_URL`              | Project endpoint. Public.                                           | Supabase dashboard → Project Settings → API. URL itself is stable.                                                          |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service role JWT (bypasses RLS). **Shared with Vercel server env.** | Supabase dashboard → Project Settings → API → Rotate service_role. Apply to **both** Vercel env and `/opt/voxhorizon/.env`. |
+
+#### Storage
+
+| Var                   | Purpose                                                | Rotate at                    |
+| --------------------- | ------------------------------------------------------ | ---------------------------- |
+| `BROLL_STORE_BACKEND` | `local` or `supabase`. Not secret.                     | Edit `/opt/voxhorizon/.env`. |
+| `BROLL_LOCAL_ROOT`    | Filesystem path for the local b-roll pool. Not secret. | Edit `/opt/voxhorizon/.env`. |
+
+#### Integrations: image
+
+| Var              | Purpose                                | Rotate at                    |
+| ---------------- | -------------------------------------- | ---------------------------- |
+| `KIE_AI_API_KEY` | Kie.ai (GPT Image 2) image generation. | Kie.ai dashboard → API Keys. |
+
+#### Integrations: video
+
+| Var                  | Purpose              | Rotate at                                  |
+| -------------------- | -------------------- | ------------------------------------------ |
+| `ELEVENLABS_API_KEY` | Voiceover synthesis. | ElevenLabs dashboard → Profile → API Keys. |
+| `SUBMAGIC_API_KEY`   | Caption generation.  | Submagic dashboard → Settings → API.       |
+
+#### Audit data sources
+
+| Var                | Purpose                               | Rotate at                                      |
+| ------------------ | ------------------------------------- | ---------------------------------------------- |
+| `META_ADS_API_KEY` | Meta Ads performance pulls.           | Meta Business → System Users → Generate Token. |
+| `GHL_API_KEY`      | GoHighLevel pipeline / contact pulls. | GHL → Settings → Private Integrations.         |
+
+#### Notifications
+
+| Var                 | Purpose                                                                                   | Rotate at                                                                             |
+| ------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `VAPID_PRIVATE_KEY` | Server signs Web Push payloads. **Paired with `NEXT_PUBLIC_VAPID_PUBLIC_KEY` on Vercel.** | `npx web-push generate-vapid-keys`. **Do not rotate on a schedule** — see note below. |
+
+#### Agent runtime
+
+| Var                 | Purpose                                           | Rotate at                         |
+| ------------------- | ------------------------------------------------- | --------------------------------- |
+| `ANTHROPIC_API_KEY` | Claude Code runner (server-side agent execution). | console.anthropic.com → API Keys. |
+
+#### Monitoring
+
+| Var                  | Purpose                                                     | Rotate at                    |
+| -------------------- | ----------------------------------------------------------- | ---------------------------- |
+| `TAILSCALE_HOSTNAME` | MagicDNS hostname surfaced for log correlation. Not secret. | Edit `/opt/voxhorizon/.env`. |
+
+### VAPID note
+
+`VAPID_PRIVATE_KEY` (and its public counterpart `NEXT_PUBLIC_VAPID_PUBLIC_KEY` on Vercel) is **never rotated on a schedule.** The keypair identifies the push origin to every browser that has subscribed. Rotating the private key forces **every subscriber** to re-subscribe — the old push endpoint becomes unusable for the existing subscription records in `push_subscriptions`. Only rotate on confirmed leak, and only after planning the re-subscribe migration (clear `push_subscriptions`, prompt every active client to re-permission Web Push).
+
+### Quarterly rotation checklist
+
+Run the first weekend of each quarter. Tick each box as you go.
+
+- [ ] **Supabase service role.** Rotate at Supabase dashboard; update Vercel env (production + preview + development) **and** `/opt/voxhorizon/.env`. Use the rolling pattern (below) so neither side breaks during the swap.
+- [ ] **`WORKER_SHARED_SECRET`.** Regenerate (`python -c "import secrets; print(secrets.token_hex(64))"`); update Vercel env **and** `/opt/voxhorizon/.env`. Rolling pattern applies.
+- [ ] **Kie.ai (`KIE_AI_API_KEY`).** Rotate at kie.ai; update `/opt/voxhorizon/.env`; `docker compose up -d worker`.
+- [ ] **ElevenLabs (`ELEVENLABS_API_KEY`).** Rotate at elevenlabs.io; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **Submagic (`SUBMAGIC_API_KEY`).** Rotate at submagic.co; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **Meta Ads (`META_ADS_API_KEY`).** Generate fresh System User token; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **GoHighLevel (`GHL_API_KEY`).** Rotate at GHL → Settings → Private Integrations; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **Anthropic (`ANTHROPIC_API_KEY`).** Rotate at console.anthropic.com; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **Resend (`RESEND_API_KEY`).** Vercel-side only — update Vercel env; redeploy. (Not consumed by the worker.)
+- [ ] **GitHub PAT (Pedro's).** Rotate at github.com/settings/tokens; update `~/.config/github/token` (chmod 600) on the dev box.
+- [ ] **Tailscale auth key.** Rotate at tailscale.com/admin/settings/keys; update `/opt/voxhorizon/.env` if the worker re-registers via auth key on boot.
+- [ ] **VAPID.** Skip unless leaked — see VAPID note above.
+- [ ] **Audit.** Run the `git log -S` greps under [Auditing](#auditing) to confirm nothing leaked into history during the quarter.
+- [ ] **Smoke test.** `curl https://<vps-domain>/health` → 200; `curl https://<vercel-app>/api/worker/health` → 200; trigger one end-to-end creative generation to confirm Kie + ElevenLabs + Submagic + Supabase paths all wired.
+
+### Per-secret rotation procedure
+
+The default flow for any worker-only secret (one that lives in `/opt/voxhorizon/.env` and nowhere else):
+
+1. **Generate the new value** at the provider dashboard (or, for `WORKER_SHARED_SECRET`, locally via `python -c "import secrets; print(secrets.token_hex(64))"`).
+2. **SSH into the VPS** as `deploy`:
+
+   ```bash
+   ssh deploy@<vps-host>
+   cd /opt/voxhorizon
+   ```
+
+3. **Edit the env file** (it is `chmod 600`, owned by `deploy`):
+
+   ```bash
+   sudo -u deploy ${EDITOR:-nano} /opt/voxhorizon/.env
+   # change the single KEY= line; save
+   ```
+
+4. **Restart the worker** to pick up the new env:
+
+   ```bash
+   docker compose up -d worker
+   docker compose logs --tail=50 worker   # confirm check-env.sh prints "env OK"
+   ```
+
+5. **Smoke test.** `curl https://<vps-domain>/health` should return `200` with the expected `WORKER_VERSION` and `build_sha`. For provider-specific keys, trigger one operation that exercises that integration (e.g. a small Kie generation for `KIE_AI_API_KEY`).
+6. **Revoke the old value** at the provider dashboard once the smoke passes.
+
+#### Shared secrets — rolling swap (no-downtime)
+
+Two secrets are read by **both** Vercel (Next.js) and the VPS worker:
+
+- `WORKER_SHARED_SECRET` — the bearer the app sends to the worker.
+- `SUPABASE_SERVICE_ROLE_KEY` — the admin key both sides use to talk to Postgres.
+
+A naive "rotate everywhere at once" causes a ~minute of 401s while Vercel redeploys race the worker restart. Use a rolling pattern instead:
+
+1. **Generate the new value.** For `WORKER_SHARED_SECRET`, regen locally. For Supabase service role, rotate at Supabase dashboard but **do not** invalidate the old key yet (Supabase issues the new key alongside the old until you confirm).
+2. **Vercel: add the new value alongside the old as a parallel env var.**
+   - Add `WORKER_SHARED_SECRET_NEXT` (or `SUPABASE_SERVICE_ROLE_KEY_NEXT`) in Vercel's env-var UI for production + preview + development.
+   - Trigger a Vercel deploy. After it ships, both the old `WORKER_SHARED_SECRET` and the new `WORKER_SHARED_SECRET_NEXT` are present in the Vercel runtime; **app code still reads the old one.**
+3. **VPS: update `/opt/voxhorizon/.env` to the new value.**
+
+   ```bash
+   ssh deploy@<vps-host>
+   sudo -u deploy ${EDITOR:-nano} /opt/voxhorizon/.env   # set WORKER_SHARED_SECRET=<new>
+   docker compose up -d worker
+   ```
+
+   The worker now accepts the new value. The Vercel app still sends the **old** value (held in `WORKER_SHARED_SECRET`), so requests start failing — this is the moment of cutover. Keep this window short (under a minute).
+
+4. **Vercel: swap the active var.**
+   - Edit `WORKER_SHARED_SECRET` in Vercel's env UI: set it to the new value (same value as `WORKER_SHARED_SECRET_NEXT`).
+   - Trigger a Vercel deploy. Once it ships, Vercel sends the new value, the worker accepts it, traffic is restored.
+5. **Verify.** `curl https://<vercel-app>/api/worker/health` → 200. Watch worker logs for 401s.
+6. **Clean up.**
+   - Remove `WORKER_SHARED_SECRET_NEXT` from Vercel env (no longer needed).
+   - At the provider (Supabase), invalidate the old service-role JWT.
+
+The same pattern applies to `SUPABASE_SERVICE_ROLE_KEY`: stage `SUPABASE_SERVICE_ROLE_KEY_NEXT` in Vercel first, then update the VPS .env, then promote the new value into the active var on Vercel, then remove the staging var and invalidate the old key.
+
+> **Order matters.** Always: **stage on Vercel → update VPS → promote on Vercel → remove staging → invalidate at provider.** Going the other direction (VPS first with no Vercel staging) creates a guaranteed downtime window because Vercel keeps the old value in the running deployment until the next push.
+
+### v2 upgrade path: `sops + age`
+
+When the operator count goes above one — or when audit / compliance demands it — migrate to [`sops`](https://github.com/getsops/sops) with [`age`](https://github.com/FiloSottile/age) recipients for git-committed encrypted secrets:
+
+- `.env` files are encrypted in place; the ciphertext is committed to the repo.
+- Each operator has an `age` keypair; the public keys are listed in `.sops.yaml`.
+- Decryption on the VPS happens at `docker compose up` via `sops exec-env` or a small entrypoint shim — no plaintext on disk longer than the process lifetime.
+- Rotation becomes a `sops updatekeys` operation; new operators are onboarded by adding their public key and re-encrypting.
+
+This is **not** v1 scope. v1's single-operator threat model is met by `chmod 600 /opt/voxhorizon/.env` + tight SSH ACLs. Revisit when (a) a second operator needs commit-level access, or (b) the worker fleet grows past one VPS and provisioning needs a shared, auditable source for the env file.
