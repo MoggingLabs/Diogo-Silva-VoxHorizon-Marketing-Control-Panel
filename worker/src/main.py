@@ -61,7 +61,6 @@ def create_app() -> FastAPI:
 
     app.include_router(health.router, tags=["health"])
     app.include_router(creative.router, tags=["creative"])
-    app.include_router(audit.router, tags=["audit"])
     app.include_router(upload.router, tags=["upload"])
     app.include_router(chat.router, tags=["chat"])
     app.include_router(broll.router, tags=["broll"])
@@ -71,6 +70,13 @@ def create_app() -> FastAPI:
     # the existing `upload` router (registered above); `launch.router` adds
     # the validator endpoint /work/launch/validate.
     app.include_router(launch.router, tags=["launch"])
+
+    # === wave 5 audit routes ===
+    # /work/audit/run pulls Meta + GHL for image campaigns (M4-1) and
+    # /work/audit/video does the same with video-specific Meta fields
+    # (M4-13). Both join, compute verdicts, persist, and emit kill
+    # notifications through the shared services.
+    app.include_router(audit.router, tags=["audit"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.
