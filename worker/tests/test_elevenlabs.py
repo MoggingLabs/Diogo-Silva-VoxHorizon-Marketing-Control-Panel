@@ -244,3 +244,37 @@ def test_ffmpeg_concat_mp3_rejects_empty_input(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         asyncio.run(ffmpeg_concat_mp3([], tmp_path / "out.mp3"))
+
+
+# ---------------------------------------------------------------------------
+# Context manager + close lifecycle
+# ---------------------------------------------------------------------------
+
+
+def test_client_context_manager_closes_owned_client() -> None:
+    """Lines 95-96 + 99 + 102: ``async with`` calls ``close()`` which aclose()s
+    the underlying httpx client (only when we own it)."""
+    from src.services.elevenlabs import ElevenLabsClient
+
+    fake = _mock_httpx_client()
+
+    async def _go() -> ElevenLabsClient:
+        # Build a client without injecting an httpx — we own it.
+        c = ElevenLabsClient()
+        c._client = fake  # swap in the mock so we can verify close
+        async with c as ctx_client:
+            assert ctx_client is c
+        return c
+
+    asyncio.run(_go())
+    fake.aclose.assert_awaited_once()
+
+
+def test_client_close_skips_aclose_when_client_is_injected() -> None:
+    """Injecting an httpx client means caller owns lifecycle — no aclose."""
+    from src.services.elevenlabs import ElevenLabsClient
+
+    fake = _mock_httpx_client()
+    client = ElevenLabsClient(client=fake)
+    asyncio.run(client.close())
+    fake.aclose.assert_not_called()

@@ -1162,3 +1162,532 @@ def test_voiceover_acquires_brief_queue(
     assert depth_witness == [1]
     # And once the route returns, the queue cleared.
     assert queue.depth("queued-brief") == 0
+
+
+# ---------------------------------------------------------------------------
+# Internal helper coverage — direct unit tests for video.py edge paths.
+# ---------------------------------------------------------------------------
+
+
+def test_brief_id_from_creative_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Line 131: 409 when creative has no brief_id."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _brief_id_from_creative
+
+    with pytest.raises(HTTPException) as exc:
+        _brief_id_from_creative({"id": "vc1", "brief_id": None})
+    assert exc.value.status_code == 409
+    assert "no brief_id" in exc.value.detail
+
+
+def test_upload_to_storage_raises_when_local_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Line 151: FileNotFoundError when the local path is missing."""
+    from src.routes import video as video_routes
+
+    sb = _build_supabase_mock()
+    _patch_route_supabase(monkeypatch, sb)
+    missing = tmp_path / "missing.json"
+    with pytest.raises(FileNotFoundError):
+        video_routes._upload_to_storage(
+            local_path=missing,
+            storage_path="x/y.json",
+            content_type="application/json",
+        )
+
+
+def test_sign_storage_url_raises_when_payload_unrecognized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Line 191: RuntimeError when create_signed_url returns garbage."""
+    from src.routes import video as video_routes
+
+    sb = _build_supabase_mock()
+    sb.storage.from_.return_value.create_signed_url.return_value = "weird-string"
+    _patch_route_supabase(monkeypatch, sb)
+    with pytest.raises(RuntimeError) as exc:
+        video_routes._sign_storage_url("foo/bar.mp4")
+    assert "unexpected signed-url" in str(exc.value)
+
+
+def test_sign_storage_url_handles_signed_url_alt_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Iterates through the alt keys (``signedUrl``, ``signed_url``)."""
+    from src.routes import video as video_routes
+
+    sb = _build_supabase_mock()
+    sb.storage.from_.return_value.create_signed_url.return_value = {
+        "signedUrl": "https://x/alt"
+    }
+    _patch_route_supabase(monkeypatch, sb)
+    assert video_routes._sign_storage_url("foo/bar.mp4") == "https://x/alt"
+
+    sb.storage.from_.return_value.create_signed_url.return_value = {
+        "signed_url": "https://x/snake"
+    }
+    assert video_routes._sign_storage_url("foo/bar.mp4") == "https://x/snake"
+
+
+def test_parse_script_output_strips_markdown_fence() -> None:
+    """Lines 236-241: strip ```json fences from agent output."""
+    from src.routes.video import _parse_script_output
+
+    fenced = (
+        "```json\n"
+        '{"hook":"x","segments":['
+        '{"idx":0,"topic":"a","duration_s":4,"voiceover_text":"hi",'
+        '"voiceover_direction":"e","broll_query":"q","broll_intent":"i",'
+        '"captions_emphasis":[]}],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+        "\n```"
+    )
+    out = _parse_script_output(fenced)
+    assert out["hook"] == "x"
+    assert out["segments"][0]["idx"] == 0
+
+
+def test_parse_script_output_rejects_non_object_payload() -> None:
+    """Line 252: top-level JSON must be a dict."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _parse_script_output
+
+    with pytest.raises(HTTPException) as exc:
+        _parse_script_output('["a", "b"]')
+    assert exc.value.status_code == 502
+    assert "not a JSON object" in exc.value.detail
+
+
+def test_parse_script_output_rejects_wrong_segments_length() -> None:
+    """Line 266: segments out of 1..4 range."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _parse_script_output
+
+    raw = (
+        '{"hook":"x","segments":[],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+    )
+    with pytest.raises(HTTPException) as exc:
+        _parse_script_output(raw)
+    assert exc.value.status_code == 502
+    assert "1-4 entries" in exc.value.detail
+
+
+def test_parse_script_output_rejects_non_dict_segment() -> None:
+    """Line 272: segment is not an object."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _parse_script_output
+
+    raw = (
+        '{"hook":"x","segments":["not a dict"],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+    )
+    with pytest.raises(HTTPException) as exc:
+        _parse_script_output(raw)
+    assert exc.value.status_code == 502
+    assert "not an object" in exc.value.detail
+
+
+def test_parse_script_output_rejects_segment_missing_key() -> None:
+    """Line 286: segment missing required key."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _parse_script_output
+
+    raw = (
+        '{"hook":"x","segments":[{"idx":0,"topic":"a"}],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+    )
+    with pytest.raises(HTTPException) as exc:
+        _parse_script_output(raw)
+    assert exc.value.status_code == 502
+    assert "missing required key" in exc.value.detail
+
+
+def test_parse_script_output_rejects_non_contiguous_idx() -> None:
+    """Line 293: segment idx must be 0-contiguous."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _parse_script_output
+
+    raw = (
+        '{"hook":"x","segments":['
+        '{"idx":5,"topic":"a","duration_s":4,"voiceover_text":"hi",'
+        '"voiceover_direction":"e","broll_query":"q","broll_intent":"i",'
+        '"captions_emphasis":[]}],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+    )
+    with pytest.raises(HTTPException) as exc:
+        _parse_script_output(raw)
+    assert exc.value.status_code == 502
+    assert "0-contiguous" in exc.value.detail
+
+
+def test_broll_search_409_empty_query(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Line 506: empty broll_query on a segment surfaces a 409."""
+    sb = _build_supabase_mock()
+    script = _example_script()
+    script["segments"][0]["broll_query"] = "   "
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "script_outline": script,
+            "video_briefs": {"payload": {}},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+    resp = client.post(
+        "/work/video/broll-search",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 409
+    assert "empty broll_query" in resp.json()["detail"]
+
+
+def test_coerce_candidates_for_selection_rejects_non_int_keys() -> None:
+    """Lines 582-583: non-int candidate key surfaces a 409."""
+    from fastapi import HTTPException
+
+    from src.routes.video import _coerce_candidates_for_selection
+
+    with pytest.raises(HTTPException) as exc:
+        _coerce_candidates_for_selection({"not-an-int": []})
+    assert exc.value.status_code == 409
+    assert "non-int candidate" in exc.value.detail
+
+
+def test_broll_select_409_when_no_script(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Line 631: 409 when broll-select called without a script_outline."""
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "script_outline": None,
+            "broll_clips": {"candidates": {"0": [{"clip_id": "c"}]}},
+            "video_briefs": {"payload": {}},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+    resp = client.post(
+        "/work/video/broll-select",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 409
+    assert "no script_outline" in resp.json()["detail"]
+
+
+def test_compose_409_when_no_script(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Line 743: 409 when compose called without a script_outline."""
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "script_outline": None,
+            "voiceover_path": "vo.mp3",
+            "broll_clips": {"selected": {"0": {"clip_id": "c"}}},
+            "video_briefs": {"payload": {}, "dimensions": "9x16"},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+    resp = client.post(
+        "/work/video/compose",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 409
+    assert "no script_outline" in resp.json()["detail"]
+
+
+def test_compose_409_when_selected_clip_has_no_clip_id(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Line 773: 409 when a selected clip is missing clip_id."""
+    from src.routes import video as video_routes
+
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "script_outline": _example_script(),
+            "voiceover_path": "vo.mp3",
+            "broll_clips": {"selected": {"0": {"source_url": "u"}}},
+            "video_briefs": {
+                "payload": {},
+                "dimensions": "9x16",
+                "captions_style": "bold_yellow",
+            },
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+    # Stub the broll store so we don't actually need it.
+    store = MagicMock()
+    store.get_signed_url = AsyncMock(return_value="https://x/clip")
+    monkeypatch.setattr(video_routes, "get_broll_store", lambda: store)
+
+    resp = client.post(
+        "/work/video/compose",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 409
+    assert "no clip_id" in resp.json()["detail"]
+
+
+def test_caption_acquires_brief_queue(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The caption route also wraps work in the per-brief queue."""
+    from src.routes import video as video_routes
+    from src.services.atomic_inserts_video import VideoStageResult
+    from src.services.queue import get_queue, reset_queue
+    from src.services.submagic import SubmagicJobResult
+
+    reset_queue()
+    queue = get_queue()
+    depth_witness: list[int] = []
+
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "queued-caption",
+            "composed_path": "composed.mp4",
+            "captioned_path": None,
+            "video_briefs": {"payload": {}, "captions_style": "bold_yellow"},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+        async def caption(self, *_a, **_kw):
+            depth_witness.append(queue.depth("queued-caption"))
+            return SubmagicJobResult(
+                project_id="p1",
+                video_url="https://cdn/x.mp4",
+                captioned_bytes=b"X",
+            )
+
+    monkeypatch.setattr(video_routes, "SubmagicClient", FakeClient)
+
+    async def fake_record(**_kw):
+        return VideoStageResult(
+            creative_id="vc1",
+            iteration_id="vi",
+            event_id="ev",
+            status="captioned",
+            new_creative=False,
+        )
+
+    monkeypatch.setattr(video_routes, "record_video_stage", fake_record)
+
+    resp = client.post(
+        "/work/video/caption",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert depth_witness == [1]
+    assert queue.depth("queued-caption") == 0
+
+
+def test_broll_select_invalid_mode_in_body_returns_422(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pydantic Literal validation rejects bad ``mode`` strings with 422."""
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "script_outline": _example_script(),
+            "broll_clips": {"candidates": {"0": []}},
+            "video_briefs": {"payload": {}},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+
+    resp = client.post(
+        "/work/video/broll-select",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1", "mode": "totally_bogus"},
+    )
+    assert resp.status_code == 422
+
+
+def test_script_cleanup_tolerates_already_unlinked_tmp_file(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lines 340-341: tmp_path.unlink() can race a parallel cleanup; we
+    swallow FileNotFoundError."""
+    from src.routes import video as video_routes
+    from src.services import claude_runner
+    from src.services.atomic_inserts_video import VideoStageResult
+
+    sb = _build_supabase_mock()
+    _set_select(
+        sb, {"id": "b1", "payload": {"hook_style": "curiosity"}, "clients": {}}
+    )
+    _patch_route_supabase(monkeypatch, sb)
+
+    valid_output = (
+        '{"hook":"Stop","segments":['
+        '{"idx":0,"topic":"a","duration_s":4,"voiceover_text":"hi",'
+        '"voiceover_direction":"e","broll_query":"q","broll_intent":"i",'
+        '"captions_emphasis":[]}],'
+        '"outro":{"voiceover_text":"o","cta_overlay":"c","duration_s":3},'
+        '"total_duration_s":10}'
+    )
+
+    monkeypatch.setattr(
+        claude_runner.ClaudeRunner,
+        "run_subprocess",
+        AsyncMock(return_value=valid_output),
+    )
+
+    async def fake_record(**_kw):
+        return VideoStageResult(
+            creative_id="vc-1",
+            iteration_id="vi-1",
+            event_id="ev-1",
+            status="script_ready",
+            new_creative=True,
+        )
+
+    monkeypatch.setattr(video_routes, "record_video_stage", fake_record)
+
+    # Force the cleanup path to hit FileNotFoundError by removing the file
+    # during the upload step.
+    real_upload = video_routes._upload_to_storage
+
+    def _upload_and_unlink(*, local_path, **kw):
+        try:
+            local_path.unlink()
+        except FileNotFoundError:
+            pass
+        # Recreate to satisfy upload bytes read.
+        local_path.write_text("{}")
+        out = real_upload(local_path=local_path, **kw)
+        local_path.unlink()
+        return out
+
+    monkeypatch.setattr(video_routes, "_upload_to_storage", _upload_and_unlink)
+
+    resp = client.post(
+        "/work/video/script",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"brief_id": "b1"},
+    )
+    assert resp.status_code == 200, resp.text
+
+
+def test_voiceover_cleanup_tolerates_already_unlinked_tmp_file(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Lines 435-436: voiceover concat path cleanup absorbs FileNotFoundError."""
+    from src.routes import video as video_routes
+    from src.services.atomic_inserts_video import VideoStageResult
+    from src.services.elevenlabs import VoiceoverSegment
+
+    sb = _build_supabase_mock()
+    _set_select(
+        sb,
+        {
+            "id": "vc1",
+            "brief_id": "b1",
+            "voiceover_path": None,
+            "script_outline": _example_script(),
+            "voice_id": "rachel",
+            "video_briefs": {"payload": {}, "voice_id": "rachel"},
+        },
+    )
+    _patch_route_supabase(monkeypatch, sb)
+
+    seg_file = tmp_path / "seg.mp3"
+    seg_file.write_bytes(b"AAA")
+
+    async def fake_synth(**_kw):
+        return [
+            VoiceoverSegment(
+                idx=0, voiceover_text="t", local_path=seg_file, bytes_size=3
+            )
+        ]
+
+    monkeypatch.setattr(video_routes, "synthesize_segments", fake_synth)
+
+    async def fake_concat(paths, out, **_kw):
+        out.write_bytes(b"CONCAT")
+        return out
+
+    monkeypatch.setattr(video_routes, "ffmpeg_concat_mp3", fake_concat)
+
+    real_upload = video_routes._upload_to_storage
+
+    def _upload_and_unlink(*, local_path, **kw):
+        local_path.unlink(missing_ok=True)
+        local_path.write_bytes(b"DUMMY")
+        out = real_upload(local_path=local_path, **kw)
+        local_path.unlink(missing_ok=True)
+        return out
+
+    monkeypatch.setattr(video_routes, "_upload_to_storage", _upload_and_unlink)
+
+    async def fake_record(**_kw):
+        return VideoStageResult(
+            creative_id="vc1",
+            iteration_id="vi",
+            event_id="ev",
+            status="voiceover_ready",
+            new_creative=False,
+        )
+
+    monkeypatch.setattr(video_routes, "record_video_stage", fake_record)
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_):
+            return False
+
+    monkeypatch.setattr(video_routes, "ElevenLabsClient", FakeClient)
+
+    resp = client.post(
+        "/work/video/voiceover",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc1"},
+    )
+    assert resp.status_code == 200, resp.text

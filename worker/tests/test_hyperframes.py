@@ -274,3 +274,38 @@ def test_author_and_render_writes_html_then_runs_cli(
     # HTML body looks like our template output.
     body = (work_dir / "scenes.html").read_text()
     assert "<hf-scene" in body
+
+
+def test_build_timeline_raises_when_segments_empty() -> None:
+    """Line 145: empty segments list raises a structured ValueError."""
+    from src.services.hyperframes import build_timeline_from_script
+
+    with pytest.raises(ValueError) as exc:
+        build_timeline_from_script(
+            script_outline={"hook": "x", "segments": []},
+            selected_clips={},
+        )
+    assert "non-empty list" in str(exc.value)
+
+
+def test_build_timeline_raises_when_segments_not_list() -> None:
+    from src.services.hyperframes import build_timeline_from_script
+
+    with pytest.raises(ValueError) as exc:
+        build_timeline_from_script(
+            script_outline={"hook": "x", "segments": "not-a-list"},
+            selected_clips={},
+        )
+    assert "non-empty list" in str(exc.value)
+
+
+def test_build_timeline_raises_when_segment_not_dict() -> None:
+    """Line 156: per-segment object guard fires when a segment is a string."""
+    from src.services.hyperframes import build_timeline_from_script
+
+    with pytest.raises(ValueError) as exc:
+        build_timeline_from_script(
+            script_outline={"hook": "x", "segments": ["not-a-dict"]},
+            selected_clips={},
+        )
+    assert "not an object" in str(exc.value)
