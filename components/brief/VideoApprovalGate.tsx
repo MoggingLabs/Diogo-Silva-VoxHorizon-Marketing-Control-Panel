@@ -120,7 +120,7 @@ export function VideoApprovalGate({ videoBriefId }: VideoApprovalGateProps) {
         </div>
       )}
 
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
         {Decision.options.map((d) => (
           <Button
             key={d}
@@ -128,6 +128,7 @@ export function VideoApprovalGate({ videoBriefId }: VideoApprovalGateProps) {
             variant={DECISION_VARIANTS[d]}
             disabled={submitting}
             onClick={() => handleSubmit(d)}
+            className="min-h-11"
           >
             {submitting && decision === d ? "Submitting…" : DECISION_LABELS[d]}
           </Button>

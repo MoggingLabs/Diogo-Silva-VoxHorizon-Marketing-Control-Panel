@@ -121,7 +121,7 @@ function KanbanTrack(props: KanbanTrackProps) {
           }}
         />
       ) : (
-        <div className="flex gap-4 overflow-x-auto pb-2">
+        <div className="-mx-4 flex snap-x snap-mandatory gap-3 overflow-x-auto px-4 pb-2 sm:mx-0 sm:snap-none sm:gap-4 sm:px-0">
           {KANBAN_STAGES.map((stage: FunnelStage) => {
             const isBriefColumn = stage === "in_brief";
             const count = isBriefColumn ? briefColumn.length : 0;

@@ -29,15 +29,15 @@ export default async function VideoBriefsIndexPage() {
     .limit(100);
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-6 py-12">
-      <header className="flex items-center justify-between">
+    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
+      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Video briefs</h1>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Video briefs</h1>
           <p className="text-sm text-muted-foreground">
             Newest first. Kanban view ships in Wave 2.
           </p>
         </div>
-        <Button asChild>
+        <Button asChild className="self-start sm:self-auto">
           <Link href="/briefs/video/new">New video brief</Link>
         </Button>
       </header>
@@ -66,10 +66,10 @@ export default async function VideoBriefsIndexPage() {
               <li key={b.id} className="rounded-md border border-input bg-background">
                 <Link
                   href={`/briefs/video/${b.id}`}
-                  className="flex items-center justify-between gap-4 px-4 py-3 hover:bg-accent"
+                  className="flex min-h-[64px] flex-wrap items-center justify-between gap-3 px-4 py-3 hover:bg-accent active:bg-accent/70 sm:gap-4"
                 >
-                  <div className="flex flex-col gap-0.5">
-                    <span className="font-mono text-sm">{b.brief_id_human}</span>
+                  <div className="flex min-w-0 flex-col gap-0.5">
+                    <span className="break-all font-mono text-sm">{b.brief_id_human}</span>
                     <span className="text-xs text-muted-foreground">
                       {client?.name ?? "—"} ·{" "}
                       {b.target_duration_s ? `${b.target_duration_s}s` : "—"} · created{" "}
@@ -77,7 +77,7 @@ export default async function VideoBriefsIndexPage() {
                     </span>
                   </div>
                   <span
-                    className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                    className={`shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
                       STATUS_BADGE_CLASSES[b.status] ?? "bg-secondary text-secondary-foreground"
                     }`}
                   >

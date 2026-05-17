@@ -103,7 +103,7 @@ export function ApprovalGate({
         </div>
       ) : null}
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:gap-3">
         <Button
           type="button"
           disabled={isPending}
@@ -111,6 +111,7 @@ export function ApprovalGate({
             setDecision("approved");
             submit("approved");
           }}
+          className="min-h-11"
         >
           {isPending && decision === "approved" ? "Approving…" : "Approve"}
         </Button>
@@ -122,6 +123,7 @@ export function ApprovalGate({
             setDecision("approved_with_changes");
             submit("approved_with_changes");
           }}
+          className="min-h-11"
         >
           {isPending && decision === "approved_with_changes"
             ? "Submitting…"
@@ -135,6 +137,7 @@ export function ApprovalGate({
             setDecision("rejected");
             submit("rejected");
           }}
+          className="min-h-11"
         >
           {isPending && decision === "rejected" ? "Rejecting…" : "Reject"}
         </Button>

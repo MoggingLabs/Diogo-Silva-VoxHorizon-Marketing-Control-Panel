@@ -63,16 +63,16 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
   const funnelTotals = aggregateFunnel(rows);
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-8 py-8">
+    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-8">
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">
-          <h1 className="text-3xl font-semibold tracking-tight">Audit</h1>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Audit</h1>
           <p className="text-sm text-muted-foreground">
             Daily verdicts on live campaigns — kill / watch / keep, with the reasoning surfaced
             inline.
           </p>
         </div>
-        <div className="flex flex-col items-end gap-2 sm:flex-row sm:items-center">
+        <div className="flex flex-wrap items-start gap-2 sm:flex-row sm:items-center">
           <WindowPicker value={window} />
           <FormatTabs value={format} />
         </div>
@@ -174,7 +174,7 @@ function WindowPicker({ value }: { value: AuditWindow }) {
             key={opt}
             href={href}
             className={
-              "rounded px-3 py-1 transition-colors " +
+              "inline-flex min-h-[36px] items-center rounded px-3 py-1.5 transition-colors sm:py-1 " +
               (selected
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-accent-foreground")

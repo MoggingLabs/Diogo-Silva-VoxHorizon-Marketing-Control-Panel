@@ -76,13 +76,13 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
   const sum = outline ? totalSegmentDuration(outline.segments) : 0;
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-8 py-12">
+    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-12">
       <header className="flex flex-col gap-2">
         <Link href="/briefs/video" className="text-sm text-muted-foreground hover:text-foreground">
           ← Video briefs
         </Link>
         <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h1 className="font-mono text-3xl font-semibold tracking-tight">
+          <h1 className="break-all font-mono text-2xl font-semibold tracking-tight sm:text-3xl">
             {brief.brief_id_human}
           </h1>
           <span
@@ -97,7 +97,7 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
           {brief.clients?.name ?? "—"} ·{" "}
           {brief.target_duration_s ? `${brief.target_duration_s}s` : "—"} ·{" "}
           {brief.dimensions ?? "—"} · voice{" "}
-          <span className="font-mono">{brief.voice_id ?? "—"}</span>
+          <span className="break-all font-mono">{brief.voice_id ?? "—"}</span>
         </p>
       </header>
 

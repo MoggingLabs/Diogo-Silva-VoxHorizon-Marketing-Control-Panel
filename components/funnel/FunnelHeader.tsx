@@ -56,7 +56,7 @@ export function FunnelHeader({ format, counts }: FunnelHeaderProps) {
 
   return (
     <section className="flex flex-col gap-4">
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 sm:gap-3 md:grid-cols-3 lg:grid-cols-6">
         {FUNNEL_STAGES.map((stage) => (
           <MetricTile
             key={stage}
@@ -68,7 +68,7 @@ export function FunnelHeader({ format, counts }: FunnelHeaderProps) {
           />
         ))}
       </div>
-      <div className="rounded-lg border border-border bg-card p-4 shadow-sm">
+      <div className="rounded-lg border border-border bg-card p-3 shadow-sm sm:p-4">
         <StackedBar segments={segments} title="Lifecycle distribution" />
       </div>
     </section>

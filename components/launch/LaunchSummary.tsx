@@ -116,7 +116,7 @@ export function LaunchSummary({
             No approved creatives bundled with this launch yet.
           </p>
         ) : (
-          <ul className="grid gap-4 md:grid-cols-2">
+          <ul className="grid gap-4 sm:grid-cols-2 md:grid-cols-2">
             {creatives.map((c) => {
               const url = signedUrls[c.id] ?? null;
               const copies = copyByCreativeId[c.id] ?? [];

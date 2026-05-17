@@ -4,7 +4,10 @@
  */
 export default function VideoBriefDetailLoading() {
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-8 py-12" aria-busy="true">
+    <main
+      className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-12"
+      aria-busy="true"
+    >
       <header className="flex flex-col gap-2">
         <div className="h-3 w-32 animate-pulse rounded bg-muted/70" />
         <div className="flex flex-wrap items-baseline justify-between gap-2">

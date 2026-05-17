@@ -31,13 +31,13 @@ export function KanbanColumn({
     : Boolean(children);
 
   return (
-    <div className="flex w-[260px] shrink-0 flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span aria-hidden="true" className={cn("h-2 w-2 rounded-full", accentClass)} />
-          <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+    <div className="flex w-[240px] shrink-0 snap-start flex-col gap-2 rounded-lg border border-border bg-muted/30 p-3 sm:w-[260px]">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <span aria-hidden="true" className={cn("h-2 w-2 shrink-0 rounded-full", accentClass)} />
+          <h3 className="truncate text-sm font-semibold text-foreground">{title}</h3>
         </div>
-        <span className="rounded-full bg-background px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+        <span className="shrink-0 rounded-full bg-background px-2 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
           {count.toLocaleString()}
         </span>
       </div>
