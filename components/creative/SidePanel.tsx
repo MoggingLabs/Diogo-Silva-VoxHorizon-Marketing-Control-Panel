@@ -267,9 +267,11 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
           </Section>
 
           <Section title="Chat with Ekko">
-            <p className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              Chat lands in M2-9 / M2-10. For now use the decision buttons to drive next steps.
-            </p>
+            <EkkoChat
+              endpoint={`/api/creatives/${creative.id}/chat`}
+              creativeId={creative.id}
+              creativeKind="image"
+            />
           </Section>
         </div>
       </SheetContent>

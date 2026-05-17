@@ -171,8 +171,15 @@ def test_script_404_when_brief_missing(
 def test_script_returns_501_when_claude_runner_not_ready(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The runner stub raises NotImplementedError until Agent CG merges."""
+    """When the runner is unavailable (e.g. legacy NotImplementedError stub)
+    the route surfaces a 501 so the operator sees ``pipeline not ready``.
+
+    With the real runner shipped in Wave 5 we monkey-patch ``run_subprocess``
+    to raise ``NotImplementedError`` directly so the 501 branch stays
+    covered.
+    """
     from src.routes import video
+    from src.services import claude_runner
 
     sb = _build_supabase_mock()
     _set_select(
@@ -180,6 +187,13 @@ def test_script_returns_501_when_claude_runner_not_ready(
         {"id": "b1", "payload": {"hook_style": "curiosity"}, "clients": {}},
     )
     _patch_route_supabase(monkeypatch, sb)
+
+    async def _raise_notimpl(self: claude_runner.ClaudeRunner, *args: Any, **kwargs: Any) -> str:
+        raise NotImplementedError("claude runner not ready")
+
+    monkeypatch.setattr(
+        claude_runner.ClaudeRunner, "run_subprocess", _raise_notimpl, raising=True
+    )
 
     resp = client.post(
         "/work/video/script",

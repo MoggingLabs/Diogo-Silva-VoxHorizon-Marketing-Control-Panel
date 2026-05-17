@@ -111,13 +111,11 @@ export function EkkoChat({
       // Build the wire-format history from the current view + the new
       // user message. Assistant placeholder is omitted (no content yet).
       const wireHistory: ChatMessageT[] = [
-        ...messages
-          .filter((m): m is Exclude<DisplayMessage, never> => true)
-          .map<ChatMessageT>((m) => ({
-            role: m.kind === "user" ? "user" : "assistant",
-            content: m.kind === "user" ? m.text : m.text,
-          })),
-        { role: "user", content: trimmed },
+        ...messages.map<ChatMessageT>((m) => ({
+          role: (m.kind === "user" ? "user" : "assistant") as ChatMessageT["role"],
+          content: m.text,
+        })),
+        { role: "user" as const, content: trimmed },
       ].filter((m) => m.content.length > 0);
 
       setMessages((prev) => [...prev, userMsg, assistantMsg]);
