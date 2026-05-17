@@ -21,6 +21,10 @@ dependencies = [
     "jinja2>=3.1",
     "pillow>=10.4",
     "pywebpush>=2.3.0",
+    # Anthropic SDK is the streaming path for chat-with-Ekko (M2-9 / V2-13).
+    # The CLI subprocess path remains an option but the SDK is more reliable
+    # for SSE proxying. Reads ANTHROPIC_API_KEY from env at call time.
+    "anthropic>=0.40",
 ]
 
 [project.optional-dependencies]

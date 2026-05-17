@@ -23,8 +23,11 @@ import {
   type VideoIteration,
 } from "@/lib/video-creatives";
 import { ScriptOutline, type ScriptOutlineT, type VideoBrief } from "@/lib/video-briefs";
+import { BrollClips } from "@/lib/video-creatives";
 import { cn } from "@/lib/utils";
+import { EkkoChat } from "@/components/chat/EkkoChat";
 
+import { BrollSelector } from "./BrollSelector";
 import { VideoDecisionButtons } from "./VideoDecisionButtons";
 import { VideoIterationThread } from "./VideoIterationThread";
 
@@ -114,6 +117,27 @@ export function VideoSidePanel({
     () => (creative ? readBrollClips(creative.broll_clips) : []),
     [creative],
   );
+
+  // After /work/video/broll-search runs but before /work/video/broll-select,
+  // the worker stamps `broll_clips = {candidates: {<idx>: BrollClipT[]}}`.
+  // After selection, `broll_clips` becomes a flat BrollClipT[]. Parse the
+  // pre-selection shape so the BrollSelector can offer candidates per
+  // segment when `broll_selection_mode === "review_each"`.
+  const brollCandidates = useMemo<Array<{ segmentIdx: number; clips: BrollClipT[] }>>(() => {
+    const raw = creative?.broll_clips;
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const inner = (raw as { candidates?: unknown }).candidates;
+    if (!inner || typeof inner !== "object" || Array.isArray(inner)) return [];
+    const out: Array<{ segmentIdx: number; clips: BrollClipT[] }> = [];
+    for (const [k, v] of Object.entries(inner as Record<string, unknown>)) {
+      const segIdx = Number(k);
+      if (!Number.isFinite(segIdx)) continue;
+      const parsed = BrollClips.safeParse(v);
+      out.push({ segmentIdx: segIdx, clips: parsed.success ? parsed.data : [] });
+    }
+    out.sort((a, b) => a.segmentIdx - b.segmentIdx);
+    return out;
+  }, [creative?.broll_clips]);
 
   if (!creative) {
     return (
@@ -403,11 +427,28 @@ export function VideoSidePanel({
             ) : null}
           </Section>
 
+          {/* B-roll review_each picker (V2-18) ------------------------- */}
+          {brief?.broll_selection_mode === "review_each" && brollCandidates.length > 0 ? (
+            <Section title="Pick b-roll">
+              <BrollSelector
+                videoCreativeId={creative.id}
+                segments={(outline?.segments ?? []).map((seg, idx) => ({
+                  idx,
+                  topic: seg.topic,
+                  broll_theme: seg.broll_theme,
+                }))}
+                candidates={brollCandidates}
+                currentPicks={brollClips}
+              />
+            </Section>
+          ) : null}
+
           <Section title="Chat with Ekko">
-            <p className="rounded-md border border-dashed bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
-              Chat / iterate lands in a future wave. For now use the decision buttons to drive next
-              steps.
-            </p>
+            <EkkoChat
+              endpoint={`/api/creatives/video/${creative.id}/chat`}
+              creativeId={creative.id}
+              creativeKind="video"
+            />
           </Section>
         </div>
       </SheetContent>
