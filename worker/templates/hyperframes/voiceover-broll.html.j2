@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>VoxHorizon Video</title>
+  {# Hyperframes parses <hf-scene>'s dimensions attribute for the output
+     resolution. We expose the chosen value verbatim so 9x16 stays 9x16. #}
+</head>
+<body>
+  <hf-scene
+    duration="{{ total_duration_s }}"
+    dimensions="{{ dimensions }}"
+  >
+    {# Single voiceover track muxes over the entire timeline. #}
+    <hf-audio src="{{ voiceover_url }}" />
+
+    {# Hook overlay lands at t=0 for 3s — mirrors the skill's hook duration default. #}
+    {% if hook_text %}
+    <hf-timeline at="0" until="3">
+      <hf-text style="hook" align="center">{{ hook_text }}</hf-text>
+    </hf-timeline>
+    {% endif %}
+
+    {% for seg in segments %}
+    <hf-timeline at="{{ seg.start_s }}" until="{{ seg.end_s }}">
+      <hf-video src="{{ seg.broll_url }}" fit="cover" />
+      {% if captions_style and captions_style != 'none' %}
+      <hf-captions
+        text="{{ seg.voiceover_text }}"
+        style="{{ captions_style }}"
+        {% if seg.captions_emphasis %}
+        emphasis="{{ seg.captions_emphasis | join(',') }}"
+        {% endif %}
+      />
+      {% endif %}
+    </hf-timeline>
+    {% endfor %}
+
+    {# CTA overlay lands in the last 3 seconds — purely cosmetic on top of
+       whatever b-roll is playing during the outro. #}
+    {% if cta_text %}
+    <hf-timeline at="{{ total_duration_s - 3 }}" until="{{ total_duration_s }}">
+      <hf-text style="cta" align="center">{{ cta_text }}</hf-text>
+    </hf-timeline>
+    {% endif %}
+  </hf-scene>
+</body>
+</html>
