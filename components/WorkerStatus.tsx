@@ -168,6 +168,15 @@ export function WorkerStatus() {
   const queueBroll = pickQueueCount(worker?.queue_depth, "broll");
   const queueTotal = pickQueueCount(worker?.queue_depth, "total");
 
+  // Build a queue summary that reflects whatever the worker actually reports.
+  // We always render image/video/broll rows so the operator sees the render
+  // pipeline depth at a glance, even when the worker stubs them as zero.
+  const queueRows: { label: string; value: number | null }[] = [
+    { label: "Image", value: queueImage },
+    { label: "Video", value: queueVideo },
+    { label: "B-roll", value: queueBroll },
+  ];
+
   return (
     <div className="relative">
       <button
@@ -178,7 +187,7 @@ export function WorkerStatus() {
         onBlur={() => setOpen(false)}
         onClick={() => void refresh()}
         aria-label={STATE_LABEL[state]}
-        className="flex items-center gap-2 rounded-md border border-input bg-background px-2 py-1 text-xs text-muted-foreground hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring"
+        className="flex min-h-11 items-center gap-2 rounded-md border border-input bg-background px-2 py-1 text-xs text-muted-foreground hover:bg-accent focus:outline-none focus:ring-2 focus:ring-ring sm:min-h-0"
       >
         <span
           aria-hidden="true"
@@ -193,7 +202,7 @@ export function WorkerStatus() {
       {open ? (
         <div
           role="tooltip"
-          className="absolute right-0 top-full z-50 mt-1 w-64 rounded-md border bg-popover p-3 text-xs text-popover-foreground shadow-md"
+          className="absolute right-0 top-full z-50 mt-1 w-72 max-w-[calc(100vw-1rem)] rounded-md border bg-popover p-3 text-xs text-popover-foreground shadow-md"
         >
           <p className="text-sm font-medium text-foreground">{STATE_LABEL[state]}</p>
           {result ? (
@@ -205,25 +214,47 @@ export function WorkerStatus() {
             <p className="mt-2 break-words text-rose-600">{result.error}</p>
           ) : null}
           {worker ? (
-            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
-              <dt className="text-muted-foreground">Version</dt>
-              <dd className="truncate font-mono">{worker.version ?? "—"}</dd>
-              <dt className="text-muted-foreground">Uptime</dt>
-              <dd>{formatUptime(worker.uptime_seconds)}</dd>
-              <dt className="text-muted-foreground">Claude</dt>
-              <dd>
-                {typeof worker.claude_code_available === "boolean"
-                  ? worker.claude_code_available
-                    ? "available"
-                    : "not available"
-                  : "—"}
-              </dd>
-              <dt className="text-muted-foreground">Queue</dt>
-              <dd className="font-mono">
-                {queueImage ?? 0}i · {queueVideo ?? 0}v · {queueBroll ?? 0}b
-                {typeof queueTotal === "number" ? ` (${queueTotal} total)` : ""}
-              </dd>
-            </dl>
+            <>
+              <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-2 gap-y-1">
+                <dt className="text-muted-foreground">Version</dt>
+                <dd className="truncate font-mono">{worker.version ?? "—"}</dd>
+                <dt className="text-muted-foreground">Uptime</dt>
+                <dd>{formatUptime(worker.uptime_seconds)}</dd>
+                <dt className="text-muted-foreground">Claude</dt>
+                <dd>
+                  {typeof worker.claude_code_available === "boolean"
+                    ? worker.claude_code_available
+                      ? "available"
+                      : "not available"
+                    : "—"}
+                </dd>
+              </dl>
+              <div className="mt-2 border-t border-border pt-2">
+                <p className="mb-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                  Render queue depth
+                </p>
+                <dl className="grid grid-cols-3 gap-2">
+                  {queueRows.map((row) => (
+                    <div
+                      key={row.label}
+                      className="flex flex-col items-center gap-0.5 rounded-md bg-muted/40 px-2 py-1.5"
+                    >
+                      <dt className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {row.label}
+                      </dt>
+                      <dd className="font-mono text-sm font-semibold tabular-nums text-foreground">
+                        {row.value ?? 0}
+                      </dd>
+                    </div>
+                  ))}
+                </dl>
+                {typeof queueTotal === "number" ? (
+                  <p className="mt-1.5 text-right text-[10px] tabular-nums text-muted-foreground">
+                    {queueTotal} total in flight
+                  </p>
+                ) : null}
+              </div>
+            </>
           ) : null}
           <p className="mt-2 text-[10px] uppercase tracking-wide text-muted-foreground">
             Click to refresh · polls every 30s
