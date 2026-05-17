@@ -223,3 +223,114 @@ def test_scrape_yt_shorts_raises_on_timeout(
             )
         )
     assert "timed out" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# BrollCandidate property edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_broll_candidate_duration_none_when_missing(tmp_path: Path) -> None:
+    """If `duration` isn't an int/float, the property returns None."""
+    from src.services.broll_search import BrollCandidate
+
+    cand = BrollCandidate(
+        source_url="u",
+        local_path=tmp_path / "x.mp4",
+        info={"duration": "huh", "width": 1, "height": 2},
+    )
+    assert cand.duration_s is None
+
+
+def test_broll_candidate_dimensions_none_when_missing(tmp_path: Path) -> None:
+    """If width/height aren't ints, the property returns None."""
+    from src.services.broll_search import BrollCandidate
+
+    cand = BrollCandidate(
+        source_url="u",
+        local_path=tmp_path / "x.mp4",
+        info={"width": "1080", "height": 1920},
+    )
+    assert cand.dimensions is None
+
+
+def test_broll_candidate_video_id_none_for_non_string(tmp_path: Path) -> None:
+    from src.services.broll_search import BrollCandidate
+
+    cand = BrollCandidate(
+        source_url="u",
+        local_path=tmp_path / "x.mp4",
+        info={"id": 42},
+    )
+    assert cand.video_id is None
+
+
+def test_scrape_yt_shorts_uses_provided_tmp_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit `tmp_root` is honoured (not a fresh mkdtemp)."""
+    from src.services import broll_search
+
+    captured: dict = {}
+    custom_dir = tmp_path / "my-custom-dir"
+
+    async def fake_exec(*args, **kwargs):
+        captured["cmd"] = list(args)
+        target_dir = Path(args[args.index("-o") + 1]).parent
+        # Verify the worker honoured our tmp_root by checking the -o template.
+        captured["target_dir"] = target_dir
+        _stage_candidate(target_dir, video_id="x")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr(broll_search.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(broll_search.shutil, "which", lambda _n: "/usr/bin/yt-dlp")
+
+    out = asyncio.run(
+        broll_search.scrape_yt_shorts(
+            "needle", count=1, tmp_root=custom_dir
+        )
+    )
+    assert len(out) == 1
+    # The dir was created at the resolved location.
+    assert captured["target_dir"].resolve() == custom_dir.resolve()
+
+
+def test_collect_candidates_skips_non_dict_json(tmp_path: Path) -> None:
+    """An `info.json` whose contents is a scalar (not a dict) is skipped."""
+    from src.services.broll_search import collect_candidates
+
+    (tmp_path / "scalar.info.json").write_text("[1, 2, 3]")  # valid JSON, not a dict
+    out = collect_candidates(tmp_path)
+    assert out == []
+
+
+def test_scrape_yt_shorts_creates_tmp_root_when_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the caller omits tmp_root, we call mkdtemp() to allocate one."""
+    from src.services import broll_search
+
+    captured: dict = {}
+
+    async def fake_exec(*args, **kwargs):
+        target_dir = Path(args[args.index("-o") + 1]).parent
+        captured["target_dir"] = target_dir
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        return proc
+
+    monkeypatch.setattr(broll_search.asyncio, "create_subprocess_exec", fake_exec)
+    monkeypatch.setattr(broll_search.shutil, "which", lambda _n: "/usr/bin/yt-dlp")
+
+    # Intercept tempfile.mkdtemp so the test doesn't litter /tmp.
+    custom_dir = str(tmp_path / "synthetic-tmp")
+    Path(custom_dir).mkdir()
+    monkeypatch.setattr(broll_search.tempfile, "mkdtemp", lambda prefix=None: custom_dir)
+
+    out = asyncio.run(broll_search.scrape_yt_shorts("query", count=1))
+    assert out == []  # no files staged
+    assert captured["target_dir"] == Path(custom_dir)

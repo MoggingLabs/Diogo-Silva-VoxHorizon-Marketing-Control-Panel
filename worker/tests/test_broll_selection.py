@@ -257,3 +257,18 @@ def test_scored_candidate_to_dict_includes_score() -> None:
     payload = sc.to_dict()
     assert payload["clip_id"] == "x"
     assert payload["score"] == 0.42
+
+
+def test_review_low_confidence_empty_shortlist_goes_to_needs_review() -> None:
+    """When a segment's shortlist is empty under review_low_confidence the
+    selector marks it as `needs_review` with zero confidence (not resolved)."""
+    segments = {7: Segment(idx=7, theme="anything")}
+    result = apply_selection_mode(
+        mode="review_low_confidence",
+        candidates={7: []},
+        segments=segments,
+        allow_review_low_confidence=True,
+    )
+    assert result.resolved == {}
+    assert result.needs_review[7] == []
+    assert result.confidence[7] == 0.0

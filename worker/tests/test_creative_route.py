@@ -673,6 +673,354 @@ def test_chat_abort_video_flips_flag(client: TestClient) -> None:
     assert get_store().is_aborted("video", "vc-77") is True
 
 
+# ---------------------------------------------------------------------------
+# Helpers in creative.py we can hit directly
+# ---------------------------------------------------------------------------
+
+
+def test_parse_prompt_pack_raw_json_array() -> None:
+    """A bare JSON array on stdout (no fence) parses correctly."""
+    from src.routes.creative import _parse_prompt_pack
+
+    raw = json.dumps(
+        [
+            {"concept": "X", "prompts": [{"ratio": "1x1", "text": "x prompt"}]},
+        ]
+    )
+    pack = _parse_prompt_pack(raw)
+    assert len(pack) == 1
+    assert pack[0].concept == "X"
+
+
+def test_parse_prompt_pack_dict_wraps_to_list() -> None:
+    """A single dict at top level is wrapped into a one-item list."""
+    from src.routes.creative import _parse_prompt_pack
+
+    raw = json.dumps(
+        {"concept": "Y", "prompts": [{"ratio": "9x16", "text": "y prompt"}]}
+    )
+    pack = _parse_prompt_pack(raw)
+    assert len(pack) == 1
+    assert pack[0].concept == "Y"
+
+
+def test_parse_prompt_pack_skips_garbage_and_uses_fenced() -> None:
+    """Unparseable raw + a valid fenced block downstream picks the fence."""
+    from src.routes.creative import _parse_prompt_pack
+
+    raw = (
+        "intro chatter\n"
+        "```json\n"
+        '[{"concept": "ok", "prompts": [{"ratio": "1x1", "text": "ok"}]}]\n'
+        "```\n"
+    )
+    pack = _parse_prompt_pack(raw)
+    assert pack[0].concept == "ok"
+
+
+def test_parse_prompt_pack_raises_when_no_valid_pack() -> None:
+    """Item that fails PromptItem validation surfaces a ValueError."""
+    from src.routes.creative import _parse_prompt_pack
+
+    # Valid JSON but `prompts` missing → PromptItem(**) raises.
+    raw = json.dumps([{"concept": "bad"}])
+    with pytest.raises(ValueError, match="Could not parse"):
+        _parse_prompt_pack(raw)
+
+
+def test_parse_prompt_pack_skips_non_list_non_dict() -> None:
+    """Top-level scalar JSON is ignored — falls through to the ValueError."""
+    from src.routes.creative import _parse_prompt_pack
+
+    raw = "42"
+    with pytest.raises(ValueError):
+        _parse_prompt_pack(raw)
+
+
+def test_parse_prompt_pack_handles_malformed_fenced_json() -> None:
+    """A fenced block whose body is not valid JSON triggers the
+    JSONDecodeError branch and falls through to the ValueError."""
+    from src.routes.creative import _parse_prompt_pack
+
+    raw = "```json\n{not valid json}\n```"
+    with pytest.raises(ValueError, match="Could not parse"):
+        _parse_prompt_pack(raw)
+
+
+def test_get_runner_constructs_singleton_then_reuses() -> None:
+    """First call constructs; subsequent calls return the same instance."""
+    from src.routes import creative as creative_route
+
+    creative_route._reset_runner()
+    r1 = creative_route._get_runner()
+    r2 = creative_route._get_runner()
+    assert r1 is r2
+
+
+def test_extract_context_handles_non_dict_payload() -> None:
+    """When payload / clients aren't dicts, we coerce to empty mappings."""
+    from src.routes.creative import _extract_context
+
+    row = {"id": "brief-z", "payload": "not-a-dict", "clients": "also-not"}
+    ctx = _extract_context(row)
+    assert ctx.payload == {}
+    assert ctx.client_slug == "client"
+    assert ctx.client_name == "Client"
+
+
+def test_extract_context_handles_none_client() -> None:
+    """Missing/None ``clients`` falls back to {} and the default labels."""
+    from src.routes.creative import _extract_context
+
+    row = {"id": "brief-z", "payload": {"market": "TX"}, "clients": None}
+    ctx = _extract_context(row)
+    assert ctx.client_slug == "client"
+    assert ctx.client_name == "Client"
+
+
+def test_emit_event_swallows_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Event-emit failures must NEVER bubble up out of the route."""
+    from src.routes import creative as creative_route
+
+    class BoomSb:
+        def table(self, name):
+            raise RuntimeError("connection died")
+
+    monkeypatch.setattr(creative_route, "get_supabase_admin", lambda: BoomSb())
+
+    # Should not raise.
+    creative_route._emit_event(kind="x", ref_id="r", payload={"k": "v"})
+
+
+def test_download_bytes_returns_bytes_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the supabase-py client returns bytes directly, we pass them through."""
+    from src.routes import creative as creative_route
+
+    class _FakeBucket:
+        def download(self, path):
+            return b"DIRECT_BYTES"
+
+    class _FakeStorage:
+        def from_(self, _bucket):
+            return _FakeBucket()
+
+    class _FakeSb:
+        storage = _FakeStorage()
+
+    monkeypatch.setattr(creative_route, "get_supabase_admin", lambda: _FakeSb())
+    out = creative_route._download_bytes("any/path")
+    assert out == b"DIRECT_BYTES"
+
+
+def test_download_bytes_reads_content_attribute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the response wraps bytes on `.content`, we unwrap them."""
+    from src.routes import creative as creative_route
+
+    class _Resp:
+        content = b"RESP_BYTES"
+
+    class _FakeBucket:
+        def download(self, path):
+            return _Resp()
+
+    class _FakeStorage:
+        def from_(self, _bucket):
+            return _FakeBucket()
+
+    class _FakeSb:
+        storage = _FakeStorage()
+
+    monkeypatch.setattr(creative_route, "get_supabase_admin", lambda: _FakeSb())
+    out = creative_route._download_bytes("any/path")
+    assert out == b"RESP_BYTES"
+
+
+def test_download_bytes_raises_on_unexpected_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anything else → RuntimeError so the caller can surface a clear 5xx."""
+    from src.routes import creative as creative_route
+
+    class _FakeBucket:
+        def download(self, path):
+            return object()  # not bytes, no .content
+
+    class _FakeStorage:
+        def from_(self, _bucket):
+            return _FakeBucket()
+
+    class _FakeSb:
+        storage = _FakeStorage()
+
+    monkeypatch.setattr(creative_route, "get_supabase_admin", lambda: _FakeSb())
+    with pytest.raises(RuntimeError, match="unexpected Storage download"):
+        creative_route._download_bytes("any/path")
+
+
+# ---------------------------------------------------------------------------
+# /work/creative/generate — agent + plan + claude-error edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_generate_uses_creative_plan_image_count(
+    client: TestClient,
+    fake_sb: _FakeSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The brief.payload.creative_plan.image_count overrides the default."""
+    fake_sb.brief_row["payload"]["creative_plan"] = {"image_count": 2}  # type: ignore[index]
+
+    from src.routes import creative as creative_route
+
+    captured: dict = {}
+
+    pack_json = json.dumps(
+        [
+            {
+                "concept": "C1",
+                "prompts": [{"ratio": "1x1", "text": "p"}],
+            },
+            {
+                "concept": "C2",
+                "prompts": [{"ratio": "1x1", "text": "p"}],
+            },
+        ]
+    )
+
+    class FakeRunner:
+        async def run_subprocess(self, prompt, **kwargs):
+            captured["prompt"] = prompt
+            return f"```json\n{pack_json}\n```"
+
+    creative_route._runner = FakeRunner()  # type: ignore[assignment]
+    monkeypatch.setattr(creative_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/creative/generate",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"brief_id": "brief-1"},
+    )
+    assert resp.status_code == 200, resp.text
+    # The agent prompt should mention the image_count we surfaced.
+    assert "2 concept" in captured["prompt"]
+
+
+def test_generate_502_when_claude_runner_fails(
+    client: TestClient,
+    fake_sb: _FakeSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A ClaudeError during the prompt-pack call surfaces as a 502."""
+    from src.routes import creative as creative_route
+    from src.services.claude_runner import ClaudeError
+
+    class BoomRunner:
+        async def run_subprocess(self, *a, **kw):
+            raise ClaudeError("CLI exited 1")
+
+    creative_route._runner = BoomRunner()  # type: ignore[assignment]
+    monkeypatch.setattr(creative_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/creative/generate",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"brief_id": "brief-1"},
+    )
+    assert resp.status_code == 502
+    assert "claude agent failed" in resp.json()["detail"]
+
+
+def test_generate_502_when_prompt_pack_empty(
+    client: TestClient,
+    fake_sb: _FakeSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An empty (but parseable) prompt pack must surface as 502."""
+    from src.routes import creative as creative_route
+
+    class EmptyRunner:
+        async def run_subprocess(self, *a, **kw):
+            return "```json\n[]\n```"
+
+    creative_route._runner = EmptyRunner()  # type: ignore[assignment]
+    monkeypatch.setattr(creative_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/creative/generate",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"brief_id": "brief-1"},
+    )
+    assert resp.status_code == 502
+    assert "empty" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# /work/creative/composite — extra branches
+# ---------------------------------------------------------------------------
+
+
+def test_composite_409_when_parent_has_no_file_path(
+    client: TestClient,
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Parent row exists but `file_path_supabase` is empty → 409."""
+    fake_sb.creative_row = {
+        "id": "c-no-file",
+        "brief_id": "brief-1",
+        "concept": "Concept",
+        "offer_text": None,
+        "ratio": "1x1",
+        "version": "v1.0",
+        "file_path_supabase": None,
+    }
+    resp = client.post(
+        "/work/creative/composite",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "c-no-file", "headline": "X"},
+    )
+    assert resp.status_code == 409
+
+
+def test_composite_502_when_compositor_error(
+    client: TestClient,
+    fake_sb: _FakeSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Upstream compositor reports failure → 502."""
+    from src.routes import creative as creative_route
+    from src.services.image_compositor import CompositorError
+
+    fake_sb.creative_row = {
+        "id": "c-parent",
+        "brief_id": "brief-1",
+        "concept": "Sunny",
+        "offer_text": None,
+        "ratio": "9x16",
+        "version": "v1.0",
+        "file_path_supabase": "brief-1/sunny-9x16-v1.0.png",
+    }
+    fake_sb.storage_reads["brief-1/sunny-9x16-v1.0.png"] = b"P"
+
+    async def fake_composite(*a, **kw):
+        raise CompositorError("missing font")
+
+    monkeypatch.setattr(creative_route, "image_composite", fake_composite)
+
+    resp = client.post(
+        "/work/creative/composite",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "c-parent", "headline": "H"},
+    )
+    assert resp.status_code == 502
+    assert "missing font" in resp.json()["detail"]
+
+
 def test_chat_stream_honors_abort_flag(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -134,3 +134,69 @@ def test_compute_clip_id_is_stable(sample_clip: Path) -> None:
 def test_supabase_backend_raises_on_construction() -> None:
     with pytest.raises(NotImplementedError):
         SupabaseBrollStore()
+
+
+def test_put_missing_source_file_raises(store: LocalBrollStore, tmp_path: Path) -> None:
+    """The sync path should refuse to ingest a missing file."""
+    with pytest.raises(FileNotFoundError, match="Source file not found"):
+        asyncio.run(
+            store.put(
+                "https://example.com/x",
+                tmp_path / "no-such.mp4",
+                theme="x",
+            )
+        )
+
+
+def test_get_signed_url_unknown_clip_raises(store: LocalBrollStore) -> None:
+    """Asking for a URL on a clip that isn't on disk → FileNotFoundError."""
+    with pytest.raises(FileNotFoundError, match="Unknown clip_id"):
+        asyncio.run(store.get_signed_url("does-not-exist"))
+
+
+def test_list_pool_skips_corrupt_sidecar(
+    store: LocalBrollStore, tmp_path: Path, sample_clip: Path
+) -> None:
+    """A malformed `.json` sidecar in the pool is skipped rather than crashing."""
+    asyncio.run(store.put("https://example.com/clip", sample_clip, theme="ocean"))
+    # Drop a corrupt sidecar.
+    (store.root / "corrupt.json").write_text("{not json")
+    out = asyncio.run(store.list_pool("ocean"))
+    # The good entry is returned; the corrupt one is silently dropped.
+    assert len(out) == 1
+
+
+def test_get_broll_store_factory_returns_local() -> None:
+    """The factory honours `BROLL_STORE_BACKEND=local`."""
+    import os
+
+    os.environ["WORKER_SHARED_SECRET"] = "x"
+    os.environ["WORKER_PUBLIC_BASE_URL"] = "http://localhost:8000"
+    os.environ["BROLL_STORE_BACKEND"] = "local"
+    os.environ["BROLL_LOCAL_ROOT"] = "/tmp/factory-store"
+    from src.config import get_settings
+    from src.services.broll_store import get_broll_store
+
+    get_settings.cache_clear()
+    store = get_broll_store()
+    assert isinstance(store, LocalBrollStore)
+    get_settings.cache_clear()
+
+
+def test_get_broll_store_factory_returns_supabase_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the backend isn't `local` the factory constructs SupabaseBrollStore
+    (which immediately raises NotImplementedError per spec)."""
+    monkeypatch.setenv("BROLL_STORE_BACKEND", "supabase")
+    monkeypatch.setenv("BROLL_LOCAL_ROOT", str(tmp_path))
+    monkeypatch.setenv("WORKER_SHARED_SECRET", "x")
+    monkeypatch.setenv("WORKER_PUBLIC_BASE_URL", "http://localhost:8000")
+
+    from src.config import get_settings
+    from src.services.broll_store import get_broll_store
+
+    get_settings.cache_clear()
+    with pytest.raises(NotImplementedError, match="Supabase"):
+        get_broll_store()
+    get_settings.cache_clear()

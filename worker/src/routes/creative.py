@@ -496,11 +496,14 @@ async def composite_creative(body: CreativeCompositeInput) -> CreativeCompositeR
                 accent_color=body.accent_color,
                 output_format="1x1" if ratio == "1x1" else "9x16",
             )
+        except CompositorError as e:
+            # Script ran but reported a failure (bad inputs, missing font,
+            # non-zero exit). MUST come before RuntimeError because
+            # CompositorError subclasses RuntimeError.
+            raise HTTPException(status_code=502, detail=str(e)) from e
         except RuntimeError as e:
             # Upstream script not installed → 503.
             raise HTTPException(status_code=503, detail=str(e)) from e
-        except CompositorError as e:
-            raise HTTPException(status_code=502, detail=str(e)) from e
 
         composed_bytes = out_path.read_bytes()
     finally:
