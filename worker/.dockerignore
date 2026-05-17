@@ -1,0 +1,45 @@
+# Keep the build context lean and ensure secrets / caches / test
+# artefacts never make it into the image.
+
+# Python build/runtime caches
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# Tests aren't shipped with the runtime image
+tests/
+
+# Local state / artefacts
+storage/
+.cache/
+logs/
+*.log
+
+# Secrets — must never enter the build context
+.env
+.env.*
+!.env.example
+
+# VCS / editor noise
+.git/
+.gitignore
+.gitattributes
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS detritus
+.DS_Store
+Thumbs.db
+
+# Docker-self
+Dockerfile
+.dockerignore

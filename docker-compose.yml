@@ -1,0 +1,51 @@
+# VoxHorizon — VPS container stack.
+#
+# v1 wires only the FastAPI worker. Caddy fronts the worker for public
+# HTTPS and is added in VPS-3 (#160). The worker has no public port
+# binding here — only `expose: ["8000"]` so the future caddy service on
+# the same compose network can reach it. The host firewall keeps :8000
+# unreachable until Caddy lands.
+
+services:
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    image: ghcr.io/pveloso01/voxhorizon-worker:local
+    restart: unless-stopped
+    # Production path: env file lives at the canonical absolute path on
+    # the VPS (chmod 600, owned by the deploy user). Dev override:
+    #   env_file: ./worker/.env
+    # — substitute the line below when running locally on a workstation.
+    env_file:
+      - /opt/voxhorizon/.env
+    expose:
+      - "8000"
+    volumes:
+      # B-roll pool — Diogo curates this over time; persistent named
+      # volume keeps it across image rebuilds.
+      - worker-broll-pool:/app/storage/broll-pool
+      # Worker logs / runtime state. The image logs to stdout (JSON via
+      # structlog), but anything written under /app/storage (sidecars,
+      # tmp transcode buffers) lives here.
+      - worker-logs:/app/storage/logs
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS -H "Authorization: Bearer ${WORKER_SHARED_SECRET}" http://localhost:8000/work/health || exit 1'
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  # caddy: added in VPS-3 (#160)
+  #   Fronts the worker over HTTPS (Let's Encrypt), terminates TLS,
+  #   forwards Authorization headers through to the worker, and exposes
+  #   :80 + :443 publicly. Until then, the worker is reachable only via
+  #   the compose network.
+
+volumes:
+  worker-broll-pool:
+    name: voxhorizon-worker-broll-pool
+  worker-logs:
+    name: voxhorizon-worker-logs
