@@ -55,9 +55,38 @@ export async function POST(req: NextRequest) {
       { status: 400 },
     );
   }
-  const { brief_id } = parsed.data;
+  const { brief_id, pipeline_id } = parsed.data;
 
   const supabase = createAdminClient();
+
+  // If the operator handed us a ``pipeline_id``, validate it up-front so the
+  // 422 surfaces before we burn the worker round-trip on validation. The
+  // pipeline must (a) exist and (b) be in status ``done`` — linking from any
+  // earlier stage would race the orchestrator's stage transitions and risk
+  // pointing two pipelines at the same launch.
+  if (pipeline_id) {
+    const { data: pipelineRow, error: pipelineErr } = await supabase
+      .from("pipelines")
+      .select("id, status, launch_package_id")
+      .eq("id", pipeline_id)
+      .maybeSingle();
+    if (pipelineErr) {
+      return NextResponse.json({ error: pipelineErr.message }, { status: 500 });
+    }
+    if (!pipelineRow) {
+      return NextResponse.json({ error: "pipeline not found" }, { status: 404 });
+    }
+    if (pipelineRow.status !== "done") {
+      return NextResponse.json(
+        {
+          error: "invalid_pipeline_state",
+          current: pipelineRow.status,
+          expected: "done",
+        },
+        { status: 422 },
+      );
+    }
+  }
 
   // 1. Read brief + client.
   const { data: brief, error: briefErr } = await supabase
@@ -214,9 +243,45 @@ export async function POST(req: NextRequest) {
       brief_id,
       issue_count: issues.length,
       validation,
+      ...(pipeline_id ? { pipeline_id } : {}),
     } as Json,
   };
   await supabase.from("events").insert(evt);
+
+  // 7. Bidirectional pipeline ↔ launch link.
+  //
+  // PostgREST doesn't expose a true cross-table transaction from the JS
+  // client, so we do this as two soft-failable side-effects: the launch
+  // row is the primary artefact. If the back-pointer update fails we log
+  // and continue — the launch still exists, the operator can re-link from
+  // the UI if needed, and the timeline event below records the intent.
+  //
+  // Both ops only fire on a clean ``posted`` result. A failed launch
+  // would leave the pipeline pointing at junk; better to require the
+  // operator to retry once pre-flight passes.
+  if (pipeline_id && finalOk) {
+    const { error: linkErr } = await supabase
+      .from("pipelines")
+      .update({ launch_package_id: launch.id })
+      .eq("id", pipeline_id);
+    if (linkErr) {
+      console.warn(
+        `[POST /api/launches] failed to back-link pipeline ${pipeline_id} → launch ${launch.id}: ${linkErr.message}`,
+      );
+    }
+
+    const { error: pevErr } = await supabase.from("pipeline_events").insert({
+      pipeline_id,
+      kind: "launch_linked",
+      stage: "done",
+      payload: { launch_package_id: launch.id } as Json,
+    });
+    if (pevErr) {
+      console.warn(
+        `[POST /api/launches] failed to emit pipeline_events.launch_linked for ${pipeline_id}: ${pevErr.message}`,
+      );
+    }
+  }
 
   return NextResponse.json({ launch }, { status: finalOk ? 201 : 422 });
 }
