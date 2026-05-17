@@ -41,10 +41,11 @@ from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..services.chat_abort import ChatKind, get_store
 from ..services.claude_runner import ClaudeRunner, StreamChunk
 
 
@@ -217,6 +218,8 @@ async def _stream_with_heartbeat(
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None,
     system_prompt: str | None,
+    kind: ChatKind,
+    creative_id: str,
 ) -> AsyncIterator[bytes]:
     """Wrap the runner's stream with periodic heartbeat lines.
 
@@ -227,8 +230,17 @@ async def _stream_with_heartbeat(
     Implementation uses ``asyncio.wait`` to race the next stream chunk
     against the heartbeat tick. If the heartbeat wins we emit it and
     keep waiting; if the chunk wins we emit it and re-arm the timer.
+
+    Between chunks we also poll :func:`worker.src.services.chat_abort.get_store`
+    so a Next.js Stop button can interrupt a slow upstream call — the
+    SDK's ``async for`` only yields when the upstream sends something,
+    which can be several seconds during tool execution.
     """
     queue: asyncio.Queue[StreamChunk | None] = asyncio.Queue()
+    store = get_store()
+    # Always start from a fresh slate. If a stale flag is left over from
+    # a previous session we want it gone before the new stream begins.
+    store.clear(kind, creative_id)
 
     async def produce() -> None:
         try:
@@ -240,9 +252,18 @@ async def _stream_with_heartbeat(
             await queue.put(None)
 
     saw_terminal = False
+    aborted = False
     producer = asyncio.create_task(produce())
     try:
         while True:
+            # Check the abort flag *before* awaiting the next chunk so
+            # a Stop request that lands during a tool call wakes the
+            # stream up promptly instead of stalling on the upstream.
+            if store.is_aborted(kind, creative_id):
+                aborted = True
+                yield _format_sse(StreamChunk(type="message_stop"))
+                saw_terminal = True
+                break
             getter = asyncio.create_task(queue.get())
             done, _pending = await asyncio.wait(
                 {getter},
@@ -272,6 +293,15 @@ async def _stream_with_heartbeat(
             await producer
         except (asyncio.CancelledError, Exception):  # noqa: BLE001
             pass
+        # Either we aborted or we ran to completion — in both cases
+        # drop the flag so the next session starts clean.
+        store.clear(kind, creative_id)
+        if aborted:
+            log.info(
+                "chat_stream_aborted",
+                kind=kind,
+                creative_id=creative_id,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +373,8 @@ def _stream_chat(
             messages=messages,
             tools=tools,
             system_prompt=system,
+            kind=kind,
+            creative_id=body.creative_id,
         ),
         media_type="text/event-stream",
         headers={
@@ -352,3 +384,36 @@ def _stream_chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Abort endpoints
+# ---------------------------------------------------------------------------
+
+
+class ChatAbortInput(BaseModel):
+    """POST body for :func:`abort_image_chat` / :func:`abort_video_chat`."""
+
+    creative_id: str = Field(..., min_length=1)
+
+
+@router.post("/work/chat/creative/abort", dependencies=[Depends(verify_secret)])
+async def abort_image_chat(body: ChatAbortInput) -> JSONResponse:
+    """Flip the abort flag for the image-creative chat session.
+
+    The streaming coroutine checks this flag between chunks; on the next
+    poll it stops yielding deltas and emits a terminal ``message_stop``.
+    Always returns 200 — the flag is idempotent and we don't want a
+    "no live stream" 404 to confuse the operator who just hit Stop.
+    """
+    get_store().request("image", body.creative_id)
+    log.info("chat_abort_requested", kind="image", creative_id=body.creative_id)
+    return JSONResponse({"aborted": True, "kind": "image"})
+
+
+@router.post("/work/chat/video-creative/abort", dependencies=[Depends(verify_secret)])
+async def abort_video_chat(body: ChatAbortInput) -> JSONResponse:
+    """Flip the abort flag for the video-creative chat session."""
+    get_store().request("video", body.creative_id)
+    log.info("chat_abort_requested", kind="video", creative_id=body.creative_id)
+    return JSONResponse({"aborted": True, "kind": "video"})

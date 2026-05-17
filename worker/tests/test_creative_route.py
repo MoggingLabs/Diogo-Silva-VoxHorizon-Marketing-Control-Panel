@@ -615,3 +615,121 @@ def test_chat_stream_uses_video_defaults(
     assert "regenerate_voiceover" in names
     assert "swap_broll" in names
     assert "rerender_video" in names
+
+
+# ---------------------------------------------------------------------------
+# /work/chat/*/abort — Stop button plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_chat_abort_requires_auth(client: TestClient) -> None:
+    """Abort endpoint must reject requests without the shared secret."""
+    resp = client.post(
+        "/work/chat/creative/abort",
+        json={"creative_id": "c-1"},
+    )
+    assert resp.status_code == 401
+
+
+def test_chat_video_abort_requires_auth(client: TestClient) -> None:
+    """Same as above for the video variant."""
+    resp = client.post(
+        "/work/chat/video-creative/abort",
+        json={"creative_id": "vc-1"},
+    )
+    assert resp.status_code == 401
+
+
+def test_chat_abort_image_flips_flag(client: TestClient) -> None:
+    """Image abort POST should flip the in-memory flag for the creative."""
+    from src.services.chat_abort import get_store, _reset_store
+
+    _reset_store()
+    resp = client.post(
+        "/work/chat/creative/abort",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "c-99"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {"aborted": True, "kind": "image"}
+    assert get_store().is_aborted("image", "c-99") is True
+    # The video kind should NOT see the flag — they're keyed separately.
+    assert get_store().is_aborted("video", "c-99") is False
+
+
+def test_chat_abort_video_flips_flag(client: TestClient) -> None:
+    """Video abort POST sets the flag on the video kind."""
+    from src.services.chat_abort import get_store, _reset_store
+
+    _reset_store()
+    resp = client.post(
+        "/work/chat/video-creative/abort",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"creative_id": "vc-77"},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"aborted": True, "kind": "video"}
+    assert get_store().is_aborted("video", "vc-77") is True
+
+
+def test_chat_stream_honors_abort_flag(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the abort flag flips mid-stream the SSE response should
+    stop emitting deltas and close with a ``message_stop``.
+
+    The fake runner emits a few text chunks and then flips the abort
+    flag itself on iteration #2 — simulating a Stop POST that lands
+    while the producer is still generating. We assert that the response
+    contains the early deltas + a clean terminal frame, but NOT every
+    delta the producer was prepared to emit.
+    """
+    from src.routes import chat_stream
+    from src.services.chat_abort import get_store, _reset_store
+    from src.services.claude_runner import StreamChunk
+
+    _reset_store()
+
+    class AbortMidStreamRunner:
+        async def run_subprocess(self, *a, **kw):
+            return ""
+
+        async def stream(self, messages, **kwargs):
+            # Emit a couple of deltas, flip the flag, then try to emit
+            # many more. The consumer in `_stream_with_heartbeat` is
+            # supposed to break out after seeing the flag, so most of
+            # the post-flip chunks should never appear in the body.
+            for i in range(20):
+                if i == 2:
+                    get_store().request("image", "c-abort-mid")
+                yield StreamChunk(type="text_delta", delta=f"chunk-{i}")
+                await asyncio.sleep(0)
+
+    chat_stream._runner = AbortMidStreamRunner()  # type: ignore[assignment]
+
+    with client.stream(
+        "POST",
+        "/work/chat/creative",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={
+            "creative_id": "c-abort-mid",
+            "messages": [{"role": "user", "content": "hi"}],
+        },
+    ) as resp:
+        assert resp.status_code == 200
+        body = b"".join(resp.iter_bytes())
+
+    # The stream must always end with a clean message_stop — the abort
+    # gate is responsible for emitting it.
+    assert b"message_stop" in body
+    # And the flag must have been cleared by the stream's finally block
+    # so the next session for the same creative starts clean.
+    assert get_store().is_aborted("image", "c-abort-mid") is False
+    # The first few deltas should have landed; the flag was flipped at
+    # i=2 but the gate is checked at the TOP of each loop iteration,
+    # so a few in-flight chunks may still drain — what we really care
+    # about is that the producer's full 20-chunk sequence didn't make
+    # it through (i.e. early termination did happen).
+    assert b"chunk-0" in body
+    assert b"chunk-19" not in body
