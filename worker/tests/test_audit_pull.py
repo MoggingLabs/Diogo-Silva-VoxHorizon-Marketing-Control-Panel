@@ -512,3 +512,66 @@ def test_audit_report_to_dict_round_trips() -> None:
     assert d["format"] == "image"
     assert d["rows_upserted"] == 4
     assert d["errors"] == ["x"]
+
+
+# ---------------------------------------------------------------------------
+# _safe_float / _row_to_client edge cases
+# ---------------------------------------------------------------------------
+
+
+def test_safe_float_handles_none_and_garbage() -> None:
+    """``_safe_float`` returns None for None, float for valid, None for invalid."""
+    assert ap._safe_float(None) is None
+    assert ap._safe_float("10.5") == 10.5
+    assert ap._safe_float(7) == 7.0
+    # Garbage strings → None (the except branch).
+    assert ap._safe_float("not-a-number") is None
+    # Object that raises TypeError on float() — exercise the TypeError branch.
+    assert ap._safe_float(object()) is None
+
+
+def test_row_to_client_returns_none_when_meta_account_id_blank(
+    stub_sb: _SupabaseStub,
+) -> None:
+    """Rows missing the meta account ID must not appear in fetch_clients output."""
+    stub_sb.rows.append(
+        {
+            "id": "z",
+            "name": "Z",
+            "slug": "z",
+            "meta_account_id": "   ",  # all whitespace
+            "ghl_location_id": "loc",
+            "cpl_target": None,
+            "status": "active",
+        }
+    )
+    out = asyncio.run(fetch_clients(None))
+    assert out == []
+
+
+# ---------------------------------------------------------------------------
+# Notification dedupe — emit returns False on the second call
+# ---------------------------------------------------------------------------
+
+
+def test_emit_dedupe_returns_false_counts_only_first_call(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If emit returns False the audit must not over-count notifications."""
+    _, _, _ = _setup_mocks(
+        monkeypatch,
+        insights=[_insight(campaign_id="cmp-A", spend=120.0, leads=0)],
+        contacts=[],
+    )
+
+    # Replace the emit hook to always return False (deduped).
+    async def fake_emit_dedupes(_event: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(ap, "emit", fake_emit_dedupes)
+
+    report = asyncio.run(run_audit(format="image", window_days=7))
+    # Kills still count — they're computed independently of the emit return.
+    assert report.kills == 1
+    # But notifications_emitted reflects what emit actually accepted.
+    assert report.notifications_emitted == 0
