@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routes import audit, broll, chat, creative, health, launch, upload, video
+from .routes import audit, broll, chat, chat_stream, creative, health, launch, upload, video
 from .services.queue import get_queue
 
 
@@ -85,6 +85,12 @@ def create_app() -> FastAPI:
     # (M4-13). Both join, compute verdicts, persist, and emit kill
     # notifications through the shared services.
     app.include_router(audit.router, tags=["audit"])
+
+    # === wave 5 chat routes ===
+    # SSE streaming endpoints for chat-with-Ekko (image + video). Lives on
+    # its own router so the chat.py placeholder for non-streaming agent
+    # work can evolve independently.
+    app.include_router(chat_stream.router, tags=["chat-stream"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.

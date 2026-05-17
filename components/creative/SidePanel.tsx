@@ -11,6 +11,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet";
+import { EkkoChat } from "@/components/chat/EkkoChat";
 import { createClient } from "@/lib/supabase/browser";
 import { STATUS_LABEL, STATUS_PILL, type Creative, type CreativeIteration } from "@/lib/creatives";
 import { cn } from "@/lib/utils";

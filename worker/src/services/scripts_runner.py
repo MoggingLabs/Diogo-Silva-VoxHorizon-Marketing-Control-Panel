@@ -158,3 +158,79 @@ async def run_launch_package_validate(
         raw_stdout=out,
         raw_stderr=err,
     )
+
+
+# ---------------------------------------------------------------------------
+# Wave 5: kie + image_compositor helpers
+# ---------------------------------------------------------------------------
+#
+# These helpers are thin convenience wrappers around the real services
+# in :mod:`worker.src.services.kie` and
+# :mod:`worker.src.services.image_compositor`. They exist so the route
+# layer has a single import surface (``from ..services import scripts_runner``)
+# and so future scripts can be added without touching the routes again.
+# The existing launch_package helpers above are untouched.
+
+
+async def run_kie_generate(
+    *,
+    prompt: str,
+    ratio: Literal["1x1", "9x16"],
+    resolution: Literal["1K", "2K", "4K"] = "2K",
+    api_key: str | None = None,
+) -> bytes:
+    """Generate one Kie.ai image; return the raw image bytes.
+
+    Thin re-export of :meth:`KieClient.generate_image` — primarily used by
+    tests that want to mock the scripts_runner surface rather than the
+    KieClient class directly.
+    """
+    from .kie import KieClient
+
+    client = KieClient(api_key=api_key)
+    return await client.generate_image(prompt, ratio, resolution=resolution)
+
+
+async def run_image_composite(
+    input_path: Path,
+    output_path: Path,
+    *,
+    style: str = "bold-bottom",
+    headline: str | None = None,
+    subtext: str | None = None,
+    cta: str | None = None,
+    offer_bar: str | None = None,
+    city: str | None = None,
+    logo_path: Path | None = None,
+    color: str | None = None,
+    accent_color: str | None = None,
+    output_format: Literal["1x1", "9x16", "both"] = "1x1",
+    scripts_root: Path | None = None,
+) -> Path:
+    """Composite a base image; return the path to the written file.
+
+    Thin wrapper over :func:`image_compositor.composite` that returns just
+    the output path (the most common need at the route layer).
+    """
+    # Import inline so tests that don't exercise this path don't pay the
+    # import cost of the image_compositor module.
+    from typing import cast
+
+    from . import image_compositor as ic
+
+    result = await ic.composite(
+        input_path,
+        output_path,
+        style=cast(ic.CompositorStyle, style),
+        headline=headline,
+        subtext=subtext,
+        cta=cta,
+        offer_bar=offer_bar,
+        city=city,
+        logo_path=logo_path,
+        color=color,
+        accent_color=accent_color,
+        output_format=output_format,
+        scripts_root=scripts_root,
+    )
+    return result.output_path
