@@ -71,6 +71,28 @@ export const ListPipelinesQuery = z.object({
 });
 export type ListPipelinesQueryT = z.infer<typeof ListPipelinesQuery>;
 
+/**
+ * Review-stage approval decisions. Mirrors `lib/briefs.ts`'s shape so the
+ * shared `<ApprovalGate />` primitive keeps working: pure `approved` is
+ * note-optional, while `approved_with_changes` and `rejected` require notes.
+ *
+ * `approved` / `approved_with_changes` both kick the pipeline forward to
+ * `generation`; `rejected` moves it to `cancelled` (terminal in v1).
+ */
+export const ReviewDecision = z.enum(["approved", "approved_with_changes", "rejected"]);
+export type ReviewDecisionT = z.infer<typeof ReviewDecision>;
+
+export const ReviewDecisionInput = z
+  .object({
+    decision: ReviewDecision,
+    notes: z.string().max(5000).optional(),
+  })
+  .refine(
+    (d) => d.decision === "approved" || (typeof d.notes === "string" && d.notes.trim().length > 0),
+    { message: "notes are required for approved_with_changes and rejected", path: ["notes"] },
+  );
+export type ReviewDecisionInputT = z.infer<typeof ReviewDecisionInput>;
+
 // ---------------------------------------------------------------------------
 // DB shape passthroughs
 // ---------------------------------------------------------------------------

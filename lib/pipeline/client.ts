@@ -132,3 +132,40 @@ export async function updatePicks(
     );
   }
 }
+
+/** Body shape for `POST /api/pipelines/:id/review/decision`. */
+export type ReviewDecisionInput = {
+  decision: "approved" | "approved_with_changes" | "rejected";
+  notes?: string;
+};
+
+/**
+ * Submit the operator's review-stage decision. On `approved` /
+ * `approved_with_changes` the server snapshots `cost_estimate`, transitions
+ * the pipeline to `generation`, and fires off the worker; on `rejected` the
+ * pipeline moves to `cancelled`. Returns the updated pipeline row so callers
+ * can optimistically reconcile UI state without a follow-up GET.
+ */
+export async function submitReviewDecision(
+  id: string,
+  decision: ReviewDecisionInput,
+): Promise<{ pipeline: Pipeline }> {
+  const res = await fetch(
+    `${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}/review/decision`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(decision),
+      cache: "no-store",
+    },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/${id}/review/decision failed (${res.status}): ${
+        body.slice(0, 200) || res.statusText
+      }`,
+    );
+  }
+  return readJson<{ pipeline: Pipeline }>(res);
+}
