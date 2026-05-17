@@ -144,8 +144,12 @@ export function EkkoChat({
       rafIdRef.current = null;
       const buf = textBufRef.current;
       if (buf.size === 0) return;
+      // Snapshot the current state but DO NOT clear the buffer — the
+      // accumulator must survive across flushes so subsequent deltas
+      // append rather than restart from "". The buffer is reset for
+      // the next assistant turn in `submit` and cleaned up in the
+      // finally block when the stream finishes.
       const snapshot = new Map(buf);
-      buf.clear();
       setMessages((prev) =>
         prev.map((m) => {
           if (m.kind !== "assistant") return m;
@@ -242,6 +246,13 @@ export function EkkoChat({
         }
 
         for await (const chunk of readChatStream(response, controller.signal)) {
+          // Detect tool activity at the chunk-handler level rather than
+          // inside the setMessages reducer — React defers reducer
+          // execution to commit time, so the inside-reducer mutation
+          // races against the `finally` block that fires `onIterate`.
+          if (chunk.type === "tool_call_start" || chunk.type === "tool_call_result") {
+            sawTool = true;
+          }
           applyChunk(
             setMessages,
             assistantTempId,
