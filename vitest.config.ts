@@ -1,22 +1,93 @@
+import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vitest/config";
 
+const alias = { "@": fileURLToPath(new URL("./", import.meta.url)) };
+
 /**
- * Vitest config. Scoped tightly to co-located unit tests under `lib/`
- * (and similar) so Playwright `tests/e2e/**` specs are never picked up.
- * Keep this list focused — broaden it deliberately as new unit-test
- * surfaces appear.
+ * Vitest config for the Next.js app.
+ *
+ * `projects` carves the test suite into two parallel runs that share
+ * coverage but pick different environments:
+ *
+ *  - `node`   — Vitest's default. Runs anything under `lib/**`, which is
+ *               server-only / pure-Node code.
+ *  - `jsdom`  — Browser-shaped DOM. Required for React Testing Library to
+ *               render components, and for jsdom-backed parsing in API
+ *               route tests that touch `Request` / `Response`.
+ *
+ * Coverage uses `all: true` so unimported source files still show up at
+ * 0% — that's how the parallel coverage agents will know which files
+ * still need tests. The `exclude` list trims pure-type modules, shadcn
+ * primitives (vendored, low value to test), and test fixtures.
+ *
+ * Vitest 4 removed `environmentMatchGlobs`; `projects` is the supported
+ * replacement (see https://vitest.dev/guide/projects).
  */
 export default defineConfig({
-  resolve: {
-    alias: {
-      "@": fileURLToPath(new URL("./", import.meta.url)),
-    },
-  },
   test: {
-    include: ["lib/**/*.{test,spec}.{ts,tsx}", "components/**/*.{test,spec}.{ts,tsx}"],
+    globals: true,
+    setupFiles: ["./tests/unit/setup.ts"],
     exclude: ["node_modules/**", "tests/e2e/**", ".next/**"],
-    environment: "node",
+    projects: [
+      {
+        plugins: [react()],
+        resolve: { alias },
+        test: {
+          name: "node",
+          globals: true,
+          environment: "node",
+          setupFiles: ["./tests/unit/setup.ts"],
+          include: ["lib/**/*.{test,spec}.{ts,tsx}"],
+          exclude: ["node_modules/**", "tests/e2e/**", ".next/**"],
+        },
+      },
+      {
+        plugins: [react()],
+        resolve: { alias },
+        test: {
+          name: "jsdom",
+          globals: true,
+          environment: "jsdom",
+          setupFiles: ["./tests/unit/setup.ts"],
+          include: [
+            "components/**/*.{test,spec}.{ts,tsx}",
+            "hooks/**/*.{test,spec}.{ts,tsx}",
+            "app/**/*.{test,spec}.{ts,tsx}",
+          ],
+          exclude: ["node_modules/**", "tests/e2e/**", ".next/**"],
+        },
+      },
+    ],
+    coverage: {
+      provider: "v8",
+      reporter: ["text", "text-summary", "html"],
+      // Note: Vitest 4 removed the `all` option — `include` already
+      // covers every matching file, whether or not a test imported it.
+      include: [
+        "lib/**/*.{ts,tsx}",
+        "components/**/*.{ts,tsx}",
+        "hooks/**/*.{ts,tsx}",
+        "app/**/*.{ts,tsx}",
+      ],
+      exclude: [
+        "**/*.test.{ts,tsx}",
+        "**/*.spec.{ts,tsx}",
+        "**/*.gen.ts",
+        "**/*.d.ts",
+        "components/ui/**",
+        "**/types.ts",
+        "**/types/**",
+        "**/__mocks__/**",
+        "tests/**",
+      ],
+      thresholds: {
+        lines: 90,
+        statements: 90,
+        functions: 85,
+        branches: 80,
+      },
+    },
   },
 });
