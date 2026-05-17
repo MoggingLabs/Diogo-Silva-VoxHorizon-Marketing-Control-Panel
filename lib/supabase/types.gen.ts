@@ -199,6 +199,59 @@ export type Database = {
           },
         ];
       };
+      chat_messages: {
+        Row: {
+          author: Database["public"]["Enums"]["chat_author"];
+          content: string | null;
+          content_type: Database["public"]["Enums"]["chat_content_type"];
+          created_at: string;
+          creative_id: string;
+          creative_type: Database["public"]["Enums"]["chat_creative_type"];
+          id: string;
+          is_edited: boolean;
+          metadata: Json | null;
+          reply_to_id: string | null;
+          tool_call_id: string | null;
+          updated_at: string;
+        };
+        Insert: {
+          author: Database["public"]["Enums"]["chat_author"];
+          content?: string | null;
+          content_type?: Database["public"]["Enums"]["chat_content_type"];
+          created_at?: string;
+          creative_id: string;
+          creative_type: Database["public"]["Enums"]["chat_creative_type"];
+          id?: string;
+          is_edited?: boolean;
+          metadata?: Json | null;
+          reply_to_id?: string | null;
+          tool_call_id?: string | null;
+          updated_at?: string;
+        };
+        Update: {
+          author?: Database["public"]["Enums"]["chat_author"];
+          content?: string | null;
+          content_type?: Database["public"]["Enums"]["chat_content_type"];
+          created_at?: string;
+          creative_id?: string;
+          creative_type?: Database["public"]["Enums"]["chat_creative_type"];
+          id?: string;
+          is_edited?: boolean;
+          metadata?: Json | null;
+          reply_to_id?: string | null;
+          tool_call_id?: string | null;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "chat_messages_reply_to_id_fkey";
+            columns: ["reply_to_id"];
+            isOneToOne: false;
+            referencedRelation: "chat_messages";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       clients: {
         Row: {
           brand_colors: Json | null;
@@ -837,6 +890,9 @@ export type Database = {
         | "approved_with_changes"
         | "rejected";
       broll_store_backend: "local" | "supabase";
+      chat_author: "user" | "ekko" | "system";
+      chat_content_type: "text" | "tool_call" | "tool_result" | "system";
+      chat_creative_type: "image" | "video";
       creative_type: "image" | "video";
       image_creative_status:
         | "draft"
