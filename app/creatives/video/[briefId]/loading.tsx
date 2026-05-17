@@ -5,7 +5,7 @@
  */
 export default function Loading() {
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 py-10">
+    <main className="container mx-auto flex min-h-dvh max-w-6xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-10">
       <header className="space-y-3">
         <div className="h-4 w-44 animate-pulse rounded bg-muted/60" />
         <div className="flex flex-wrap items-center gap-3">

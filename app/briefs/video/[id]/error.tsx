@@ -18,7 +18,7 @@ export default function VideoBriefDetailError({
   }, [error]);
 
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-2xl flex-col items-start gap-4 py-12">
+    <main className="container mx-auto flex min-h-dvh max-w-2xl flex-col items-start gap-4 px-4 py-6 sm:px-6 sm:py-12">
       <p className="text-sm text-muted-foreground">
         <Link href="/briefs/video" className="underline-offset-4 hover:underline">
           Video briefs
@@ -37,9 +37,11 @@ export default function VideoBriefDetailError({
       {error.digest ? (
         <p className="font-mono text-xs text-muted-foreground">ref: {error.digest}</p>
       ) : null}
-      <div className="flex gap-2">
-        <Button onClick={() => reset()}>Retry</Button>
-        <Button asChild variant="outline">
+      <div className="flex flex-col gap-2 sm:flex-row">
+        <Button onClick={() => reset()} className="min-h-11">
+          Retry
+        </Button>
+        <Button asChild variant="outline" className="min-h-11">
           <Link href="/briefs/video">Back to video briefs</Link>
         </Button>
       </div>

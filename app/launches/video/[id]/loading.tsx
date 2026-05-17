@@ -3,7 +3,7 @@
  */
 export default function VideoLaunchDetailLoading() {
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 py-12">
+    <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
       <header className="space-y-3">
         <div className="h-3 w-40 rounded bg-muted" />
         <div className="h-8 w-72 rounded bg-muted" />
