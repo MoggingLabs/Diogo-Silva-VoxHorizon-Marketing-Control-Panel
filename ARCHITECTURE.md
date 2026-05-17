@@ -318,7 +318,36 @@ Layered. No single failure removes all defenses.
 The Mac+Tailscale topology above is the v1 default. The VPS path runs the same worker code on a remote Linux host, containerised — used for staging, demo environments, or when the operator wants the worker decoupled from the Mac being on.
 
 - **Worker in Docker.** `worker/Dockerfile` is a multi-stage build: stage 1 produces a `uv`-frozen virtualenv from `pyproject.toml` + `uv.lock`; stage 2 runs on the Playwright Python base (Chromium + system deps preinstalled) plus Node 22 (Hyperframes CLI), `ffmpeg`, `yt-dlp`, and the prebuilt venv. Final image stays under 2 GB. Uvicorn binds `:8000` inside the container; non-root `app` user; healthcheck hits `/work/health` with the bearer secret read from env at runtime.
-- **Caddy fronts.** [VPS-3 / #160](../../issues/160) lands a `caddy` service in the same `docker-compose.yml` to terminate TLS (Let's Encrypt), forward `Authorization` headers, and expose `:80` + `:443`. Until then the worker has `expose: ["8000"]` only — reachable on the compose network, never the public internet.
+- **Caddy fronts.** [VPS-3 / #160](../../issues/160) lands a `caddy` service in the same `docker-compose.yml` to terminate TLS (Let's Encrypt), forward `Authorization` headers, and expose `:80` + `:443`. The worker has `expose: ["8000"]` only — reachable on the compose network, never the public internet.
+
+#### Reverse proxy (Caddy ↔ Cloudflare ↔ worker)
+
+Public HTTPS for the VPS path terminates at Caddy. The chain is:
+
+```
+   Diogo's browser / Vercel app
+            │
+            │ HTTPS (TLS via Cloudflare edge cert)
+            ▼
+   Cloudflare edge (proxy = ON, orange cloud)
+            │
+            │ HTTPS (TLS via Let's Encrypt cert held by Caddy)
+            │ SSL/TLS mode = Full (strict) — Cloudflare validates Caddy's cert
+            ▼
+   Caddy (caddy:2-alpine, ports 80/443/443-udp)
+            │
+            │ HTTP on the compose network
+            ▼
+   worker:8000 (FastAPI / Uvicorn, expose-only)
+```
+
+- **Site address.** The Caddyfile uses `{$VOXHORIZON_WORKER_HOST:worker.voxhorizon.example.com}` as the site matcher. Caddy substitutes the env var at startup, so the same Caddyfile works for local-dev (`worker.localhost`) and prod (`worker.voxhorizon.com`) without hardcoding either. The var is set in `/opt/voxhorizon/.env` on the VPS (see [VPS-5 / #162](../../issues/162)).
+- **TLS.** Caddy obtains and renews a Let's Encrypt cert for the configured host automatically. State (ACME account, cert chain, OCSP staples) lives in the named volume `voxhorizon-caddy-data`; site state in `voxhorizon-caddy-config`.
+- **Cloudflare.** DNS A record (`worker.voxhorizon.com` → VPS public IP) with proxy ON. SSL/TLS mode is **Full (strict)** so Cloudflare validates the upstream cert from Let's Encrypt end-to-end. Cloudflare provides the edge cert to the browser and a separately validated TLS leg to Caddy.
+- **SSE preservation.** Caddy's `reverse_proxy` is configured with `flush_interval -1` — every token written by the worker's chat-stream endpoint is flushed to the client immediately, instead of being held in a response buffer until the FastAPI handler returns. Without this, the chat-with-Ekko UI would receive the entire agent turn at once instead of streaming.
+- **HTTP/3.** Port `443/udp` is exposed so Caddy can serve HTTP/3 to clients that support it; Cloudflare's edge negotiates HTTP/3 separately on the user side.
+- **Logs.** Caddy writes JSON access logs to `/var/log/caddy/access.log` inside the container, persisted via the `voxhorizon-caddy-logs` named volume. Log rotation is configured in the Caddyfile (50 MB per file, keep 5).
+- **Local dev.** Caddy is not required to run the worker locally — the dev workflow keeps hitting `http://localhost:8000` against the worker bypass. See [`infra/caddy/README.md`](./infra/caddy/README.md) for the local-Caddy + self-signed-cert path when reproducing a TLS-specific bug.
 - **GHCR image pipeline.** [VPS-4 / #161](../../issues/161) wires a GitHub Actions workflow that builds `worker/Dockerfile` on push to `main` and tags `ghcr.io/pveloso01/voxhorizon-worker:{latest,main,<sha>}`. The VPS pulls instead of building.
 - **Env on the VPS.** [VPS-5 / #162](../../issues/162) provisions `/opt/voxhorizon/.env` (chmod 600, owned by the deploy user). `docker-compose.yml` mounts it via `env_file: /opt/voxhorizon/.env`. Locally the dev override is `env_file: ./worker/.env`.
 - **Health route.** [VPS-6 / #163](../../issues/163) keeps `/work/health` cheap and bearer-authed so the container healthcheck and Caddy upstream probes can both rely on it.
