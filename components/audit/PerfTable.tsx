@@ -226,7 +226,7 @@ export function PerfTable({ rows, format }: PerfTableProps) {
 
   return (
     <div className="overflow-x-auto rounded-lg border border-border bg-card shadow-sm">
-      <table className="w-full text-sm">
+      <table className="w-full min-w-[720px] text-sm">
         <thead className="bg-muted/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
           <tr>
             {columns.map((col) => {

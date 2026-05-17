@@ -38,9 +38,9 @@ export default async function LaunchesIndexPage() {
     .limit(100);
 
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-4xl flex-col gap-6 py-12">
+    <main className="container mx-auto flex min-h-dvh max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
       <header className="space-y-2">
-        <h1 className="text-3xl font-semibold tracking-tight">Launches</h1>
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Launches</h1>
         <p className="text-sm text-muted-foreground">
           Image launch packages. Click into one to review the bundle + decide.{" "}
           <Link href="/launches/video" className="underline-offset-4 hover:underline">
@@ -71,12 +71,12 @@ export default async function LaunchesIndexPage() {
           return (
             <li
               key={row.id}
-              className="flex flex-wrap items-baseline justify-between gap-3 rounded-md border bg-card px-3 py-2 shadow-sm"
+              className="flex flex-wrap items-baseline justify-between gap-3 rounded-md border bg-card px-3 py-3 shadow-sm sm:py-2"
             >
-              <div className="flex flex-1 flex-wrap items-baseline gap-3">
+              <div className="flex min-w-0 flex-1 flex-wrap items-baseline gap-2 sm:gap-3">
                 <Link
                   href={{ pathname: `/launches/${row.id}` }}
-                  className="text-sm font-medium underline-offset-4 hover:underline"
+                  className="break-all text-sm font-medium underline-offset-4 hover:underline"
                 >
                   {payload?.brief_id_human ?? row.id.slice(0, 8)}
                 </Link>
@@ -84,7 +84,7 @@ export default async function LaunchesIndexPage() {
                   {payload?.client?.name ?? "—"}
                 </span>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-2">
                 <span
                   className={`rounded-full px-2 py-0.5 text-xs ${STATUS_PILL[status] ?? "bg-zinc-100 text-zinc-700"}`}
                 >

@@ -63,7 +63,7 @@ export function FormatTabs({ value }: FormatTabsProps) {
             aria-selected={selected}
             onClick={() => select(opt)}
             className={cn(
-              "rounded px-3 py-1 transition-colors",
+              "min-h-[36px] rounded px-3 py-1.5 transition-colors sm:py-1",
               selected
                 ? "bg-primary text-primary-foreground"
                 : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",

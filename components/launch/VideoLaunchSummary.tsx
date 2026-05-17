@@ -87,7 +87,7 @@ export function VideoLaunchSummary({
             No approved video creatives bundled with this launch yet.
           </p>
         ) : (
-          <ul className="grid gap-4 md:grid-cols-2">
+          <ul className="grid gap-4 sm:grid-cols-1 md:grid-cols-2">
             {videoCreatives.map((c) => {
               const captionedUrl = signedUrls[c.id] ?? null;
               const copies = copyByCreativeId[c.id] ?? [];

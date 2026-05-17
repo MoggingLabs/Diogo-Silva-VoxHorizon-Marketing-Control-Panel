@@ -79,9 +79,9 @@ export default async function SettingsPage() {
   const nodeEnv = process.env.NODE_ENV ?? "(unknown)";
 
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-3xl flex-col gap-8 py-12">
+    <main className="container mx-auto flex min-h-dvh max-w-3xl flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-12">
       <header className="flex flex-col gap-1">
-        <h1 className="text-3xl font-semibold tracking-tight">Settings</h1>
+        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Settings</h1>
         <p className="text-sm text-muted-foreground">
           Operational status and configuration. Read-only in v1.
         </p>
@@ -89,7 +89,7 @@ export default async function SettingsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Worker connection</h2>
-        <dl className="grid grid-cols-[10rem_1fr] items-baseline gap-x-4 gap-y-2 rounded-md border bg-background p-4 text-sm">
+        <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-3 gap-y-2 rounded-md border bg-background p-3 text-sm sm:grid-cols-[10rem_1fr] sm:gap-x-4 sm:p-4">
           <dt className="text-muted-foreground">URL</dt>
           <dd className="break-all font-mono text-xs">{workerUrl}</dd>
 
@@ -143,9 +143,9 @@ export default async function SettingsPage() {
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Notifications</h2>
         <div className="flex flex-col gap-3 rounded-md border bg-background p-4 text-sm">
-          <div className="flex items-start justify-between gap-3">
+          <div className="flex flex-col items-start gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div className="flex items-start gap-3">
-              <Bell className="mt-0.5 h-4 w-4 text-muted-foreground" aria-hidden="true" />
+              <Bell className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
               <div className="flex flex-col gap-1">
                 <p className="font-medium">Push notifications</p>
                 <p className="text-xs text-muted-foreground">
@@ -155,7 +155,13 @@ export default async function SettingsPage() {
                 </p>
               </div>
             </div>
-            <Button type="button" variant="outline" size="sm" disabled>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled
+              className="self-stretch sm:self-auto"
+            >
               Enable push notifications
             </Button>
           </div>
@@ -171,7 +177,7 @@ export default async function SettingsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Appearance</h2>
-        <dl className="grid grid-cols-[10rem_1fr] items-baseline gap-x-4 gap-y-2 rounded-md border bg-background p-4 text-sm">
+        <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-3 gap-y-2 rounded-md border bg-background p-3 text-sm sm:grid-cols-[10rem_1fr] sm:gap-x-4 sm:p-4">
           <dt className="text-muted-foreground">Theme</dt>
           <dd>Light (only theme in v1)</dd>
         </dl>
@@ -179,7 +185,7 @@ export default async function SettingsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">App</h2>
-        <dl className="grid grid-cols-[10rem_1fr] items-baseline gap-x-4 gap-y-2 rounded-md border bg-background p-4 text-sm">
+        <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-3 gap-y-2 rounded-md border bg-background p-3 text-sm sm:grid-cols-[10rem_1fr] sm:gap-x-4 sm:p-4">
           <dt className="text-muted-foreground">Version</dt>
           <dd className="font-mono text-xs">{appVersion}</dd>
           <dt className="text-muted-foreground">Build</dt>

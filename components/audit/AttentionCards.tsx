@@ -85,7 +85,7 @@ export function AttentionCards({ rows, format }: AttentionCardsProps) {
 
   return (
     <section className="flex flex-col gap-3">
-      <div className="flex items-baseline justify-between">
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
         <h2 className="text-lg font-semibold">Needs attention</h2>
         <span className="text-xs text-muted-foreground">
           {hasUrgent
@@ -94,7 +94,7 @@ export function AttentionCards({ rows, format }: AttentionCardsProps) {
         </span>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
         {sorted.map((row) => {
           const headline = headlineMetric(row);
           return (

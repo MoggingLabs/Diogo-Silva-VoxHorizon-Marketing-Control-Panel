@@ -100,16 +100,16 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ i
   const status = launch.status as LaunchStatusT;
 
   return (
-    <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 py-12">
+    <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
       <header className="space-y-2">
         <p className="text-sm text-muted-foreground">
           <Link href="/launches" className="underline-offset-4 hover:underline">
             Launches
           </Link>{" "}
-          / <span className="font-mono">{payload.brief_id_human}</span>
+          / <span className="break-all font-mono">{payload.brief_id_human}</span>
         </p>
         <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-3xl font-semibold tracking-tight">
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
             Launch package — {payload.client?.name ?? "—"}
           </h1>
           <span
