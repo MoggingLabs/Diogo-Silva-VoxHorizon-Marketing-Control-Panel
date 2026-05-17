@@ -87,8 +87,8 @@ export function KanbanCard(props: KanbanCardProps) {
       <Link
         href={kind === "image" ? `/briefs/${brief.id}` : `/briefs/video/${brief.id}`}
         className={cn(
-          "flex flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm",
-          "transition-colors transition-shadow hover:border-zinc-300 hover:shadow",
+          "flex min-h-[88px] flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm",
+          "transition-colors transition-shadow hover:border-zinc-300 hover:shadow active:bg-muted/40",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         )}
       >

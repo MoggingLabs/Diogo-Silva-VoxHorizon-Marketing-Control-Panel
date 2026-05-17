@@ -72,11 +72,11 @@ export function StackedBar({ segments, title, showLegend = true }: StackedBarPro
           : null}
       </div>
       {showLegend ? (
-        <ul className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <ul className="flex flex-wrap items-center gap-x-3 gap-y-1.5 sm:gap-x-4">
           {segments.map((segment) => (
             <li
               key={segment.key}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground"
+              className="flex items-center gap-1.5 text-[11px] text-muted-foreground sm:text-xs"
             >
               <span aria-hidden="true" className={cn("h-2 w-2 rounded-sm", segment.className)} />
               <span>{segment.label}</span>
