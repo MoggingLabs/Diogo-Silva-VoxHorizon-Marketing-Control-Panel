@@ -37,16 +37,16 @@ class DashboardTaskResultError(Exception):
 def _client() -> httpx.Client:
     """Build an httpx client pointed at the Supabase REST endpoint.
 
-    Reads ``SUPABASE_URL`` and ``SUPABASE_SERVICE_ROLE_KEY`` from the
+    Reads ``SUPABASE_URL`` and ``SUPABASE_SECRET_KEY`` from the
     environment. Both must be set; an empty string counts as unset so
     misconfigured ``.env`` files fail loudly rather than silently
     authenticating as anon.
     """
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
+    key = os.environ.get("SUPABASE_SECRET_KEY", "")
     if not url or not key:
         raise DashboardTaskResultError(
-            "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not set"
+            "SUPABASE_URL or SUPABASE_SECRET_KEY not set"
         )
     return httpx.Client(
         base_url=f"{url}/rest/v1",

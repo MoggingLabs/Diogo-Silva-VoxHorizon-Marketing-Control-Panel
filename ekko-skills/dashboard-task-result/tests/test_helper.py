@@ -3,7 +3,7 @@
 We exercise:
 
 * Input validation (kanban_task_id, pipeline_id, result, success types).
-* Env var resolution (``SUPABASE_URL`` / ``SUPABASE_SERVICE_ROLE_KEY``).
+* Env var resolution (``SUPABASE_URL`` / ``SUPABASE_SECRET_KEY``).
 * Successful round-trip: PATCH ``hermes_tasks`` then POST
   ``pipeline_events`` with the right payload shape.
 * The success / failure status mapping (``completed`` ↔ ``task_completed``,
@@ -135,7 +135,7 @@ class _FakeClient:
 def env_set(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the two Supabase env vars to plausible (non-empty) values."""
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "test-service-role")
 
 
 def _install_fake_client(
@@ -243,7 +243,7 @@ def test_rejects_non_bool_success(env_set: None) -> None:
 
 def test_missing_supabase_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-key")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "test-key")
     with pytest.raises(DashboardTaskResultError, match="SUPABASE_URL"):
         publish_task_result(
             kanban_task_id="kt-1",
@@ -253,10 +253,10 @@ def test_missing_supabase_url(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
-def test_missing_service_role_key(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_missing_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-    with pytest.raises(DashboardTaskResultError, match="SUPABASE_SERVICE_ROLE_KEY"):
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
+    with pytest.raises(DashboardTaskResultError, match="SUPABASE_SECRET_KEY"):
         publish_task_result(
             kanban_task_id="kt-1",
             pipeline_id=None,
@@ -267,7 +267,7 @@ def test_missing_service_role_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_empty_env_vars_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SUPABASE_URL", "")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "")
     with pytest.raises(DashboardTaskResultError, match="not set"):
         publish_task_result(
             kanban_task_id="kt-1",
@@ -277,7 +277,7 @@ def test_empty_env_vars_treated_as_unset(monkeypatch: pytest.MonkeyPatch) -> Non
         )
 
 
-def test_client_built_with_service_role_headers(
+def test_client_built_with_secret_headers(
     env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _install_fake_client(

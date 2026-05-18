@@ -45,7 +45,7 @@ GOOD_KEY = "service-role-key-xyz"
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set valid env vars by default; individual tests override as needed."""
     monkeypatch.setenv("SUPABASE_URL", GOOD_URL)
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", GOOD_KEY)
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", GOOD_KEY)
 
 
 def _install_transport(
@@ -91,7 +91,7 @@ def _ok(row: dict[str, Any]) -> Callable[[httpx.Request], httpx.Response]:
 
 
 @pytest.mark.parametrize(
-    "missing_var", ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+    "missing_var", ["SUPABASE_URL", "SUPABASE_SECRET_KEY"]
 )
 @pytest.mark.parametrize(
     "call",

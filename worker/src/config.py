@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # Supabase
     supabase_url: str | None = None
-    supabase_service_role_key: str | None = None
+    supabase_secret_key: str | None = None
 
     # External services (optional at boot; routes that need them fail loudly)
     kie_ai_api_key: str | None = None

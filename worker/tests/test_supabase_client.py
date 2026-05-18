@@ -30,7 +30,7 @@ def test_get_supabase_admin_raises_when_url_missing(
 ) -> None:
     """Lines 25-30: RuntimeError when Supabase URL is missing."""
     monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "anything")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "anything")
 
     from src.config import get_settings
     from src.supabase_client import get_supabase_admin
@@ -47,7 +47,7 @@ def test_get_supabase_admin_raises_when_key_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
 
     from src.config import get_settings
     from src.supabase_client import get_supabase_admin
@@ -57,7 +57,7 @@ def test_get_supabase_admin_raises_when_key_missing(
 
     with pytest.raises(RuntimeError) as exc:
         get_supabase_admin()
-    assert "SUPABASE_SERVICE_ROLE_KEY" in str(exc.value)
+    assert "SUPABASE_SECRET_KEY" in str(exc.value)
 
 
 def test_get_supabase_admin_creates_client_when_configured(
@@ -65,7 +65,7 @@ def test_get_supabase_admin_creates_client_when_configured(
 ) -> None:
     """Happy path: a Client is returned when both envs are set."""
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "service-role-test")
 
     from src.config import get_settings
     from src.supabase_client import get_supabase_admin
@@ -83,7 +83,7 @@ def test_get_supabase_admin_creates_client_when_configured(
 def test_get_supabase_admin_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
     """Same client returned across calls (the lru_cache wraps the factory)."""
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "service-role-test")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "service-role-test")
 
     from src.config import get_settings
     from src.supabase_client import get_supabase_admin

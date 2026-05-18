@@ -79,7 +79,7 @@ keeps the system resilient to Hostinger's automated rebuilds.
 Skills that write to Supabase pull credentials from the container env:
 
 - `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY` (service-role so writes bypass RLS)
+- `SUPABASE_SECRET_KEY` (service-role so writes bypass RLS)
 
 Set these in `/docker/hermes-agent-t4k4/.env` on the VPS. Each per-skill
 README repeats the list relevant to that skill.

@@ -23,8 +23,8 @@ def get_supabase_admin() -> Client:
     failure.
     """
     settings = get_settings()
-    if not settings.supabase_url or not settings.supabase_service_role_key:
+    if not settings.supabase_url or not settings.supabase_secret_key:
         raise RuntimeError(
-            "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY must be set to use the admin client."
+            "SUPABASE_URL and SUPABASE_SECRET_KEY must be set to use the admin client."
         )
-    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+    return create_client(settings.supabase_url, settings.supabase_secret_key)

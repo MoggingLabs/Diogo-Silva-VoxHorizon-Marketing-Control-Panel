@@ -61,14 +61,14 @@ def _require_env() -> tuple[str, str]:
     history without anyone noticing.
     """
     url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    key = os.environ.get("SUPABASE_SECRET_KEY")
     if not url:
         raise RuntimeError(
             "SUPABASE_URL must be set to publish chat messages."
         )
     if not key:
         raise RuntimeError(
-            "SUPABASE_SERVICE_ROLE_KEY must be set to publish chat messages."
+            "SUPABASE_SECRET_KEY must be set to publish chat messages."
         )
     return url, key
 

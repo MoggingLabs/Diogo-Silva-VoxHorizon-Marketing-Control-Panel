@@ -461,7 +461,7 @@ After our compose stack is up, the operator applies the Hermes-side overlay (ide
 1. Apply `infra/hermes/config.yaml.patch` to `/docker/hermes-agent-t4k4/config.yaml` — adds the `post_tool_call` / `session_end` hooks and registers `voxhorizon-approvals` in `plugins.enabled`.
 2. Copy `ekko-skills/{dashboard-publish,dashboard-chat-publish,dashboard-task-result}/` to `/opt/data/skills/` on the VPS.
 3. Copy `ekko-plugins/voxhorizon_approvals/` to `/opt/data/home/.hermes/plugins/`.
-4. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DASHBOARD_WEBHOOK_URL`, `DASHBOARD_WEBHOOK_TOKEN`, `VOXHORIZON_APPROVAL_WORKER_URL`, `VOXHORIZON_APPROVAL_TOKEN` in `/opt/data/.env`.
+4. Set `SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `DASHBOARD_WEBHOOK_URL`, `DASHBOARD_WEBHOOK_TOKEN`, `VOXHORIZON_APPROVAL_WORKER_URL`, `VOXHORIZON_APPROVAL_TOKEN` in `/opt/data/.env`.
 5. Restart `hermes-agent-ekko`.
 
 Health-check the bridge:

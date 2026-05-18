@@ -83,7 +83,7 @@ On error the skill raises:
 
 - `ValueError` for bad inputs (unknown role, malformed thread_id, None
   content).
-- `RuntimeError` when `SUPABASE_URL` or `SUPABASE_SERVICE_ROLE_KEY` are
+- `RuntimeError` when `SUPABASE_URL` or `SUPABASE_SECRET_KEY` are
   unset — the same loud-fail behaviour as `get_supabase_admin()`.
 - `httpx.HTTPStatusError` when Supabase returns a non-2xx. The skill
   does not retry; the caller (Hermes chat loop) decides whether to
@@ -95,7 +95,7 @@ The skill talks to Supabase over PostgREST (no Python SDK dep — keeps
 the skill container thin). Required env vars:
 
 - `SUPABASE_URL` — e.g. `https://abcd1234.supabase.co`.
-- `SUPABASE_SERVICE_ROLE_KEY` — the worker's service-role JWT.
+- `SUPABASE_SECRET_KEY` — the worker's service-role JWT.
 
 Both come from the worker's existing `.env` so no new secrets are
 introduced.

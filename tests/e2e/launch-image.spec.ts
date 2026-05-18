@@ -28,11 +28,9 @@ import type { Database } from "@/lib/supabase/types.gen";
 // builder treats any matching row as enough to clear "no paired copy".
 async function seedCopyVariant(creativeId: string): Promise<void> {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const key = process.env.SUPABASE_SECRET_KEY;
   if (!url || !key) {
-    throw new Error(
-      "NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for e2e tests.",
-    );
+    throw new Error("NEXT_PUBLIC_SUPABASE_URL and SUPABASE_SECRET_KEY are required for e2e tests.");
   }
   const admin: SupabaseClient<Database> = createClient<Database>(url, key, {
     auth: {

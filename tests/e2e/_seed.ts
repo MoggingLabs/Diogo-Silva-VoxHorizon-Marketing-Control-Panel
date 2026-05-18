@@ -21,7 +21,7 @@ import type { Database, Json } from "@/lib/supabase/types.gen";
  */
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const serviceRoleKey = process.env.SUPABASE_SECRET_KEY;
 
 /**
  * Lazily-built admin client. Throws a friendly error if env is missing so
@@ -38,7 +38,7 @@ function adminClient(): SupabaseClient<Database> {
   }
   if (!serviceRoleKey) {
     throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY is required for e2e tests — set it in .env.local before running pnpm test:e2e.",
+      "SUPABASE_SECRET_KEY is required for e2e tests — set it in .env.local before running pnpm test:e2e.",
     );
   }
   return createClient<Database>(supabaseUrl, serviceRoleKey, {
