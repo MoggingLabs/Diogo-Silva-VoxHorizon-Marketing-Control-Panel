@@ -25,6 +25,10 @@ vi.mock("./WorkerStatus", () => ({
   WorkerStatus: () => <div data-testid="worker-status" />,
 }));
 
+vi.mock("@/components/approvals/ApprovalQueue", () => ({
+  ApprovalQueue: () => <div data-testid="approval-queue-stub" />,
+}));
+
 import { AppShell } from "./AppShell";
 
 beforeEach(() => {
@@ -54,6 +58,16 @@ describe("AppShell", () => {
     );
 
     expect(screen.getByTestId("worker-status")).toBeInTheDocument();
+  });
+
+  it("renders the ApprovalQueue badge in the header", () => {
+    render(
+      <AppShell>
+        <span />
+      </AppShell>,
+    );
+
+    expect(screen.getByTestId("approval-queue-stub")).toBeInTheDocument();
   });
 
   it("renders nav links for each section", () => {
