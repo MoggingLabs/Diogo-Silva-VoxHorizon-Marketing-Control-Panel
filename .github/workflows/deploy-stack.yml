@@ -140,10 +140,14 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
             set -euo pipefail
-            cd /opt/voxhorizon
+            # Bootstrap layout: /opt/voxhorizon holds runtime state (.env,
+            # compose symlink, caddy volumes) and /opt/voxhorizon/repo holds
+            # the source. Git ops have to run inside the repo; compose runs
+            # from the parent so env_file=/opt/voxhorizon/.env resolves.
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-            git fetch --quiet origin main
-            git reset --hard origin/main
+            git -C /opt/voxhorizon/repo fetch --quiet origin main
+            git -C /opt/voxhorizon/repo reset --hard origin/main
+            cd /opt/voxhorizon
             docker compose pull
             docker compose up -d --remove-orphans
             # Wait for each service to report healthy before pruning the
