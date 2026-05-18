@@ -8,51 +8,60 @@ Single source of truth for every credential the VoxHorizon Marketing Control Pan
 
 v1 is a single-operator system. The threat model is deliberately narrow:
 
-- **Network boundary: Tailscale.** The Mac running the worker is only reachable on the tailnet, except via the explicit **Tailscale Funnel** URL the Vercel app uses. Funnel exposes one HTTPS endpoint over the public internet; everything else is tailnet-only.
-- **App boundary: Vercel Deployment Protection.** Production UI hits go through Vercel's SSO challenge — only members of Diogo's Vercel team can reach the deployed pages. No app-level auth (no Supabase Auth, no NextAuth) in v1. Decision: locked in M0-15.
-- **Worker boundary: shared-secret bearer.** Every request from Vercel to the worker carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. Comparison is constant-time (`hmac.compare_digest`). The b-roll signed-URL streaming route is the only exception — it uses its own HMAC scheme over `(clip_id, expiry)`.
-- **Database boundary: service role + RLS off.** RLS is off in v1 (single operator). All writes go through the worker or Next.js server using the service-role key. If multi-operator access is ever introduced, an RLS migration is the entry point — but that's out of v1 scope.
+- **Network boundary: Caddy + Cloudflare.** The VPS runs Caddy as the only externally-exposed service (`:80` / `:443` / `:443-udp`). Caddy fronts only the dashboard at `dashboard.voxhorizon.com`; the worker container has no public port binding. Cloudflare's proxy (orange cloud, SSL/TLS Full strict) is the outermost layer; the host firewall blocks every other inbound port.
+- **App boundary: none in v1.** No Supabase Auth, no NextAuth, no SSO challenge. The dashboard is reachable on the public internet at `dashboard.voxhorizon.com` — protected only by obscurity of the URL + the fact that every state-changing operation requires the worker bearer (which the browser never sees). Adding an auth layer (e.g. Cloudflare Access, basic-auth on the Caddy site) is a v2 hardening step, not v1 scope.
+- **Worker boundary: shared-secret bearer + internal-only network.** Every request from the dashboard's API routes to the worker carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. Comparison is constant-time (`hmac.compare_digest`). The web→worker hop is internal to the Docker network (`http://worker:8000`) — the bearer never crosses the public internet. The b-roll signed-URL streaming route is the only exception — it uses its own HMAC scheme over `(clip_id, expiry)`.
+- **Database boundary: service role + RLS off.** RLS is off in v1 (single operator). All writes go through the worker or the dashboard's API routes using the service-role key. If multi-operator access is ever introduced, an RLS migration is the entry point — but that's out of v1 scope.
 - **File boundary: private buckets + signed URLs.** The `creatives` Supabase Storage bucket is private; reads happen through signed URLs minted by the worker (lands in M2).
 - **Secrets at rest: gitignored `.env` files + chmod 600 vault files.** No secrets in git, ever. `.env`, `.env.local`, `.env.production` are blocked by `.gitignore`; only `.env.example` templates are committed.
+- **Build vs runtime separation.** Build-time secrets (`NEXT_PUBLIC_*` values that Next.js inlines at compile time) live in GitHub Actions repo secrets and are injected as `--build-arg`s during `docker build`. Runtime secrets live in `/opt/voxhorizon/.env` on the VPS, mounted into both containers via `env_file:`. The two sets do not overlap.
 - **Whitespace cleanup: `cleanEnv()`.** Both `lib/env.ts` (Next.js) and `worker/src/config.py` (Python) strip whitespace from every env value at read time. Dashboard copy-paste with a stray `\n` won't corrupt a Supabase URL or break the bearer compare.
 
 ---
 
 ## Inventory
 
-Every secret in the system. **Vault** = `~/.config/voxhorizon/*.json` on Diogo's Mac (chmod 600), backed by 1Password as the offline canonical copy.
+Every secret in the system. **Vault** = `~/.config/voxhorizon/*.json` on Diogo's dev machine (chmod 600), backed by 1Password as the offline canonical copy.
 
-| Name                                    | Location                                                            | Used for                                               | Rotated by                                                                | Cadence                                                            |
-| --------------------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------ | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| `NEXT_PUBLIC_SUPABASE_URL`              | Vercel env + `.env.local` + Vault (`supabase.json`)                 | Supabase JS client (browser + server)                  | Supabase dashboard                                                        | Never (URL is stable)                                              |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY`         | Vercel env + `.env.local` + Vault (`supabase.json`)                 | Browser Supabase client                                | Supabase dashboard → Project Settings → API → Rotate                      | On suspected leak                                                  |
-| `SUPABASE_SERVICE_ROLE_KEY`             | Vercel env (server-only) + `.env.local` + `worker/.env` + Vault     | Server-side admin client; bypasses RLS                 | Supabase dashboard                                                        | Quarterly + on suspected leak                                      |
-| `SUPABASE_PUBLISHABLE_KEY` (sb_pub)     | Vault only                                                          | Modern publishable key (optional for some SDK paths)   | Supabase dashboard                                                        | Quarterly                                                          |
-| `WORKER_SHARED_SECRET`                  | Vercel env + `worker/.env` + Vault                                  | Bearer token between Vercel ↔ worker                   | Manual regen (`python -c "import secrets; print(secrets.token_hex(64))"`) | Quarterly + on suspected leak                                      |
-| `NEXT_PUBLIC_VAPID_PUBLIC_KEY`          | Vercel env + `.env.local` + Vault (`vapid.json`)                    | Browser subscribes to Web Push                         | Manual regen via `npx web-push generate-vapid-keys`                       | **Never unless leaked.** Re-subscribing every client is expensive. |
-| `VAPID_PRIVATE_KEY`                     | Vercel env (server-only) + `.env.local` + Vault (`vapid.json`)      | Server signs push payloads                             | Same as above                                                             | Same as above                                                      |
-| `RESEND_API_KEY`                        | Vercel env + Vault                                                  | Transactional email                                    | Resend dashboard                                                          | Quarterly                                                          |
-| `KIE_AI_API_KEY`                        | `worker/.env` + sourced from `~/.hermes/shared/config/secrets.json` | Image generation (GPT Image 2)                         | Kie.ai dashboard                                                          | Quarterly                                                          |
-| `ELEVENLABS_API_KEY`                    | `worker/.env` + sourced from Hermes                                 | Voiceover synthesis                                    | ElevenLabs dashboard → API Keys                                           | Quarterly                                                          |
-| `SUBMAGIC_API_KEY`                      | `worker/.env`                                                       | Caption generation                                     | Submagic dashboard                                                        | Quarterly                                                          |
-| `HYPERFRAMES_API_KEY`                   | `worker/.env`                                                       | Video composition (b-roll + voiceover)                 | Hyperframes dashboard                                                     | Quarterly (lands in V2)                                            |
-| `META_ADS_API_KEY` + `META_AD_ACCOUNTS` | `worker/.env` + sourced from Hermes                                 | Meta Ads performance pulls                             | Meta Business → System Users → Generate Token                             | Quarterly                                                          |
-| GHL credentials (`GHL_*`)               | `worker/.env` + `~/.hermes/shared/config/ghl-*.json`                | GoHighLevel pipeline pulls                             | GHL → Settings → Private Integrations                                     | Quarterly                                                          |
-| Google Drive OAuth (gog)                | On-disk OAuth state under `~/.config/gog/`                          | Drive mirror uploads                                   | `gog auth login` re-auth                                                  | When expired (typically every few months)                          |
-| GitHub PAT (Pedro's)                    | `~/.config/github/token` (chmod 600)                                | API calls for issues/PRs/labels                        | github.com/settings/tokens                                                | Quarterly                                                          |
-| Tailscale auth key                      | `worker/.env` + Tailscale admin console                             | Initial `tailscale up` registration (reusable, tagged) | tailscale.com/admin/settings/keys                                         | Quarterly                                                          |
-| Anthropic / Claude Code session         | `~/.claude/` (managed by `claude auth login`)                       | Agent runtime                                          | `claude auth login` re-auth                                               | On expiry                                                          |
-| Supabase DB password                    | Vault (`supabase.json`)                                             | Direct psql / pooler access (not used in app code)     | Supabase dashboard → Database                                             | On suspected leak                                                  |
+Two distinct deployment surfaces:
+
+- **GH Actions repo secrets (build-time)** — values injected into `docker build` via `--build-arg`. Used for `NEXT_PUBLIC_*` vars that Next.js inlines at compile time.
+- **`/opt/voxhorizon/.env` on the VPS (runtime)** — values mounted into both `web` and `worker` containers via `env_file:`. Used for every server-side secret.
+
+| Name                                    | Location                                                                                                          | Used for                                             | Rotated by                                                                | Cadence                                                            |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `NEXT_PUBLIC_SUPABASE_URL`              | GH Actions secret (build) + `/opt/voxhorizon/.env` (runtime, web container) + `.env.local` + Vault                | Supabase JS client (browser + server)                | Supabase dashboard                                                        | Never (URL is stable)                                              |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY`         | GH Actions secret (build) + `/opt/voxhorizon/.env` (runtime, web container) + `.env.local` + Vault                | Browser Supabase client                              | Supabase dashboard → Project Settings → API → Rotate                      | On suspected leak (rebuild + redeploy required)                    |
+| `SUPABASE_SERVICE_ROLE_KEY`             | `/opt/voxhorizon/.env` (runtime, both containers) + `.env.local` + `worker/.env` + Vault                          | Server-side admin client; bypasses RLS               | Supabase dashboard                                                        | Quarterly + on suspected leak                                      |
+| `SUPABASE_PUBLISHABLE_KEY` (sb_pub)     | Vault only                                                                                                        | Modern publishable key (optional for some SDK paths) | Supabase dashboard                                                        | Quarterly                                                          |
+| `WORKER_URL`                            | `/opt/voxhorizon/.env` (runtime, web container only) — value is `http://worker:8000`                              | Dashboard reaches the worker over the Docker network | n/a (internal hostname)                                                   | Never (stable on the compose network)                              |
+| `WORKER_SHARED_SECRET`                  | `/opt/voxhorizon/.env` (runtime, both containers) + `worker/.env` + Vault                                         | Bearer token between web ↔ worker                    | Manual regen (`python -c "import secrets; print(secrets.token_hex(64))"`) | Quarterly + on suspected leak                                      |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY`          | GH Actions secret (build) + `/opt/voxhorizon/.env` (runtime, web container) + `.env.local` + Vault (`vapid.json`) | Browser subscribes to Web Push                       | Manual regen via `npx web-push generate-vapid-keys`                       | **Never unless leaked.** Re-subscribing every client is expensive. |
+| `VAPID_PRIVATE_KEY`                     | `/opt/voxhorizon/.env` (runtime, both containers) + `.env.local` + Vault (`vapid.json`)                           | Server signs push payloads                           | Same as above                                                             | Same as above                                                      |
+| `RESEND_API_KEY`                        | `/opt/voxhorizon/.env` (runtime, web container) + Vault                                                           | Transactional email                                  | Resend dashboard                                                          | Quarterly                                                          |
+| `KIE_AI_API_KEY`                        | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | Image generation (GPT Image 2)                       | Kie.ai dashboard                                                          | Quarterly                                                          |
+| `ELEVENLABS_API_KEY`                    | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | Voiceover synthesis                                  | ElevenLabs dashboard → API Keys                                           | Quarterly                                                          |
+| `SUBMAGIC_API_KEY`                      | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | Caption generation                                   | Submagic dashboard                                                        | Quarterly                                                          |
+| `HYPERFRAMES_API_KEY`                   | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | Video composition (b-roll + voiceover)               | Hyperframes dashboard                                                     | Quarterly (lands in V2)                                            |
+| `META_ADS_API_KEY` + `META_AD_ACCOUNTS` | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | Meta Ads performance pulls                           | Meta Business → System Users → Generate Token                             | Quarterly                                                          |
+| GHL credentials (`GHL_*`)               | `/opt/voxhorizon/.env` (runtime, worker container) + `worker/.env` (dev)                                          | GoHighLevel pipeline pulls                           | GHL → Settings → Private Integrations                                     | Quarterly                                                          |
+| Google Drive OAuth (gog)                | On-disk OAuth state under `~/.config/gog/` on the VPS, mounted into the worker container                          | Drive mirror uploads                                 | `gog auth login` re-auth                                                  | When expired (typically every few months)                          |
+| GitHub PAT (Pedro's)                    | `~/.config/github/token` (chmod 600) on dev box                                                                   | API calls for issues/PRs/labels                      | github.com/settings/tokens                                                | Quarterly                                                          |
+| `ANTHROPIC_API_KEY`                     | `/opt/voxhorizon/.env` (runtime, worker container) + Vault                                                        | Claude Code runner inside the worker                 | console.anthropic.com → API Keys                                          | Quarterly                                                          |
+| Supabase DB password                    | Vault (`supabase.json`)                                                                                           | Direct psql / pooler access (not used in app code)   | Supabase dashboard → Database                                             | On suspected leak                                                  |
+
+> **`NEXT_PUBLIC_*` rotation requires a CI rebuild + redeploy, not just a container restart.** Next.js inlines these values into the client bundle at build time. Restarting the `web` container with a new env var has no effect on the already-built JavaScript — you must bump the GH Actions secret, trigger a rebuild of `voxhorizon-web`, and roll the container to the new image tag. See the [GitHub Actions deploy secrets](#github-actions-deploy-secrets) section below for the build-arg handling.
 
 ### Reference IDs (not secrets, but important)
 
-| Name                                  | Location                                   | What it is                                                                                                 |
-| ------------------------------------- | ------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Supabase project ref                  | `jfzxlsaywztlytnobgej`                     | The project ID for the live us-east-1 deployment                                                           |
-| Supabase region                       | `us-east-1`                                | Matches Vercel's default edge / function region                                                            |
-| Meta ad account (shared)              | `act_1209158034034659`                     | Aquarium + Dinero share this; split is encoded in `CAMPAIGN_FILTERS` in the Hermes scripts. Do not change. |
-| Drive root folder ID (marketing dept) | Per `MARKETING-DEPT-MAP.md` §9 in upstream | Existing folder tree; reused by the Drive mirror                                                           |
-| Tailscale hostname                    | `voxhorizon-worker`                        | MagicDNS name; published via `tag:worker`                                                                  |
+| Name                                  | Location                                     | What it is                                                                           |
+| ------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------ |
+| Supabase project ref                  | `jfzxlsaywztlytnobgej`                       | The project ID for the live us-east-1 deployment                                     |
+| Supabase region                       | `us-east-1`                                  | Geographically close to the Hostinger VPS region                                     |
+| Meta ad account (shared)              | `act_1209158034034659`                       | Aquarium + Dinero share this; split is encoded in `CAMPAIGN_FILTERS`. Do not change. |
+| Drive root folder ID (marketing dept) | Per `MARKETING-DEPT-MAP.md` §9 in upstream   | Existing folder tree; reused by the Drive mirror                                     |
+| Dashboard hostname                    | `dashboard.voxhorizon.com`                   | The only public hostname for the single-host stack. Caddy fronts only this.          |
+| Worker hostname (internal)            | `worker` (Docker DNS) → `http://worker:8000` | Resolves on the compose network; never resolves on the public internet.              |
 
 ---
 
@@ -60,9 +69,9 @@ Every secret in the system. **Vault** = `~/.config/voxhorizon/*.json` on Diogo's
 
 | Trigger                | Action                                                                                                                                         |
 | ---------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| Quarterly review       | Rotate all long-lived API keys (Supabase service role, Resend, Kie, ElevenLabs, Submagic, Meta, GHL, Tailscale, GitHub PAT).                   |
+| Quarterly review       | Rotate all long-lived API keys (Supabase service role, Resend, Kie, ElevenLabs, Submagic, Meta, GHL, GitHub PAT, Anthropic).                   |
 | Suspected leak         | Rotate immediately. Audit `git log` (see below). Rotate any secret with a non-trivial blast radius first (service role, worker shared secret). |
-| Vendor rotation prompt | Honor it. Update vault, Vercel env, worker `.env` together.                                                                                    |
+| Vendor rotation prompt | Honor it. Update vault, GH Actions secrets (if build-time), and `/opt/voxhorizon/.env` on the VPS together.                                    |
 | Operator change        | Not applicable in v1 (single operator). Pre-handoff checklist: rotate every secret, re-issue Pedro's PAT, re-auth `gog` and Claude Code.       |
 
 VAPID keys are intentionally **never rotated on a schedule.** Rotation forces every Web Push subscriber to re-subscribe. Only rotate on confirmed leak.
@@ -89,16 +98,16 @@ All should return empty. A future hardening step (post-v1) is a pre-commit hook 
 
 ## Things that look like secrets but aren't
 
-- **`NEXT_PUBLIC_SUPABASE_ANON_KEY`** ships to the browser. That's fine — Supabase's anon key is gated by RLS server-side. v1 has RLS off (single operator), but the worker / Next.js server is the gate (Tailscale + Vercel Deployment Protection), not the key.
+- **`NEXT_PUBLIC_SUPABASE_ANON_KEY`** ships to the browser. That's fine — Supabase's anon key is gated by RLS server-side. v1 has RLS off (single operator), but the worker and the dashboard's API routes are the gate (network boundary + worker bearer + service-role-only writes), not the key.
 - **`NEXT_PUBLIC_VAPID_PUBLIC_KEY`** is a server-identifier shared with push services. Public by design.
-- **Tailscale hostname** (`voxhorizon-worker`) is published via MagicDNS to the tailnet. Not secret.
+- **Dashboard hostname** (`dashboard.voxhorizon.com`) is publicly resolvable. Knowing it gets you the login-less dashboard, but every state-changing operation requires the worker bearer (held server-side only).
 - **Supabase project URL** (`https://jfzxlsaywztlytnobgej.supabase.co`) is publicly resolvable. Knowing it gets you nothing without a key.
 - **Meta ad account IDs** are visible in the Meta Business UI to anyone with access. The API key is the real boundary.
 - **Drive folder IDs** are visible in any URL the operator shares. ACLs gate read access; the IDs are just pointers.
 
 ---
 
-## On-disk vault layout (Mac)
+## On-disk vault layout (dev machine)
 
 Recommended structure under `~/.config/voxhorizon/` (chmod 600 on each file):
 
@@ -106,7 +115,7 @@ Recommended structure under `~/.config/voxhorizon/` (chmod 600 on each file):
 ~/.config/voxhorizon/
 ├── supabase.json    # url, anon, service_role, publishable, db_password
 ├── vapid.json       # public, private (one-shot generation, never rotates)
-├── worker.json      # shared_secret, tailscale_hostname, tailnet
+├── worker.json      # shared_secret
 ├── resend.json      # api_key, sender_domain
 └── README.txt       # plain-text pointer to 1Password for the canonical copy
 ```
@@ -117,146 +126,149 @@ chmod 700 ~/.config/voxhorizon
 chmod 600 ~/.config/voxhorizon/*.json
 ```
 
-The vault is **not** an authoritative source for production — Vercel's env-var UI is. The vault exists so a fresh Mac bootstrap (M5 smoke test) doesn't require digging through 1Password mid-recipe.
+The vault is **not** an authoritative source for production — `/opt/voxhorizon/.env` on the VPS (runtime) and GitHub Actions repo secrets (build-time) are. The vault exists so a fresh dev-machine bootstrap doesn't require digging through 1Password mid-recipe.
 
 ---
 
 ## Quick "I think a secret leaked" runbook
 
-1. **Confirm scope.** Which secret? Where was it exposed (commit, screenshot, log, third-party service)?
+1. **Confirm scope.** Which secret? Where was it exposed (commit, screenshot, log, third-party service)? Is it a build-time `NEXT_PUBLIC_*` value or a runtime value?
 2. **Rotate at source.** Supabase / Resend / Kie / etc. dashboards each have a "rotate / revoke" button. Use it.
-3. **Update everywhere it's referenced.** Vercel env (production + preview + development), `worker/.env` on the Mac, vault file, 1Password.
-4. **Redeploy.** Vercel: trigger a redeploy so new env vars take effect. Worker: restart (`launchctl kickstart -k gui/<uid>/voxhorizon-worker` once M0-22 lands; otherwise `Ctrl+C` and re-run `bash scripts/serve.sh`).
-5. **Smoke test.** `curl http://localhost:3000/api/worker/health`; if 401, the new shared secret didn't sync.
-6. **Post-mortem.** Write down in a Tracker comment: what leaked, how it leaked, what changed in handling.
+3. **Update everywhere it's referenced.**
+   - **Runtime value:** edit `/opt/voxhorizon/.env` on the VPS, vault file, 1Password. Then `docker compose up -d <service>` to restart the affected container(s).
+   - **Build-time value (`NEXT_PUBLIC_*`):** update the GitHub Actions repo secret, vault file, 1Password. Then trigger a `build-web.yml` rebuild + a `deploy-stack.yml` rollout. **A container restart alone is not enough** — see the callout under [Inventory](#inventory).
+4. **Smoke test.** `curl https://dashboard.voxhorizon.com/api/health` → 200; if 401 on a worker-touching endpoint, the new shared secret didn't sync to one side.
+5. **Post-mortem.** Write down in a Tracker comment: what leaked, how it leaked, what changed in handling.
 
 ---
 
 ## VPS production secrets
 
-The worker container runs on a Linux VPS (see VPS-2 / VPS-3). Secrets for the worker process live on disk on the VPS — **not** in the Docker image, **never** in git, and **never** baked into the build.
+v1 production is a single-host Docker Compose stack on one Hostinger VPS: two containers (`web` and `worker`) plus Caddy. **`/opt/voxhorizon/.env` is a single file that serves both containers.** Both services mount it via `env_file:` in `docker-compose.yml`; each reads only the variables it needs. Secrets never live in the Docker images, never in git, and are never baked into builds.
 
 ### Where secrets live on the VPS
 
 ```
 /opt/voxhorizon/
-├── .env          # env file consumed by docker compose
-└── docker-compose.yml
+├── .env              # shared env file consumed by BOTH containers via env_file:
+├── docker-compose.yml
+└── Caddyfile
 ```
 
 - **Path:** `/opt/voxhorizon/.env`
 - **Owner:** `deploy:deploy`
 - **Mode:** `chmod 600` (only the `deploy` user can read or write)
-- **Template:** `worker/.env.example` in this repo is the single source of truth for the list of required keys. Run `worker/scripts/check-env.sh` at container start to fail fast on any missing var.
-- **Build invariant:** the Dockerfile (VPS-2) does **not** copy any `.env*` file into the image. `docker compose up` mounts `/opt/voxhorizon/.env` as `env_file:` so secrets are runtime-only.
-- **Git invariant:** `.gitignore` blocks every `.env*` pattern except `.env.example`. There is zero overlap between the secret values and any tracked file.
+- **Mounted by:** both the `web` and `worker` services in `docker-compose.yml`. Each container is handed every line; the application code in each picks out the keys it cares about.
+- **Template:** `.env.example` (at the repo root) lists the union of web + worker keys. Run the env-check scripts at container start (`worker/scripts/check-env.sh` for worker; equivalent in `lib/env.ts` for web) to fail fast on missing vars.
+- **Build invariant:** neither the web nor the worker Dockerfile copies any `.env*` file into the image. Build-time `--build-arg`s for `NEXT_PUBLIC_*` values are different — see [GitHub Actions deploy secrets](#github-actions-deploy-secrets).
+- **Git invariant:** `.gitignore` blocks every `.env*` pattern except `.env.example`. There is zero overlap between secret values and any tracked file.
 
-### Full secret inventory (VPS scope)
+### Full secret inventory (VPS runtime)
 
-Same grouping as `worker/.env.example`. For each entry: var name, what it does for the worker, where to rotate it.
+The union of every variable consumed by either container at runtime, grouped by concern. The **Consumed by** column tells you which container actually reads the value at runtime (some are shared).
 
-#### Identity
+#### Identity & routing (worker boundary)
 
-| Var                      | Purpose                                                                                                                     | Rotate at                                                                                                                                |
-| ------------------------ | --------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `WORKER_SHARED_SECRET`   | Bearer token compared (constant-time) on every request from Vercel to the worker. **Shared with Vercel env.**               | Regenerate locally: `python -c "import secrets; print(secrets.token_hex(64))"`. Apply to **both** Vercel env and `/opt/voxhorizon/.env`. |
-| `WORKER_PUBLIC_BASE_URL` | The URL the Next.js app uses to reach this worker (also used in signed b-roll URLs). Not secret, but environment-dependent. | Change if the VPS domain / Tailscale Funnel URL changes.                                                                                 |
-| `WORKER_CORS_ORIGIN`     | CORS allow-origin for the Next.js app. Not secret.                                                                          | Change if the Vercel production URL changes.                                                                                             |
-| `WORKER_VERSION`         | Build / image tag surfaced on `/health`. Not secret.                                                                        | Updated by the deploy pipeline.                                                                                                          |
+| Var                    | Consumed by | Purpose                                                                                                                                                                                                  | Rotate at                                                                                                                              |
+| ---------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `WORKER_URL`           | web         | Internal URL the dashboard uses to reach the worker. **Set to `http://worker:8000`** — Docker resolves the hostname `worker` on the compose network. Not a public URL; never reachable outside the host. | Only change if the worker service is renamed in `docker-compose.yml`.                                                                  |
+| `WORKER_SHARED_SECRET` | web, worker | Bearer token compared (constant-time) on every web→worker request. **Both containers read the same value.**                                                                                              | Regenerate locally: `python -c "import secrets; print(secrets.token_hex(64))"`. Apply to `/opt/voxhorizon/.env`; roll both containers. |
+| `WORKER_CORS_ORIGIN`   | worker      | CORS allow-origin for inbound calls. Should be `https://dashboard.voxhorizon.com` in production. Not secret.                                                                                             | Change if the dashboard hostname changes.                                                                                              |
+| `WORKER_VERSION`       | worker      | Build / image tag surfaced on `/health`. Not secret.                                                                                                                                                     | Updated by the deploy pipeline.                                                                                                        |
 
 #### Supabase
 
-| Var                         | Purpose                                                             | Rotate at                                                                                                                   |
-| --------------------------- | ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `SUPABASE_URL`              | Project endpoint. Public.                                           | Supabase dashboard → Project Settings → API. URL itself is stable.                                                          |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service role JWT (bypasses RLS). **Shared with Vercel server env.** | Supabase dashboard → Project Settings → API → Rotate service_role. Apply to **both** Vercel env and `/opt/voxhorizon/.env`. |
+| Var                                         | Consumed by                                                                                   | Purpose                                                                                                                                                                                              | Rotate at                                                                                                                 |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_URL` | web (both names — server uses `NEXT_PUBLIC_SUPABASE_URL`, worker uses `SUPABASE_URL`), worker | Project endpoint. Public. `NEXT_PUBLIC_SUPABASE_URL` is **also** a build-time secret (see GH Actions section); the runtime copy must match.                                                          | Supabase dashboard → Project Settings → API. URL itself is stable.                                                        |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY`             | web (runtime mirror of the build-time value)                                                  | Browser Supabase client. Inlined into the bundle at build time; the runtime copy in `.env` exists so server-side Next.js code can reference the same value during SSR. Rotation requires CI rebuild. | Supabase dashboard → Project Settings → API → Rotate.                                                                     |
+| `SUPABASE_SERVICE_ROLE_KEY`                 | web, worker                                                                                   | Service role JWT (bypasses RLS). Server-only. **Both containers read it.**                                                                                                                           | Supabase dashboard → Project Settings → API → Rotate service_role. Apply to `/opt/voxhorizon/.env`; roll both containers. |
 
 #### Storage
 
-| Var                   | Purpose                                                | Rotate at                    |
-| --------------------- | ------------------------------------------------------ | ---------------------------- |
-| `BROLL_STORE_BACKEND` | `local` or `supabase`. Not secret.                     | Edit `/opt/voxhorizon/.env`. |
-| `BROLL_LOCAL_ROOT`    | Filesystem path for the local b-roll pool. Not secret. | Edit `/opt/voxhorizon/.env`. |
+| Var                   | Consumed by | Purpose                                                | Rotate at                    |
+| --------------------- | ----------- | ------------------------------------------------------ | ---------------------------- |
+| `BROLL_STORE_BACKEND` | worker      | `local` or `supabase`. Not secret.                     | Edit `/opt/voxhorizon/.env`. |
+| `BROLL_LOCAL_ROOT`    | worker      | Filesystem path for the local b-roll pool. Not secret. | Edit `/opt/voxhorizon/.env`. |
 
 #### Integrations: image
 
-| Var              | Purpose                                | Rotate at                    |
-| ---------------- | -------------------------------------- | ---------------------------- |
-| `KIE_AI_API_KEY` | Kie.ai (GPT Image 2) image generation. | Kie.ai dashboard → API Keys. |
+| Var              | Consumed by | Purpose                                | Rotate at                    |
+| ---------------- | ----------- | -------------------------------------- | ---------------------------- |
+| `KIE_AI_API_KEY` | worker      | Kie.ai (GPT Image 2) image generation. | Kie.ai dashboard → API Keys. |
 
 #### Integrations: video
 
-| Var                  | Purpose              | Rotate at                                  |
-| -------------------- | -------------------- | ------------------------------------------ |
-| `ELEVENLABS_API_KEY` | Voiceover synthesis. | ElevenLabs dashboard → Profile → API Keys. |
-| `SUBMAGIC_API_KEY`   | Caption generation.  | Submagic dashboard → Settings → API.       |
+| Var                   | Consumed by | Purpose                          | Rotate at                                  |
+| --------------------- | ----------- | -------------------------------- | ------------------------------------------ |
+| `ELEVENLABS_API_KEY`  | worker      | Voiceover synthesis.             | ElevenLabs dashboard → Profile → API Keys. |
+| `SUBMAGIC_API_KEY`    | worker      | Caption generation.              | Submagic dashboard → Settings → API.       |
+| `HYPERFRAMES_API_KEY` | worker      | Video composition (lands in V2). | Hyperframes dashboard.                     |
 
 #### Audit data sources
 
-| Var                | Purpose                               | Rotate at                                      |
-| ------------------ | ------------------------------------- | ---------------------------------------------- |
-| `META_ADS_API_KEY` | Meta Ads performance pulls.           | Meta Business → System Users → Generate Token. |
-| `GHL_API_KEY`      | GoHighLevel pipeline / contact pulls. | GHL → Settings → Private Integrations.         |
+| Var                | Consumed by | Purpose                                                | Rotate at                                      |
+| ------------------ | ----------- | ------------------------------------------------------ | ---------------------------------------------- |
+| `META_ADS_API_KEY` | worker      | Meta Ads performance pulls.                            | Meta Business → System Users → Generate Token. |
+| `META_AD_ACCOUNTS` | worker      | Comma-separated ad-account IDs. Not secret on its own. | Edit `/opt/voxhorizon/.env`.                   |
+| `GHL_API_KEY`      | worker      | GoHighLevel pipeline / contact pulls.                  | GHL → Settings → Private Integrations.         |
 
 #### Notifications
 
-| Var                 | Purpose                                                                                   | Rotate at                                                                             |
-| ------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `VAPID_PRIVATE_KEY` | Server signs Web Push payloads. **Paired with `NEXT_PUBLIC_VAPID_PUBLIC_KEY` on Vercel.** | `npx web-push generate-vapid-keys`. **Do not rotate on a schedule** — see note below. |
+| Var                            | Consumed by                                  | Purpose                                                                                  | Rotate at                                                                             |
+| ------------------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `RESEND_API_KEY`               | web                                          | Server-side transactional email.                                                         | Resend dashboard.                                                                     |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY` | web (runtime mirror of the build-time value) | Browser subscribes to Web Push. Inlined at build time; runtime copy for SSR consistency. | `npx web-push generate-vapid-keys`. **Do not rotate on a schedule** — see VAPID note. |
+| `VAPID_PRIVATE_KEY`            | web                                          | Server signs Web Push payloads. Paired with `NEXT_PUBLIC_VAPID_PUBLIC_KEY`.              | Same as above.                                                                        |
 
 #### Agent runtime
 
-| Var                 | Purpose                                           | Rotate at                         |
-| ------------------- | ------------------------------------------------- | --------------------------------- |
-| `ANTHROPIC_API_KEY` | Claude Code runner (server-side agent execution). | console.anthropic.com → API Keys. |
+| Var                 | Consumed by | Purpose                                           | Rotate at                         |
+| ------------------- | ----------- | ------------------------------------------------- | --------------------------------- |
+| `ANTHROPIC_API_KEY` | worker      | Claude Code runner (server-side agent execution). | console.anthropic.com → API Keys. |
 
-#### Monitoring
+#### Reverse proxy
 
-| Var                  | Purpose                                                     | Rotate at                    |
-| -------------------- | ----------------------------------------------------------- | ---------------------------- |
-| `TAILSCALE_HOSTNAME` | MagicDNS hostname surfaced for log correlation. Not secret. | Edit `/opt/voxhorizon/.env`. |
-
-#### Reverse proxy (VPS-3)
-
-| Var                      | Purpose                                                                                   | Rotate at                    |
-| ------------------------ | ----------------------------------------------------------------------------------------- | ---------------------------- |
-| `VOXHORIZON_WORKER_HOST` | Hostname Caddy obtains a Let's Encrypt cert for and matches in its Caddyfile. Not secret. | Edit `/opt/voxhorizon/.env`. |
+| Var                   | Consumed by | Purpose                                                                                                                      | Rotate at                    |
+| --------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| `VOXHORIZON_WEB_HOST` | Caddy       | Hostname Caddy obtains a Let's Encrypt cert for and matches in its Caddyfile. Set to `dashboard.voxhorizon.com`. Not secret. | Edit `/opt/voxhorizon/.env`. |
 
 ##### Cloudflare DNS setup (operator)
 
 There is no Cloudflare credential to manage for v1 — Caddy speaks ACME directly to Let's Encrypt — but the operator's one-time Cloudflare wiring is recorded here so the dependency is auditable.
 
-- **DNS.** Create an A record `worker.voxhorizon.com` → VPS public IP. Proxy status: **ON** (orange cloud). Cloudflare's edge fronts the user-facing TLS leg.
+- **DNS.** Create an A record `dashboard.voxhorizon.com` → VPS public IP. Proxy status: **ON** (orange cloud). Cloudflare's edge fronts the user-facing TLS leg.
 - **SSL/TLS mode.** Cloudflare dashboard → SSL/TLS → Overview → **Full (strict)**. Cloudflare validates the upstream Let's Encrypt cert that Caddy presents. _Flexible_ would terminate TLS at the edge and talk plaintext to Caddy — never use it. _Full_ (non-strict) would accept any cert from the origin including self-signed — avoid; Let's Encrypt makes strict trivial.
 - **No API token required.** Cloudflare API tokens would only be needed if v2 moves to DNS-01 ACME challenges (e.g. for wildcard certs). v1 uses HTTP-01 over the Cloudflare edge, which works out of the box once the proxy is ON and SSL mode is Full (strict).
 - **Cert renewal.** Caddy renews ~30 days before expiry. State persists in the `voxhorizon-caddy-data` named volume across container restarts.
+- **No DNS for the worker.** The worker has no public hostname. Do not create a CNAME or A record for it — that would defeat the internal-only posture.
 
 ### VAPID note
 
-`VAPID_PRIVATE_KEY` (and its public counterpart `NEXT_PUBLIC_VAPID_PUBLIC_KEY` on Vercel) is **never rotated on a schedule.** The keypair identifies the push origin to every browser that has subscribed. Rotating the private key forces **every subscriber** to re-subscribe — the old push endpoint becomes unusable for the existing subscription records in `push_subscriptions`. Only rotate on confirmed leak, and only after planning the re-subscribe migration (clear `push_subscriptions`, prompt every active client to re-permission Web Push).
+`VAPID_PRIVATE_KEY` and its public counterpart `NEXT_PUBLIC_VAPID_PUBLIC_KEY` are **never rotated on a schedule.** The keypair identifies the push origin to every browser that has subscribed. Rotating the private key forces **every subscriber** to re-subscribe — the old push endpoint becomes unusable for the existing subscription records in `push_subscriptions`. Only rotate on confirmed leak, and only after planning the re-subscribe migration (clear `push_subscriptions`, prompt every active client to re-permission Web Push). Note `NEXT_PUBLIC_VAPID_PUBLIC_KEY` is also a build-time secret — rotating it requires a full `voxhorizon-web` rebuild + redeploy, not just a container restart.
 
 ### Quarterly rotation checklist
 
 Run the first weekend of each quarter. Tick each box as you go.
 
-- [ ] **Supabase service role.** Rotate at Supabase dashboard; update Vercel env (production + preview + development) **and** `/opt/voxhorizon/.env`. Use the rolling pattern (below) so neither side breaks during the swap.
-- [ ] **`WORKER_SHARED_SECRET`.** Regenerate (`python -c "import secrets; print(secrets.token_hex(64))"`); update Vercel env **and** `/opt/voxhorizon/.env`. Rolling pattern applies.
+- [ ] **Supabase service role.** Rotate at Supabase dashboard; update `/opt/voxhorizon/.env`; `docker compose up -d web worker` (both containers consume it). Use the rolling pattern (below) for zero downtime.
+- [ ] **`WORKER_SHARED_SECRET`.** Regenerate (`python -c "import secrets; print(secrets.token_hex(64))"`); update `/opt/voxhorizon/.env`; `docker compose up -d web worker`. Rolling pattern applies.
 - [ ] **Kie.ai (`KIE_AI_API_KEY`).** Rotate at kie.ai; update `/opt/voxhorizon/.env`; `docker compose up -d worker`.
 - [ ] **ElevenLabs (`ELEVENLABS_API_KEY`).** Rotate at elevenlabs.io; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **Submagic (`SUBMAGIC_API_KEY`).** Rotate at submagic.co; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **Meta Ads (`META_ADS_API_KEY`).** Generate fresh System User token; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **GoHighLevel (`GHL_API_KEY`).** Rotate at GHL → Settings → Private Integrations; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **Anthropic (`ANTHROPIC_API_KEY`).** Rotate at console.anthropic.com; update `/opt/voxhorizon/.env`; restart worker.
-- [ ] **Resend (`RESEND_API_KEY`).** Vercel-side only — update Vercel env; redeploy. (Not consumed by the worker.)
+- [ ] **Resend (`RESEND_API_KEY`).** Rotate at resend.com; update `/opt/voxhorizon/.env`; `docker compose up -d web` (web container consumes it).
 - [ ] **GitHub PAT (Pedro's).** Rotate at github.com/settings/tokens; update `~/.config/github/token` (chmod 600) on the dev box.
-- [ ] **Tailscale auth key.** Rotate at tailscale.com/admin/settings/keys; update `/opt/voxhorizon/.env` if the worker re-registers via auth key on boot.
+- [ ] **`NEXT_PUBLIC_*` build secrets.** Confirm none need rotating (URL is stable; anon key + VAPID public are "only on leak"). If rotation is required, update the GH Actions repo secret, trigger a `build-web.yml` rebuild, and roll the web container — **not** just `/opt/voxhorizon/.env`.
 - [ ] **VAPID.** Skip unless leaked — see VAPID note above.
 - [ ] **Audit.** Run the `git log -S` greps under [Auditing](#auditing) to confirm nothing leaked into history during the quarter.
-- [ ] **Smoke test.** `curl https://<vps-domain>/health` → 200; `curl https://<vercel-app>/api/worker/health` → 200; trigger one end-to-end creative generation to confirm Kie + ElevenLabs + Submagic + Supabase paths all wired.
+- [ ] **Smoke test.** `curl https://dashboard.voxhorizon.com/api/health` → 200; trigger one end-to-end creative generation to confirm Kie + ElevenLabs + Submagic + Supabase paths all wired.
 
 ### Per-secret rotation procedure
 
-The default flow for any worker-only secret (one that lives in `/opt/voxhorizon/.env` and nowhere else):
+The default flow for a runtime secret that lives in `/opt/voxhorizon/.env`:
 
 1. **Generate the new value** at the provider dashboard (or, for `WORKER_SHARED_SECRET`, locally via `python -c "import secrets; print(secrets.token_hex(64))"`).
 2. **SSH into the VPS** as `deploy`:
@@ -273,50 +285,66 @@ The default flow for any worker-only secret (one that lives in `/opt/voxhorizon/
    # change the single KEY= line; save
    ```
 
-4. **Restart the worker** to pick up the new env:
+4. **Restart the container(s) that consume it.** If only the worker reads the var, restart just `worker`; same for web-only. For shared values (e.g. `WORKER_SHARED_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`), restart both:
 
    ```bash
-   docker compose up -d worker
+   docker compose up -d worker            # worker-only var
+   docker compose up -d web               # web-only var
+   docker compose up -d web worker        # shared var
    docker compose logs --tail=50 worker   # confirm check-env.sh prints "env OK"
+   docker compose logs --tail=50 web      # confirm Next.js comes up
    ```
 
-5. **Smoke test.** `curl https://<vps-domain>/health` should return `200` with the expected `WORKER_VERSION` and `build_sha`. For provider-specific keys, trigger one operation that exercises that integration (e.g. a small Kie generation for `KIE_AI_API_KEY`).
+5. **Smoke test.** `curl https://dashboard.voxhorizon.com/api/health` → 200. For provider-specific keys, trigger one operation that exercises that integration (e.g. a small Kie generation for `KIE_AI_API_KEY`).
 6. **Revoke the old value** at the provider dashboard once the smoke passes.
+
+> **`NEXT_PUBLIC_*` values are different.** They are inlined into the web container at build time and updating `/opt/voxhorizon/.env` alone has no effect on what the browser already received. For those, you must (a) update the GitHub Actions repo secret, (b) trigger a `voxhorizon-web` rebuild, (c) roll the deployed image. See the [GitHub Actions deploy secrets](#github-actions-deploy-secrets) section.
 
 #### Shared secrets — rolling swap (no-downtime)
 
-Two secrets are read by **both** Vercel (Next.js) and the VPS worker:
+Two runtime secrets are read by **both** containers:
 
-- `WORKER_SHARED_SECRET` — the bearer the app sends to the worker.
+- `WORKER_SHARED_SECRET` — the bearer the web→worker calls use.
 - `SUPABASE_SERVICE_ROLE_KEY` — the admin key both sides use to talk to Postgres.
 
-A naive "rotate everywhere at once" causes a ~minute of 401s while Vercel redeploys race the worker restart. Use a rolling pattern instead:
+Because both containers read the same `/opt/voxhorizon/.env` and `docker compose up -d` rolls them sequentially, there is a brief (~5–10s) window where one container has the new value and the other still has the old. For `WORKER_SHARED_SECRET` that means transient 401s; for `SUPABASE_SERVICE_ROLE_KEY` it means transient 5xx from one side. Both windows are short enough that for a single-operator system the simpler procedure is "rotate during a known idle moment, accept the brief blip." If a zero-downtime swap is required, use this rolling pattern:
 
 1. **Generate the new value.** For `WORKER_SHARED_SECRET`, regen locally. For Supabase service role, rotate at Supabase dashboard but **do not** invalidate the old key yet (Supabase issues the new key alongside the old until you confirm).
-2. **Vercel: add the new value alongside the old as a parallel env var.**
-   - Add `WORKER_SHARED_SECRET_NEXT` (or `SUPABASE_SERVICE_ROLE_KEY_NEXT`) in Vercel's env-var UI for production + preview + development.
-   - Trigger a Vercel deploy. After it ships, both the old `WORKER_SHARED_SECRET` and the new `WORKER_SHARED_SECRET_NEXT` are present in the Vercel runtime; **app code still reads the old one.**
-3. **VPS: update `/opt/voxhorizon/.env` to the new value.**
+2. **Add a parallel env var to `/opt/voxhorizon/.env`.**
 
    ```bash
    ssh deploy@<vps-host>
-   sudo -u deploy ${EDITOR:-nano} /opt/voxhorizon/.env   # set WORKER_SHARED_SECRET=<new>
+   sudo -u deploy ${EDITOR:-nano} /opt/voxhorizon/.env
+   # Add: WORKER_SHARED_SECRET_NEXT=<new value>   (keep old WORKER_SHARED_SECRET intact)
+   docker compose up -d web worker   # both containers now see both values
+   ```
+
+   App code reads only the active var; the `_NEXT` value is dormant. Confirm both containers came up healthy with `docker compose logs --tail=50 web worker`.
+
+3. **Switch the worker to accept the new value first.** Patch the worker's auth comparison to accept either `WORKER_SHARED_SECRET` or `WORKER_SHARED_SECRET_NEXT` (a small temporary code change, or a config flag set in `.env`). Roll only the worker:
+
+   ```bash
    docker compose up -d worker
    ```
 
-   The worker now accepts the new value. The Vercel app still sends the **old** value (held in `WORKER_SHARED_SECRET`), so requests start failing — this is the moment of cutover. Keep this window short (under a minute).
+4. **Promote the new value in the active var.**
 
-4. **Vercel: swap the active var.**
-   - Edit `WORKER_SHARED_SECRET` in Vercel's env UI: set it to the new value (same value as `WORKER_SHARED_SECRET_NEXT`).
-   - Trigger a Vercel deploy. Once it ships, Vercel sends the new value, the worker accepts it, traffic is restored.
-5. **Verify.** `curl https://<vercel-app>/api/worker/health` → 200. Watch worker logs for 401s.
+   ```bash
+   sudo -u deploy ${EDITOR:-nano} /opt/voxhorizon/.env
+   # set WORKER_SHARED_SECRET=<new value>   (same as WORKER_SHARED_SECRET_NEXT)
+   docker compose up -d web   # web now sends the new bearer
+   ```
+
+5. **Verify.** `curl https://dashboard.voxhorizon.com/api/health` → 200. Watch worker logs for 401s.
 6. **Clean up.**
-   - Remove `WORKER_SHARED_SECRET_NEXT` from Vercel env (no longer needed).
+   - Remove `WORKER_SHARED_SECRET_NEXT` from `/opt/voxhorizon/.env`.
+   - Revert the worker auth code to single-value comparison.
+   - Roll worker again to apply the cleanup.
    - At the provider (Supabase), invalidate the old service-role JWT.
 
-The same pattern applies to `SUPABASE_SERVICE_ROLE_KEY`: stage `SUPABASE_SERVICE_ROLE_KEY_NEXT` in Vercel first, then update the VPS .env, then promote the new value into the active var on Vercel, then remove the staging var and invalidate the old key.
+The same pattern applies to `SUPABASE_SERVICE_ROLE_KEY`: stage `SUPABASE_SERVICE_ROLE_KEY_NEXT`, teach the relevant client construction to fall back, promote, clean up, invalidate the old key.
 
-> **Order matters.** Always: **stage on Vercel → update VPS → promote on Vercel → remove staging → invalidate at provider.** Going the other direction (VPS first with no Vercel staging) creates a guaranteed downtime window because Vercel keeps the old value in the running deployment until the next push.
+> **Order matters.** Always: **stage the `_NEXT` value → teach the consumer to accept either → promote the active var → remove staging → revert consumer + invalidate at provider.**
 
 ### v2 upgrade path: `sops + age`
 
@@ -333,19 +361,33 @@ This is **not** v1 scope. v1's single-operator threat model is met by `chmod 600
 
 ## GitHub Actions deploy secrets
 
-The `deploy-worker` workflow (`.github/workflows/deploy-worker.yml`, lands in VPS-4) builds the worker image on each push to `main`, pushes to GHCR, then SSHes into the VPS as the `deploy` user to roll the compose stack. The workflow needs three repo-level secrets to do its job. Configure them at **Settings → Secrets and variables → Actions → New repository secret**.
+Two image-build workflows (`build-web.yml`, `build-worker.yml`) build the two GHCR images on each push to `main`. A third workflow, `deploy-stack.yml` (renamed from `deploy-worker.yml` by VPS-10), SSHes into the VPS as the `deploy` user and rolls the compose stack. The workflows together need two categories of repo-level secret: **deploy credentials** (SSH + host info) and **build-time `NEXT_PUBLIC_*` values** (injected as Docker `--build-arg`s into the web image). Configure them at **Settings → Secrets and variables → Actions → New repository secret**.
+
+### Deploy credentials
 
 | Secret        | Purpose                                                                                                                 | How to populate                                                                                                                                                                         |
 | ------------- | ----------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VPS_HOST`    | The DNS name or IP the workflow `ssh`s into. Not secret per se, but treat it as one so it's not in git.                 | Production hostname (e.g. `worker.voxhorizon.app`) or the bare VPS IP if DNS isn't wired yet. Match whatever resolves to the box.                                                       |
+| `VPS_HOST`    | The DNS name or IP the workflow `ssh`s into. Not secret per se, but treat it as one so it's not in git.                 | Production hostname (e.g. `dashboard.voxhorizon.com`) or the bare VPS IP if DNS isn't wired yet. Match whatever resolves to the box.                                                    |
 | `VPS_USER`    | The unprivileged Linux user the deploy script runs as. Must be in the `docker` group and own `/opt/voxhorizon`.         | Set to `deploy`. Provisioned by `infra/deploy/setup-deploy-user.sh` on a fresh VPS.                                                                                                     |
 | `VPS_SSH_KEY` | The **private** half of a deploy-only SSH keypair. Used to authenticate the GitHub Actions runner into `deploy@<host>`. | Generate fresh: `ssh-keygen -t ed25519 -f ~/.ssh/voxhorizon_deploy -C "github-actions-deploy"`. Paste the **contents** of `~/.ssh/voxhorizon_deploy` (private key, with header/footer). |
 
+### Build-time `NEXT_PUBLIC_*` secrets
+
+Three additional secrets are passed to `build-web.yml` as Docker `--build-arg`s so Next.js can inline them into the client bundle during `pnpm build`. The web Dockerfile declares matching `ARG NEXT_PUBLIC_*` directives and exports them as build env so the standalone output captures them.
+
+| Secret                          | Purpose                                                                                                                | How to populate                                                                                          |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`      | Project URL the browser Supabase client connects to. Inlined into the JS bundle.                                       | Copy from Supabase dashboard → Project Settings → API. Same value as in `/opt/voxhorizon/.env`.          |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Anon key the browser Supabase client uses. Inlined into the JS bundle.                                                 | Copy from Supabase dashboard → Project Settings → API → `anon` `public`. Same value as in the VPS .env.  |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY`  | VAPID public key the browser presents when subscribing to Web Push. Inlined into the service-worker registration code. | Copy from the keypair output of `npx web-push generate-vapid-keys` (one-shot generation, never rotates). |
+
+> **Rotating any `NEXT_PUBLIC_*` value requires a CI rebuild + redeploy, not just a container restart, because Next.js inlines these at build time.** Updating the runtime `/opt/voxhorizon/.env` is necessary too (so server-side code sees the same value during SSR) but is **not sufficient** — the browser will keep receiving the old value until the `voxhorizon-web` image is rebuilt and rolled. Rotation sequence: (1) update the GH Actions repo secret, (2) update the matching line in `/opt/voxhorizon/.env`, (3) trigger `build-web.yml` (push or `workflow_dispatch`), (4) `deploy-stack.yml` rolls the new image, (5) hard-refresh the browser to bust the service-worker cache. The Supabase anon key in particular almost never rotates; VAPID public key never rotates on a schedule (see VAPID note above).
+
 ### Key handling — non-negotiables
 
-- **Fresh ed25519 keypair, deploy-only.** Do **not** reuse Pedro's admin key, an existing personal key, or a Mac-host key. The deploy key is a single-purpose credential whose blast radius is "rollout the worker on this one VPS." Compromise of this key must not give shell access anywhere else.
+- **Fresh ed25519 keypair, deploy-only.** Do **not** reuse Pedro's admin key, an existing personal key, or a workstation key. The deploy key is a single-purpose credential whose blast radius is "rollout the stack on this one VPS." Compromise of this key must not give shell access anywhere else.
 - **No passphrase.** GitHub Actions can't type one. The key's protection is its scope (deploy-only) + the `from=` and `command=` restrictions on the authorized_keys line.
-- **Private key in GHA secret only.** Never commit it. Never paste it into Vercel env, the vault, or 1Password unless you also accept the rotation policy: rotating the GHA secret means rotating every other copy.
+- **Private key in GHA secret only.** Never commit it. Never paste it into the vault or 1Password unless you also accept the rotation policy: rotating the GHA secret means rotating every other copy.
 - **Public key on the VPS.** Append `~/.ssh/voxhorizon_deploy.pub` to `~deploy/.ssh/authorized_keys` on the VPS. Lock the line down:
 
   ```
@@ -377,11 +419,11 @@ The `deploy-worker` workflow (`.github/workflows/deploy-worker.yml`, lands in VP
 
 External uptime monitors live alongside the secrets they alert on. None of them require API keys for v1 — they're all free-tier and configured via the web UI — so there's nothing to put in the vault except the dashboard URLs.
 
-| Service              | Account                          | Dashboard                   | API key needed? | Notes                                                                                                                                    |
-| -------------------- | -------------------------------- | --------------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Uptime Robot         | `diogosilvaenterprise@gmail.com` | https://uptimerobot.com     | No (free tier)  | Polls `https://worker.<domain>/work/ping` every 5 min. See [`infra/monitoring/README.md`](./infra/monitoring/README.md) for setup.       |
-| Healthchecks.io      | `diogosilvaenterprise@gmail.com` | https://healthchecks.io     | No              | One check per scheduled job. Ping URLs are per-check (treat like secrets — anyone with one can fake a heartbeat). Store on the VPS only. |
-| Supabase status page | (public, no account)             | https://status.supabase.com | No              | Email subscription added for `diogosilvaenterprise@gmail.com`; also mirrored in Uptime Robot as an independent monitor.                  |
+| Service              | Account                          | Dashboard                   | API key needed? | Notes                                                                                                                                        |
+| -------------------- | -------------------------------- | --------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Uptime Robot         | `diogosilvaenterprise@gmail.com` | https://uptimerobot.com     | No (free tier)  | Polls `https://dashboard.voxhorizon.com/api/health` every 5 min. See [`infra/monitoring/README.md`](./infra/monitoring/README.md) for setup. |
+| Healthchecks.io      | `diogosilvaenterprise@gmail.com` | https://healthchecks.io     | No              | One check per scheduled job. Ping URLs are per-check (treat like secrets — anyone with one can fake a heartbeat). Store on the VPS only.     |
+| Supabase status page | (public, no account)             | https://status.supabase.com | No              | Email subscription added for `diogosilvaenterprise@gmail.com`; also mirrored in Uptime Robot as an independent monitor.                      |
 
 The Healthchecks.io ping URLs are the only monitoring-related thing that needs handling — they live on the VPS inside the systemd unit files / wrapper scripts (lands with #59). Treat them like service credentials: don't commit them to git, copy them out of the Healthchecks dashboard at provisioning time.
 
