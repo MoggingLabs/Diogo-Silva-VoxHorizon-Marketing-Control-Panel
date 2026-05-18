@@ -75,6 +75,22 @@ export const TEST_CLIENT_SLUG = "test-e2e-client";
 export const TEST_CLIENT_NAME = "E2E Test Client";
 
 /**
+ * Returns the same lazily-built service-role client `_fixtures.ts` /
+ * `_seed.ts` use internally. Exposed for spec files (and the SSE mock
+ * harness) that need to read state the API doesn't expose directly —
+ * e.g. waiting for an autosave to land in `pipelines.config_draft`
+ * before driving the next UI step, or asserting that a row reached
+ * `status='done'` after the auto-advance trigger fired.
+ *
+ * Same env requirements + throw behaviour as the local `getAdminClient`
+ * — fails fast with a friendly error if `SUPABASE_SERVICE_ROLE_KEY` is
+ * unset.
+ */
+export function getTestAdminClient(): SupabaseClient<Database> {
+  return getAdminClient();
+}
+
+/**
  * Upserts the canonical e2e test client by slug. Idempotent — repeated calls
  * return the same row id. Returns the row's `id` (uuid) for use in form
  * client-pickers and downstream cleanup queries.
