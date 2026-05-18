@@ -30,13 +30,12 @@ Daily audit pulls Meta + GHL, computes Kill / Watch / Keep verdicts, surfaces th
 
 ### Explicit non-goals for v1
 
-- Multi-operator. Single user. No app-level auth (Tailscale + Vercel Deployment Protection is the gate).
-- Public API surface. The worker is private to the tailnet + Vercel.
+- Multi-operator. Single user. No app-level auth (network boundary + worker bearer is the gate).
+- Public worker surface. The worker container is internal-only on the Docker network — only the dashboard is publicly addressable.
 - Automated ad delivery to Meta. Operator pushes ads manually after approval — explicit human-in-the-loop gate. Removing this gate is post-v1.
 - Multi-tenant. Tables have a `client_id` for analytical hygiene, but the UI is built around one operator's view of all clients.
 - Cross-client portfolio analytics beyond per-client perf rollups.
 - ClickUp integration (the operator owns task management outside the panel).
-- VPN-less deploy. The worker stays local on the Mac. Cloud-deploying the worker is post-v1.
 - Slack reintegration. Out of scope, full stop.
 - RLS policies. v1 ships RLS off. Any multi-operator follow-up starts with an RLS migration.
 
@@ -44,60 +43,59 @@ Daily audit pulls Meta + GHL, computes Kill / Watch / Keep verdicts, surfaces th
 
 ## 2. System topology
 
+v1 production is a **single-host stack** on one Hostinger VPS: the Next.js dashboard and the FastAPI worker run as two containers, fronted by Caddy. The dashboard at `dashboard.voxhorizon.com` is the only public surface; the worker is internal-only on the Docker network and never receives a public hostname.
+
 ASCII version (always rendered, no Mermaid required):
 
 ```
    Diogo's browser
         │
-        │ HTTPS (Vercel Deployment Protection challenge once per session)
+        │ HTTPS — TLS via Cloudflare edge cert
         ▼
-   ┌─────────────────────────────────────────────────────────────────┐
-   │  Vercel — Next.js 15 (App Router, React 19, Tailwind, shadcn)   │
-   │  · Pages: dashboard, briefs, creatives, launches, audit,        │
-   │           clients, settings                                     │
-   │  · API routes: /api/worker/*, /api/briefs/*, /api/creatives/*,  │
-   │                /api/launches/*, /api/health                     │
-   │  · Server-side Supabase admin client for writes                 │
-   │  · Browser Supabase client for Realtime subscriptions           │
-   │  · Typed worker RPC (lib/worker.ts) — Bearer auth + retries     │
-   │  · Tailscale-only middleware (defense in depth, off by default) │
-   └──────────┬──────────────────────────────────────────┬───────────┘
-              │                                          │
-              │ supabase-js                              │ HTTPS (Bearer)
-              │                                          │
-              ▼                                          ▼
-   ┌────────────────────────────┐         ┌───────────────────────────────┐
-   │  Supabase (us-east-1)      │         │  Tailscale Funnel             │
-   │  project jfzxlsaywztlytnobgej        │  https://<host>.<tail>.ts.net │
-   │  · Postgres 15             │ ◀───────┤                               │
-   │  · Realtime publication    │  service │  ↓                            │
-   │  · Storage bucket: creatives        role│  ↓                          │
-   │  · Helper functions, enums │         │  ┌─────────────────────────┐  │
-   └────────────────────────────┘         │  │ FastAPI worker (Mac)    │  │
-                                          │  │ src/                    │  │
-                                          │  │  main.py · auth.py      │  │
-                                          │  │  config.py              │  │
-                                          │  │  routes/health.py       │  │
-                                          │  │         creative.py     │  │
-                                          │  │         audit.py        │  │
-                                          │  │         upload.py       │  │
-                                          │  │         chat.py         │  │
-                                          │  │         broll.py        │  │
-                                          │  │  services/              │  │
-                                          │  │   broll_store.py        │  │
-                                          │  │   claude_runner.py      │  │
-                                          │  │   scripts_runner.py     │  │
-                                          │  │   storage.py            │  │
-                                          │  └────┬────────────────────┘  │
-                                          │       │                       │
-                                          └───────┼───────────────────────┘
-                                                  │
-        ┌───────────┬───────────┬───────────┬─────┴─────┬───────────┬────────────┬───────────┐
+   Cloudflare edge (proxy = ON, SSL/TLS = Full strict)
+        │
+        │ HTTPS — TLS via Let's Encrypt cert held by Caddy
+        ▼
+   ┌────────────────────────────────────────────────────────────────────┐
+   │  Hostinger VPS — single host                                       │
+   │                                                                    │
+   │   Caddy (caddy:2-alpine, :80 / :443 / :443-udp)                    │
+   │     · TLS on dashboard.voxhorizon.com                              │
+   │     · reverse_proxy → web:3000 (only public route)                 │
+   │     · flush_interval -1 (preserves SSE chunking)                   │
+   │                                                                    │
+   │   docker network "voxhorizon" (internal)                           │
+   │   ┌──────────────────────────────┐  ┌────────────────────────────┐ │
+   │   │  web (Next.js 15 :3000)      │  │  worker (FastAPI :8000)    │ │
+   │   │  ghcr.io/.../voxhorizon-web  │  │  ghcr.io/.../...-worker    │ │
+   │   │  · App Router pages          │  │  · routes/health,creative, │ │
+   │   │  · API routes (/api/*)       │  │    audit,upload,chat,broll │ │
+   │   │  · Server Supabase client    │  │  · services/claude_runner, │ │
+   │   │  · Realtime browser client   │  │    broll_store, storage    │ │
+   │   │  · lib/worker.ts → WORKER_URL│──┼─▶                           │ │
+   │   │    (= http://worker:8000)    │  │  · Bearer-only ingress      │ │
+   │   │    Bearer + retries          │  │    (no public port binding) │ │
+   │   └──────────────┬───────────────┘  └────────────┬────────────────┘ │
+   │                  │                               │                  │
+   └──────────────────┼───────────────────────────────┼──────────────────┘
+                      │ supabase-js (HTTPS)           │ service-role + Storage
+                      ▼                               ▼
+            ┌─────────────────────────────────────────────────────┐
+            │  Supabase (us-east-1) · project jfzxlsaywztlytnobgej │
+            │  · Postgres 15 + Realtime publication               │
+            │  · Storage bucket: creatives                        │
+            │  · Helper functions, enums                          │
+            └─────────────────────────────────────────────────────┘
+
+        worker also reaches:
+        ┌───────────┬───────────┬───────────┬───────────┬───────────┬────────────┬───────────┐
         ▼           ▼           ▼           ▼           ▼           ▼            ▼           ▼
     Claude Code   Kie.ai   ElevenLabs   Hyperframes  Submagic   Meta Ads      GHL        Drive
     (agent loop) (images)  (voiceover)  (video       (captions) (perf pull)   (pipeline) (gog CLI)
                                        compose)
 ```
+
+Worker is no longer publicly addressable. Defense in depth: the Docker network is internal, the bearer secret guards every worker route, the host firewall blocks `:8000`. Even if Caddy is misconfigured, the worker cannot be reached without first compromising the host.
 
 Mermaid version (richer renderers):
 
@@ -107,17 +105,19 @@ flowchart TD
     UI[Diogo's browser]
   end
 
-  UI -->|HTTPS · Vercel SSO once| Vercel
+  UI -->|HTTPS · dashboard.voxhorizon.com| CF[Cloudflare edge<br/>proxy = ON · SSL/TLS = Full strict]
+  CF -->|HTTPS · Let's Encrypt cert| Caddy
 
-  subgraph Vercel[Vercel · Next.js 15]
-    direction TB
-    Pages[App Router pages]
-    API[API routes / server actions]
-    LibWorker[lib/worker.ts · typed RPC]
-    LibSupa[lib/supabase/*]
-    Pages --> API
-    API --> LibWorker
-    API --> LibSupa
+  subgraph VPS[Hostinger VPS · single host]
+    Caddy[Caddy · :80 / :443 / :443-udp<br/>reverse_proxy → web:3000]
+    subgraph DockerNet[docker network · voxhorizon · internal]
+      Web[web container<br/>Next.js 15 · :3000<br/>ghcr.io/.../voxhorizon-web]
+      Worker[worker container<br/>FastAPI · :8000<br/>ghcr.io/.../voxhorizon-worker]
+      Pool[(named volume<br/>voxhorizon-worker-broll-pool)]
+    end
+    Caddy --> Web
+    Web -->|Authorization: Bearer ...<br/>WORKER_URL = http://worker:8000| Worker
+    Worker --> Pool
   end
 
   subgraph Supabase[Supabase · us-east-1]
@@ -125,23 +125,8 @@ flowchart TD
     Storage[(Storage · creatives bucket)]
   end
 
-  subgraph TS[Tailscale Funnel]
-    Funnel[(Public HTTPS endpoint)]
-  end
-
-  subgraph Mac[Diogo's Mac]
-    Worker[FastAPI worker]
-    Pool[(LocalBrollStore disk pool)]
-    HermesCfg[(~/.hermes config)]
-  end
-
-  Vercel --> Supabase
-  LibWorker -->|Authorization: Bearer ...| Funnel
-  Funnel --> Worker
-
+  Web --> Supabase
   Worker --> Supabase
-  Worker --> Pool
-  Worker -.reads.-> HermesCfg
 
   Worker --> Claude[Claude Code · subprocess + SDK]
   Worker --> Kie[Kie.ai · image gen]
@@ -153,29 +138,36 @@ flowchart TD
   Worker --> Drive[Google Drive · gog]
 ```
 
+Key properties of the single-host stack:
+
+- **One public surface.** Only `dashboard.voxhorizon.com` is reachable from the internet. The worker has no public hostname; `WORKER_URL=http://worker:8000` resolves via Docker's internal DNS.
+- **One DNS record, one TLS cert, one Caddy.** No split between dashboard / worker hostnames; nothing for Cloudflare to validate twice.
+- **Two GHCR images, one VPS.** `voxhorizon-web` and `voxhorizon-worker` are built independently in CI but deployed as a single stack via `deploy-stack.yml` (see [§Deployment pipeline](#deployment-pipeline)).
+- **One env file for both containers.** `/opt/voxhorizon/.env` is mounted via `env_file:` on both services. See [`SECRETS.md`](./SECRETS.md#vps-production-secrets) for the union inventory.
+
 ---
 
 ## 3. Data flow
 
 Where each piece of state lives:
 
-| State                           | Home                                                                             | Why                                                                                                                                                                                                     |
-| ------------------------------- | -------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Briefs (image + video)          | Postgres                                                                         | Mutable, audited, queried by Kanban + funnel. Driver of everything downstream.                                                                                                                          |
-| Creatives (image + video)       | Postgres metadata + Supabase Storage assets                                      | Postgres tracks status and pipeline path; Storage holds the bytes.                                                                                                                                      |
-| Iteration / conversation thread | Postgres (`creative_iterations`, `video_iterations`)                             | Append-only; powers the side-panel timeline and the chat replay.                                                                                                                                        |
-| Copy variants                   | Postgres                                                                         | Small, structured, no asset bytes.                                                                                                                                                                      |
-| Launch packages                 | Postgres                                                                         | Bundles refs to creatives + targeting/budget payload.                                                                                                                                                   |
-| B-roll pool                     | Local disk on the Mac (`LocalBrollStore`)                                        | Primary in v1. Deterministic SHA-256 dedup; JSON sidecars; HMAC-signed URLs for the browser. Migrating to Supabase Storage is a flip of `BROLL_STORE_BACKEND` once `SupabaseBrollStore` is implemented. |
-| Performance snapshots           | Postgres (`campaign_perf_image`, `campaign_perf_video` + `v_campaign_perf` view) | Daily writes, served straight to the audit view.                                                                                                                                                        |
-| Drive mirrors                   | Google Drive                                                                     | Operator-shareable assets. The pipeline doesn't read back from Drive; it's a one-way write.                                                                                                             |
-| Events                          | Postgres (`events`)                                                              | Append-only domain event log. **Not on Realtime** (too noisy).                                                                                                                                          |
-| Cron / sync audit               | Postgres (`sync_log`)                                                            | Worker-run jobs check in here. Not on Realtime.                                                                                                                                                         |
-| Operator overrides              | Postgres (`overrides`)                                                           | Hand-edits any cell on any table at read time via left-join, without mutating pipeline-produced rows.                                                                                                   |
-| Push subscriptions              | Postgres (`push_subscriptions`)                                                  | One row per operator device.                                                                                                                                                                            |
-| Secrets                         | `.env` files + Vercel env + Vault (chmod 600)                                    | Never in Postgres, never in git. See [`SECRETS.md`](./SECRETS.md).                                                                                                                                      |
+| State                           | Home                                                                                                                                       | Why                                                                                                                                                                                                                                               |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Briefs (image + video)          | Postgres                                                                                                                                   | Mutable, audited, queried by Kanban + funnel. Driver of everything downstream.                                                                                                                                                                    |
+| Creatives (image + video)       | Postgres metadata + Supabase Storage assets                                                                                                | Postgres tracks status and pipeline path; Storage holds the bytes.                                                                                                                                                                                |
+| Iteration / conversation thread | Postgres (`creative_iterations`, `video_iterations`)                                                                                       | Append-only; powers the side-panel timeline and the chat replay.                                                                                                                                                                                  |
+| Copy variants                   | Postgres                                                                                                                                   | Small, structured, no asset bytes.                                                                                                                                                                                                                |
+| Launch packages                 | Postgres                                                                                                                                   | Bundles refs to creatives + targeting/budget payload.                                                                                                                                                                                             |
+| B-roll pool                     | Named volume on the VPS (`voxhorizon-worker-broll-pool`, mounted at `/app/storage/broll-pool` in the worker container) — `LocalBrollStore` | Primary in v1. Deterministic SHA-256 dedup; JSON sidecars; HMAC-signed URLs for the browser. The named volume survives image rebuilds. Migrating to Supabase Storage is a flip of `BROLL_STORE_BACKEND` once `SupabaseBrollStore` is implemented. |
+| Performance snapshots           | Postgres (`campaign_perf_image`, `campaign_perf_video` + `v_campaign_perf` view)                                                           | Daily writes, served straight to the audit view.                                                                                                                                                                                                  |
+| Drive mirrors                   | Google Drive                                                                                                                               | Operator-shareable assets. The pipeline doesn't read back from Drive; it's a one-way write.                                                                                                                                                       |
+| Events                          | Postgres (`events`)                                                                                                                        | Append-only domain event log. **Not on Realtime** (too noisy).                                                                                                                                                                                    |
+| Cron / sync audit               | Postgres (`sync_log`)                                                                                                                      | Worker-run jobs check in here. Not on Realtime.                                                                                                                                                                                                   |
+| Operator overrides              | Postgres (`overrides`)                                                                                                                     | Hand-edits any cell on any table at read time via left-join, without mutating pipeline-produced rows.                                                                                                                                             |
+| Push subscriptions              | Postgres (`push_subscriptions`)                                                                                                            | One row per operator device.                                                                                                                                                                                                                      |
+| Secrets                         | `.env.example` (git) + GH Actions repo secrets (build) + `/opt/voxhorizon/.env` on VPS (runtime, chmod 600) + Vault                        | Never in Postgres, never in git. See [`SECRETS.md`](./SECRETS.md). Build-time `NEXT_PUBLIC_*` values come from GH Actions secrets; runtime values come from the VPS `.env`.                                                                       |
 
-Reads in the UI come from Supabase directly (server components use the server client; client components use the browser client + Realtime subscriptions). Writes go through Next.js API routes that use the service-role client. Worker-side writes use the service-role key too — Vercel never hands the operator's session to the worker.
+Reads in the UI come from Supabase directly (server components use the server client; client components use the browser client + Realtime subscriptions). Writes go through Next.js API routes (running in the `web` container) that use the service-role client. Worker-side writes use the service-role key too — the dashboard never hands the operator's session to the worker, and the worker has no operator session model anyway (bearer-only ingress).
 
 ---
 
@@ -303,29 +295,31 @@ Ekko is the marketing dept's persona. Implementation:
 
 Layered. No single failure removes all defenses.
 
-- **Tailscale.** The worker only listens on the tailnet, except for the explicit Funnel URL. Funnel exposes one HTTPS endpoint, scoped to the worker's `:8000`. Everything else on the Mac is invisible to the public internet.
-- **Vercel Deployment Protection.** The production deployment is gated by Vercel SSO. Only members of Diogo's Vercel team can hit the URL without an SSO challenge. Decision: locked in M0-15. Requires Vercel Pro (~$20/mo) — explicitly chosen for the "your Vercel account is your password" simplicity.
-- **Worker bearer secret.** Every Vercel→worker call carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. The worker compares with `hmac.compare_digest` (constant-time). 64-byte hex token, rotatable.
-- **Optional middleware.** `middleware.ts` implements a Tailscale-only IP gate. Default: off. Setting `TAILSCALE_ONLY=1` logs non-tailnet IPs; `TAILSCALE_ONLY=strict` returns 403. Useful for staging environments or as a stricter posture later.
+- **Network boundary: Caddy + Cloudflare.** Only `dashboard.voxhorizon.com` is publicly addressable. The worker container has no published port (`expose: ["8000"]` on the compose network only); the host firewall blocks inbound `:8000`. Even if Caddy is misconfigured, the worker is unreachable without first compromising the host.
+- **Worker boundary: shared-secret bearer.** Every web→worker call carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. The worker compares with `hmac.compare_digest` (constant-time). 64-byte hex token, rotatable. Calls travel over the Docker network (`http://worker:8000`) — never a public TLS hop.
+- **Optional middleware.** `middleware.ts` implements an IP gate hook. Default: off. Setting `TAILSCALE_ONLY=1` logs non-tailnet IPs; `TAILSCALE_ONLY=strict` returns 403. Repurposable when the operator wants a Tailscale-only access layer in front of the dashboard for staging.
 - **B-roll signed URLs.** The b-roll streaming route uses a separate HMAC scheme: the URL embeds `clip_id`, `exp`, and a signature. The worker validates without consulting the shared secret, so the browser can fetch a clip without leaking the bearer.
 - **No Supabase Auth.** No user accounts. No magic links. No JWT issuance. RLS is off. The service-role key is the only credential the app ever uses against Postgres.
-- **No CSRF tokens.** Single-operator + Tailscale + same-origin POSTs mean there's no cross-site attacker to defeat. If the boundary changes (multi-operator, public auth), CSRF and RLS are the entry points.
+- **No CSRF tokens.** Single-operator + same-origin POSTs (web container is the only origin) mean there's no cross-site attacker to defeat. If the boundary changes (multi-operator, public auth), CSRF and RLS are the entry points.
 
 ---
 
 ### Containerization (VPS path)
 
-The Mac+Tailscale topology above is the v1 default. The VPS path runs the same worker code on a remote Linux host, containerised — used for staging, demo environments, or when the operator wants the worker decoupled from the Mac being on.
+v1 production runs as a single-host Docker Compose stack on one Hostinger VPS. Two services share a compose network: the Next.js dashboard (`web`) and the FastAPI worker (`worker`). Caddy fronts the dashboard for public HTTPS; the worker is reachable only on the internal Docker network at `http://worker:8000`.
 
-- **Worker in Docker.** `worker/Dockerfile` is a multi-stage build: stage 1 produces a `uv`-frozen virtualenv from `pyproject.toml` + `uv.lock`; stage 2 runs on the Playwright Python base (Chromium + system deps preinstalled) plus Node 22 (Hyperframes CLI), `ffmpeg`, `yt-dlp`, and the prebuilt venv. Final image stays under 2 GB. Uvicorn binds `:8000` inside the container; non-root `app` user; healthcheck hits `/work/health` with the bearer secret read from env at runtime.
-- **Caddy fronts.** [VPS-3 / #160](../../issues/160) lands a `caddy` service in the same `docker-compose.yml` to terminate TLS (Let's Encrypt), forward `Authorization` headers, and expose `:80` + `:443`. The worker has `expose: ["8000"]` only — reachable on the compose network, never the public internet.
+- **Two containers, one host.**
+  - `web` — `ghcr.io/pveloso01/voxhorizon-web` (built from the repo root `Dockerfile`, Next.js 15 standalone build, listens on `:3000`). The only service Caddy fronts publicly. Lands in [VPS-7 / #228](../../issues/228) and [VPS-8 / #229](../../issues/229).
+  - `worker` — `ghcr.io/pveloso01/voxhorizon-worker` (multi-stage build: stage 1 produces a `uv`-frozen virtualenv from `pyproject.toml` + `uv.lock`; stage 2 runs on the Playwright Python base — Chromium + system deps preinstalled — plus Node 22 for the Hyperframes CLI, `ffmpeg`, `yt-dlp`, and the prebuilt venv). Final image stays under 2 GB. Uvicorn binds `:8000` inside the container; non-root `app` user; healthcheck hits `/work/health` with the bearer secret read from env at runtime. **`expose: ["8000"]` only — no public port binding.**
+- **Caddy fronts only the dashboard.** [VPS-9 / #230](../../issues/230) configures Caddy's site address as `dashboard.voxhorizon.com` and `reverse_proxy`s to `web:3000`. The worker route was dropped — the public surface for the worker no longer exists. The compose network is the only path web→worker.
+- **`WORKER_URL=http://worker:8000`.** The dashboard's `lib/worker.ts` reaches the worker via Docker's internal DNS. Docker Compose resolves the service name `worker` to the container's network address on the `voxhorizon` network. No public TLS hop, no internet round-trip — the only credentials the call needs are the bearer (`WORKER_SHARED_SECRET`).
 
-#### Reverse proxy (Caddy ↔ Cloudflare ↔ worker)
+#### Reverse proxy (Caddy ↔ Cloudflare ↔ web)
 
-Public HTTPS for the VPS path terminates at Caddy. The chain is:
+Public HTTPS for the dashboard terminates at Caddy. The chain is:
 
 ```
-   Diogo's browser / Vercel app
+   Diogo's browser
             │
             │ HTTPS (TLS via Cloudflare edge cert)
             ▼
@@ -338,26 +332,62 @@ Public HTTPS for the VPS path terminates at Caddy. The chain is:
             │
             │ HTTP on the compose network
             ▼
+   web:3000 (Next.js standalone server)
+            │
+            │ HTTP on the compose network · Authorization: Bearer …
+            ▼
    worker:8000 (FastAPI / Uvicorn, expose-only)
 ```
 
-- **Site address.** The Caddyfile uses `{$VOXHORIZON_WORKER_HOST:worker.voxhorizon.example.com}` as the site matcher. Caddy substitutes the env var at startup, so the same Caddyfile works for local-dev (`worker.localhost`) and prod (`worker.voxhorizon.com`) without hardcoding either. The var is set in `/opt/voxhorizon/.env` on the VPS (see [VPS-5 / #162](../../issues/162)).
+- **Site address.** The Caddyfile uses `dashboard.voxhorizon.com` as the site matcher (with a `{$VOXHORIZON_WEB_HOST:...}` env hook for staging / local dev). The var is set in `/opt/voxhorizon/.env` on the VPS.
 - **TLS.** Caddy obtains and renews a Let's Encrypt cert for the configured host automatically. State (ACME account, cert chain, OCSP staples) lives in the named volume `voxhorizon-caddy-data`; site state in `voxhorizon-caddy-config`.
-- **Cloudflare.** DNS A record (`worker.voxhorizon.com` → VPS public IP) with proxy ON. SSL/TLS mode is **Full (strict)** so Cloudflare validates the upstream cert from Let's Encrypt end-to-end. Cloudflare provides the edge cert to the browser and a separately validated TLS leg to Caddy.
-- **SSE preservation.** Caddy's `reverse_proxy` is configured with `flush_interval -1` — every token written by the worker's chat-stream endpoint is flushed to the client immediately, instead of being held in a response buffer until the FastAPI handler returns. Without this, the chat-with-Ekko UI would receive the entire agent turn at once instead of streaming.
+- **Cloudflare.** DNS A record (`dashboard.voxhorizon.com` → VPS public IP) with proxy ON. SSL/TLS mode is **Full (strict)** so Cloudflare validates the upstream cert from Let's Encrypt end-to-end.
+- **SSE preservation.** Caddy's `reverse_proxy` is configured with `flush_interval -1` — every token written by the dashboard's SSE proxy (`/api/worker/chat/*`) is flushed to the client immediately. Without this, chat-with-Ekko would receive the entire agent turn at once instead of streaming.
 - **HTTP/3.** Port `443/udp` is exposed so Caddy can serve HTTP/3 to clients that support it; Cloudflare's edge negotiates HTTP/3 separately on the user side.
 - **Logs.** Caddy writes JSON access logs to `/var/log/caddy/access.log` inside the container, persisted via the `voxhorizon-caddy-logs` named volume. Log rotation is configured in the Caddyfile (50 MB per file, keep 5).
-- **Local dev.** Caddy is not required to run the worker locally — the dev workflow keeps hitting `http://localhost:8000` against the worker bypass. See [`infra/caddy/README.md`](./infra/caddy/README.md) for the local-Caddy + self-signed-cert path when reproducing a TLS-specific bug.
-- **GHCR image pipeline.** [VPS-4 / #161](../../issues/161) wires a GitHub Actions workflow that builds `worker/Dockerfile` on push to `main` and tags `ghcr.io/pveloso01/voxhorizon-worker:{latest,main,<sha>}`. The VPS pulls instead of building.
-- **Env on the VPS.** [VPS-5 / #162](../../issues/162) provisions `/opt/voxhorizon/.env` (chmod 600, owned by the deploy user). `docker-compose.yml` mounts it via `env_file: /opt/voxhorizon/.env`. Locally the dev override is `env_file: ./worker/.env`.
-- **Health route.** [VPS-6 / #163](../../issues/163) keeps `/work/health` cheap and bearer-authed so the container healthcheck and Caddy upstream probes can both rely on it.
-- **State.** Named volumes (`voxhorizon-worker-broll-pool`, `voxhorizon-worker-logs`) keep the b-roll pool and runtime sidecars across image rebuilds. Supabase / Drive / GHCR stay external — the container is stateless beyond those volumes.
+- **Local dev.** Caddy is not required for local development — the dev workflow runs `pnpm dev` against `http://localhost:3000` and the worker via `bash scripts/serve.sh` on `http://localhost:8000`. See [`infra/caddy/README.md`](./infra/caddy/README.md) for the local-Caddy + self-signed-cert path when reproducing a TLS-specific bug.
+
+#### Image pipeline + env handling
+
+- **GHCR image pipeline.** Two GitHub Actions workflows build the images on every push to `main`:
+  - `build-web.yml` builds the repo-root `Dockerfile` and tags `ghcr.io/pveloso01/voxhorizon-web:{latest,<sha>}`. Build-time secrets (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_VAPID_PUBLIC_KEY`) are injected as `--build-arg`s — Next.js inlines them at build time, which is why rotating any `NEXT_PUBLIC_*` value forces a CI rebuild + redeploy, not just a container restart. See [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets).
+  - `build-worker.yml` builds `worker/Dockerfile` and tags `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`. The worker reads every secret at runtime from `/opt/voxhorizon/.env`, so no build-time secrets are needed.
+- **Env on the VPS.** `/opt/voxhorizon/.env` (chmod 600, owned by the `deploy` user) is mounted by **both** `web` and `worker` via `env_file:` — the union of variables both containers need (see [`SECRETS.md`](./SECRETS.md#vps-production-secrets) for the full inventory). Locally the dev overrides are `env_file: ./.env.local` for web and `env_file: ./worker/.env` for the worker.
+- **Health routes.** The worker exposes `/work/health` (bearer-authed) for the container healthcheck. The dashboard exposes `/api/health` for its own container healthcheck and for Caddy upstream probes.
+- **State.** Named volumes keep the b-roll pool (`voxhorizon-worker-broll-pool`) and worker runtime sidecars (`voxhorizon-worker-logs`) across image rebuilds. Caddy state lives in `voxhorizon-caddy-data` / `voxhorizon-caddy-config` / `voxhorizon-caddy-logs`. The `web` container is stateless (Next.js standalone — all state is in Supabase or the worker's volumes).
 
 ### Deployment pipeline
 
-Pushes to `main` that touch `worker/**`, the `Caddyfile`, `docker-compose.yml`, or `.github/workflows/deploy-worker.yml` trigger the `deploy-worker` workflow. The workflow builds `worker/Dockerfile` once on `ubuntu-latest`, pushes the image to GHCR as `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`, then SSHes into the VPS as the `deploy` user with a dedicated ed25519 key. The remote script does the rollout: `git reset --hard origin/main` to sync the compose file, `docker compose pull` to fetch the new image, `docker compose up -d --remove-orphans` to roll the stack, and a 10-tick polling loop on the worker's healthcheck before pruning the old image. The rollout aborts (non-zero exit, log dump) if the worker doesn't report healthy within ~50s. Concurrency is serialised on the `deploy-worker` group with `cancel-in-progress: false`, so two pushes in quick succession queue rather than racing. Rollback is a manual `docker compose pull ghcr.io/pveloso01/voxhorizon-worker:<previous-sha>` + `up -d` on the VPS; the `:<sha>` tag stays available in GHCR. See [`infra/deploy/README.md`](./infra/deploy/README.md) for the operator contract and [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets) for the SSH-key handling.
+Pushes to `main` trigger one or both image-build workflows (`build-web.yml`, `build-worker.yml`) depending on what changed. After either build succeeds, the `deploy-stack.yml` workflow (renamed from `deploy-worker.yml` by [VPS-10 / #231](../../issues/231)) SSHes into the VPS as the `deploy` user with a dedicated ed25519 key and rolls the affected service(s).
 
-The container path is opt-in; the Mac path remains supported.
+The remote rollout script:
+
+```bash
+cd /opt/voxhorizon
+git fetch --quiet origin main
+git reset --hard origin/main            # sync compose file + Caddyfile
+docker login ghcr.io …                  # GHA token, password-stdin
+docker compose pull                      # pulls whichever images changed
+docker compose up -d --remove-orphans    # rolls only services with new images
+# poll healthchecks (web + worker) for ~50s each
+docker image prune -f
+```
+
+`docker compose up -d` is idempotent: services whose image digest hasn't changed are left running; only the affected container(s) restart. So a worker-only change rolls only the worker; a web-only change rolls only the dashboard. The healthcheck loop checks both containers and fails the rollout (non-zero exit, log dump from the unhealthy service) if either doesn't report healthy within ~50s.
+
+Concurrency: `group: deploy-stack`, `cancel-in-progress: false`. Two pushes in quick succession queue rather than racing.
+
+**Rollback is per-service.** Because each container has its own image tag, the operator can pin only the bad service to a previous SHA:
+
+```bash
+# roll back ONLY web
+WEB_IMAGE_TAG=<prev-web-sha>   docker compose up -d web
+
+# roll back ONLY worker
+WORKER_IMAGE_TAG=<prev-worker-sha> docker compose up -d worker
+```
+
+See [`infra/deploy/README.md`](./infra/deploy/README.md) for the full operator contract (per-service rollback walkthrough, log locations, manual-dispatch flow) and [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets) for the SSH-key + build-arg handling.
 
 ---
 
@@ -365,41 +395,41 @@ The container path is opt-in; the Mac path remains supported.
 
 Locked decisions from the six discovery rounds. Dated. **Master Tracker [#72](../../issues/72) is the canonical source if anything below drifts.**
 
-| Date       | Decision                                                                                           | Rationale                                                                                                                                     |
-| ---------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-16 | Two-pipeline v1 (image + video), parallel-vertical schema.                                         | Image alone was insufficient; video is core to VoxHorizon's output cadence. Parallel-vertical lets either side evolve independently.          |
-| 2026-05-16 | Single operator (Diogo). No app-level auth.                                                        | Tailscale + Vercel Deployment Protection is enough; building multi-user auth pre-product-market-fit is waste.                                 |
-| 2026-05-16 | Slack dropped from the marketing dept.                                                             | The Slack workflow was the bottleneck this build replaces. Keeping it would dilute the rebuild.                                               |
-| 2026-05-16 | Local FastAPI worker on Mac + Tailscale Funnel.                                                    | Cloud-hosting the worker adds devops weight without a v1 payoff. The Mac is always on and has all the existing Hermes scripts already.        |
-| 2026-05-16 | Supabase (Postgres + Realtime + Storage). Region us-east-1. Project `jfzxlsaywztlytnobgej`.        | Real-time UI updates from Postgres are the killer feature; Storage colocates well; us-east-1 matches Vercel's default.                        |
-| 2026-05-16 | Next.js 15 (App Router) + React 19 + Tailwind + shadcn/ui. Light mode only.                        | Matches Diogo's familiarity, has best-in-class server-side rendering for Realtime-driven UI, light mode matches the developer-tool aesthetic. |
-| 2026-05-16 | Hybrid Kanban + funnel header.                                                                     | Discovery: pure Kanban hides funnel pressure; pure funnel hides individual brief state. Hybrid carries both.                                  |
-| 2026-05-16 | Per-creative side panel for review (image + prompt + thread + chat-with-Ekko + approve/reject).    | Single locus for everything an operator needs; cuts back-and-forth between tabs.                                                              |
-| 2026-05-16 | Drive mirror with naming enforcement.                                                              | Operator shares Drive URLs externally; the worker controls naming so links stay stable.                                                       |
-| 2026-05-16 | Browser push + email notifications (Resend).                                                       | Two channels for redundancy. Push for live presence, email for offline.                                                                       |
-| 2026-05-16 | Cron jobs on the worker. No cloud cron.                                                            | Single operator + always-on Mac means cron is a local scheduler problem, not a SaaS one.                                                      |
-| 2026-05-16 | RLS off for v1.                                                                                    | Single operator. RLS becomes the entry point for the multi-operator follow-up; not blocking it.                                               |
-| 2026-05-16 | LocalBrollStore primary; SupabaseBrollStore deferred.                                              | Local-first matches the b-roll pool's growth pattern (Diogo curates over time); Supabase migration is a flip later.                           |
-| 2026-05-16 | Claude Code as the agent runtime. Subprocess for batch, Agent SDK for chat.                        | Already authenticated on the Mac; supports both modes natively; skills layer is the right abstraction for two pipeline shapes.                |
-| 2026-05-16 | Conventional Commits + single-author workflow. No Co-Authored-By or AI attribution in commits/PRs. | Aesthetic preference; preserves a clean human-authored history for the operator.                                                              |
-| 2026-05-16 | `events` and `sync_log` excluded from Realtime publication.                                        | Noise. The UI doesn't need to react to every domain event; targeted queries serve the surfaces that care.                                     |
-| 2026-05-16 | `overrides` table as the operator-correction layer.                                                | Hand-edits without mutating pipeline rows; left-join at read time.                                                                            |
+| Date       | Decision                                                                                           | Rationale                                                                                                                                                                                                                                                                                                                         |
+| ---------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-16 | Two-pipeline v1 (image + video), parallel-vertical schema.                                         | Image alone was insufficient; video is core to VoxHorizon's output cadence. Parallel-vertical lets either side evolve independently.                                                                                                                                                                                              |
+| 2026-05-16 | Single operator (Diogo). No app-level auth.                                                        | Network boundary (Caddy + Cloudflare) + worker bearer is enough; building multi-user auth pre-product-market-fit is waste.                                                                                                                                                                                                        |
+| 2026-05-16 | Slack dropped from the marketing dept.                                                             | The Slack workflow was the bottleneck this build replaces. Keeping it would dilute the rebuild.                                                                                                                                                                                                                                   |
+| 2026-05-18 | Single-host VPS stack (web + worker as two containers fronted by Caddy on one Hostinger VPS).      | Lower latency (web→worker is a Docker-network hop, not public TLS), single ops surface, smaller attack surface (worker has no public port), no Vercel dependency. Supersedes the Mac+Tailscale-Funnel and Vercel paths. See Master Tracker [#72](../../issues/72) for the full topology-revision decision-log entry (2026-05-18). |
+| 2026-05-16 | Supabase (Postgres + Realtime + Storage). Region us-east-1. Project `jfzxlsaywztlytnobgej`.        | Real-time UI updates from Postgres are the killer feature; Storage colocates well; us-east-1 is geographically close to the VPS region.                                                                                                                                                                                           |
+| 2026-05-16 | Next.js 15 (App Router) + React 19 + Tailwind + shadcn/ui. Light mode only.                        | Matches Diogo's familiarity, has best-in-class server-side rendering for Realtime-driven UI, light mode matches the developer-tool aesthetic.                                                                                                                                                                                     |
+| 2026-05-16 | Hybrid Kanban + funnel header.                                                                     | Discovery: pure Kanban hides funnel pressure; pure funnel hides individual brief state. Hybrid carries both.                                                                                                                                                                                                                      |
+| 2026-05-16 | Per-creative side panel for review (image + prompt + thread + chat-with-Ekko + approve/reject).    | Single locus for everything an operator needs; cuts back-and-forth between tabs.                                                                                                                                                                                                                                                  |
+| 2026-05-16 | Drive mirror with naming enforcement.                                                              | Operator shares Drive URLs externally; the worker controls naming so links stay stable.                                                                                                                                                                                                                                           |
+| 2026-05-16 | Browser push + email notifications (Resend).                                                       | Two channels for redundancy. Push for live presence, email for offline.                                                                                                                                                                                                                                                           |
+| 2026-05-16 | Cron jobs on the worker. No cloud cron.                                                            | Single operator + always-on VPS container means cron is a local scheduler problem, not a SaaS one.                                                                                                                                                                                                                                |
+| 2026-05-16 | RLS off for v1.                                                                                    | Single operator. RLS becomes the entry point for the multi-operator follow-up; not blocking it.                                                                                                                                                                                                                                   |
+| 2026-05-16 | LocalBrollStore primary; SupabaseBrollStore deferred.                                              | Local-first matches the b-roll pool's growth pattern (Diogo curates over time); Supabase migration is a flip later.                                                                                                                                                                                                               |
+| 2026-05-16 | Claude Code as the agent runtime. Subprocess for batch, Agent SDK for chat.                        | Authenticated via `ANTHROPIC_API_KEY` in the worker container's env; supports both modes natively; skills layer is the right abstraction for two pipeline shapes.                                                                                                                                                                 |
+| 2026-05-16 | Conventional Commits + single-author workflow. No Co-Authored-By or AI attribution in commits/PRs. | Aesthetic preference; preserves a clean human-authored history for the operator.                                                                                                                                                                                                                                                  |
+| 2026-05-16 | `events` and `sync_log` excluded from Realtime publication.                                        | Noise. The UI doesn't need to react to every domain event; targeted queries serve the surfaces that care.                                                                                                                                                                                                                         |
+| 2026-05-16 | `overrides` table as the operator-correction layer.                                                | Hand-edits without mutating pipeline rows; left-join at read time.                                                                                                                                                                                                                                                                |
 
 ---
 
 ## 9. What's intentionally NOT in v1
 
 - Multi-tenant. `client_id` exists for analytical hygiene only.
-- Public API. The worker is private to Vercel + the tailnet.
+- Public worker surface. The worker is internal-only on the Docker network; only the dashboard is publicly addressable.
 - Automated Meta posting. Manual approval gate, explicit, retained intentionally.
-- VPN-less / cloud-hosted worker. Worker is local; that's the model.
+- Multi-host / multi-VPS deploy. v1 is one VPS, one stack. Scaling horizontally is post-v1.
+- Vercel hosting. The dashboard runs as a container on the VPS alongside the worker; Vercel is not in the v1 production path.
 - Slack reintegration of any kind.
 - ClickUp integration. The operator manages tasks outside the panel.
 - RLS policies. RLS is off; a future migration is the entry point.
 - Multi-language UI. English only.
 - Theme toggle. Light mode only.
 - Mobile-first responsive. Desktop-first; mobile responsive sweep lands in M5.
-- Public custom domain. Default `*.vercel.app` is fine for v1.
 - Web Application Firewall.
 - Cross-client portfolio analytics beyond per-client perf rollups.
 - Per-creative comments from non-operator parties.
