@@ -1,0 +1,166 @@
+name: deploy-stack
+
+# Build the web + worker images on every push to main that touches the
+# stack source, push to GHCR, then SSH-deploy to the VPS. Manual
+# `workflow_dispatch` is the bootstrap / hotfix path.
+#
+# Triggered on push to main when:
+#   - worker/** changes (source, Dockerfile, deps)
+#   - web/** or any Next.js app source changes
+#   - Caddyfile changes (routing affects the running services)
+#   - docker-compose.yml changes (service topology)
+#   - this workflow itself changes (so a workflow fix can self-deploy)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "worker/**"
+      - "web/**"
+      - "app/**"
+      - "components/**"
+      - "lib/**"
+      - "hooks/**"
+      - "middleware.ts"
+      - "next.config.ts"
+      - "package.json"
+      - "pnpm-lock.yaml"
+      - "Caddyfile"
+      - "docker-compose.yml"
+      - ".github/workflows/deploy-stack.yml"
+  workflow_dispatch:
+
+# One rollout at a time. Do NOT cancel a deploy mid-flight — that can
+# leave the VPS in a half-pulled state. New commits queue.
+concurrency:
+  group: deploy-stack
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------------------------
+  # Build the worker image and push to GHCR. We tag both `latest` and
+  # the commit SHA so rollback is a one-liner against the previous SHA.
+  # --------------------------------------------------------------------
+  build-and-push-worker:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        name: Compute image tag
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: worker
+          file: worker/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/voxhorizon-worker:latest
+            ghcr.io/${{ github.repository_owner }}/voxhorizon-worker:${{ github.sha }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+  # --------------------------------------------------------------------
+  # Build the web (Next.js) image and push to GHCR. NEXT_PUBLIC_* values
+  # are baked at build time, so they're passed as build-args from repo
+  # Secrets (NOT Variables — they live alongside VPS_SSH_KEY etc.).
+  # --------------------------------------------------------------------
+  build-and-push-web:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        name: Compute image tag
+        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: web/Dockerfile
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/voxhorizon-web:latest
+            ghcr.io/${{ github.repository_owner }}/voxhorizon-web:${{ github.sha }}
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+            NEXT_PUBLIC_VAPID_PUBLIC_KEY=${{ secrets.NEXT_PUBLIC_VAPID_PUBLIC_KEY }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+  # --------------------------------------------------------------------
+  # SSH into the VPS, pull the new images, roll the compose stack, and
+  # wait for BOTH service healthchecks to come back green before
+  # pruning. Pinned via VPS_SSH_KEY (deploy-only ed25519 — NOT Pedro's
+  # admin key).
+  # --------------------------------------------------------------------
+  deploy:
+    needs: [build-and-push-worker, build-and-push-web]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/voxhorizon
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            git fetch --quiet origin main
+            git reset --hard origin/main
+            docker compose pull
+            docker compose up -d --remove-orphans
+            # Wait for each service to report healthy before pruning the
+            # old images. Up to ~60s per service — matches healthcheck
+            # cadence (start_period 30s + a couple of interval ticks).
+            for svc in web worker; do
+              status=unhealthy
+              for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                cid=$(docker compose ps -q "$svc")
+                status=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unhealthy)
+                [ "$status" = "healthy" ] && break
+                sleep 5
+              done
+              if [ "$status" != "healthy" ]; then
+                echo "$svc unhealthy after rollout (status=$status)"
+                docker compose logs --tail=200 "$svc"
+                exit 1
+              fi
+            done
+            docker image prune -f
