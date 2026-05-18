@@ -1,10 +1,14 @@
 # VoxHorizon — VPS container stack.
 #
-# v1 wires only the FastAPI worker. Caddy fronts the worker for public
-# HTTPS and is added in VPS-3 (#160). The worker has no public port
-# binding here — only `expose: ["8000"]` so the future caddy service on
-# the same compose network can reach it. The host firewall keeps :8000
-# unreachable until Caddy lands.
+# Topology: Caddy → web → worker. Only Caddy has public ports (:80/:443);
+# web (Next.js, :3000) and worker (FastAPI, :8000) live on the internal
+# Docker network and are reached by Caddy via service DNS. Worker stays
+# `expose:`-only — no host port binding — so the host firewall cannot
+# accidentally surface it.
+#
+# Caddy fronts the dashboard over HTTPS (Let's Encrypt) and terminates TLS.
+# The web service proxies API calls to worker over the internal network;
+# Caddy itself only speaks to web.
 
 services:
   worker:
@@ -38,25 +42,58 @@ services:
       start_period: 30s
       retries: 3
 
-  # caddy: VPS-3 (#160)
-  #   Fronts the worker over HTTPS (Let's Encrypt), terminates TLS,
-  #   forwards Authorization headers through to the worker, and exposes
-  #   :80 + :443 publicly.
+  # web: VPS-8 (#229)
+  #   Next.js dashboard. Builds NEXT_PUBLIC_* env into the static bundle at
+  #   image-build time (they're inlined into client JS, so they must be
+  #   present as build args, not just runtime env). Runtime secrets come
+  #   from the shared /opt/voxhorizon/.env. No public port — Caddy reaches
+  #   it on the internal Docker network as `web:3000`.
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+        NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${NEXT_PUBLIC_VAPID_PUBLIC_KEY:-}
+    image: ghcr.io/pveloso01/voxhorizon-web:${WEB_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - /opt/voxhorizon/.env
+    expose:
+      - "3000"
+    depends_on:
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'curl -fsS http://localhost:3000/ || exit 1'
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+  # caddy: VPS-3 (#160), updated for VPS-8 (#229)
+  #   Fronts the dashboard (web) over HTTPS (Let's Encrypt), terminates
+  #   TLS, and exposes :80 + :443 publicly. Caddy now talks to `web`, not
+  #   `worker` — the worker is reached only through the web app's server
+  #   routes on the internal network.
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      worker:
+      web:
         condition: service_healthy
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp" # HTTP/3
     environment:
-      # Set by the VPS's /opt/voxhorizon/.env at deploy time. The worker
-      # process itself does not read this — Caddy substitutes it into the
+      # Set by the VPS's /opt/voxhorizon/.env at deploy time. The web
+      # process does not read this — Caddy substitutes it into the
       # Caddyfile site address at startup.
-      VOXHORIZON_WORKER_HOST: ${VOXHORIZON_WORKER_HOST:-worker.voxhorizon.example.com}
+      VOXHORIZON_DASHBOARD_HOST: ${VOXHORIZON_DASHBOARD_HOST:-dashboard.voxhorizon.example.com}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # ACME certs
