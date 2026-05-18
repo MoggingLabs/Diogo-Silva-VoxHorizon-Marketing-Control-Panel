@@ -45,10 +45,10 @@ Hermes auto-discovers any directory under the mount that contains a
 
 The helper talks to Supabase over PostgREST and requires:
 
-| Var                         | Source                                   |
-| --------------------------- | ---------------------------------------- |
-| `SUPABASE_URL`              | repo `.env`, already used by the worker. |
-| `SUPABASE_SERVICE_ROLE_KEY` | repo `.env`, already used by the worker. |
+| Var                   | Source                                   |
+| --------------------- | ---------------------------------------- |
+| `SUPABASE_URL`        | repo `.env`, already used by the worker. |
+| `SUPABASE_SECRET_KEY` | repo `.env`, already used by the worker. |
 
 Both come from the worker's existing `.env`; no new secrets are
 introduced. If either is unset the helper raises `RuntimeError` on

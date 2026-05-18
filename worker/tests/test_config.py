@@ -87,7 +87,7 @@ def test_settings_defaults_when_optional_envs_absent(
     monkeypatch.delenv("SUBMAGIC_API_KEY", raising=False)
     monkeypatch.delenv("META_ADS_API_KEY", raising=False)
     monkeypatch.delenv("SUPABASE_URL", raising=False)
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
     monkeypatch.delenv("BROLL_STORE_BACKEND", raising=False)
     from src.config import get_settings
 
@@ -98,5 +98,5 @@ def test_settings_defaults_when_optional_envs_absent(
     assert s.submagic_api_key is None
     assert s.meta_ads_api_key is None
     assert s.supabase_url is None
-    assert s.supabase_service_role_key is None
+    assert s.supabase_secret_key is None
     assert s.broll_store_backend == "local"

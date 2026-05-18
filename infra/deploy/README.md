@@ -103,7 +103,7 @@ The dashboard depends on three things living inside `hermes-agent-ekko`: a confi
 
    ```
    SUPABASE_URL=https://jfzxlsaywztlytnobgej.supabase.co
-   SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+   SUPABASE_SECRET_KEY=<service-role-key>
    DASHBOARD_WEBHOOK_URL=http://worker:8000/work/hermes/webhook
    DASHBOARD_WEBHOOK_TOKEN=<same value as /opt/voxhorizon/.env on our side>
    VOXHORIZON_APPROVAL_WORKER_URL=http://worker:8000/work/hermes/approval

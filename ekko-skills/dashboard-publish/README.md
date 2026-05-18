@@ -55,7 +55,7 @@ is just copying files and restarting. After this PR merges:
 
    ```
    SUPABASE_URL=https://<project-ref>.supabase.co
-   SUPABASE_SERVICE_ROLE_KEY=<service-role-jwt>
+   SUPABASE_SECRET_KEY=<service-role-jwt>
    ```
 
    Service-role key (not anon) — the helper writes rows that bypass RLS.

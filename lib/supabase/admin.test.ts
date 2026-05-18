@@ -9,7 +9,7 @@ vi.mock("@supabase/supabase-js", () => ({
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "http://supabase.test\n";
-  process.env.SUPABASE_SERVICE_ROLE_KEY = "  service-role ";
+  process.env.SUPABASE_SECRET_KEY = "  service-role ";
   createSupabaseClient.mockReset();
 });
 

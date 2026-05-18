@@ -40,7 +40,7 @@ import helper  # noqa: E402  (path-mutation pattern)
 def _env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Default env: both Supabase vars set. Individual tests override."""
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "test-service-role-key")
 
 
 class _FakeResponse:
@@ -355,11 +355,11 @@ def test_missing_supabase_url_raises(monkeypatch: pytest.MonkeyPatch) -> None:
         )
 
 
-def test_missing_service_role_key_raises(
+def test_missing_secret_key_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="SUPABASE_SERVICE_ROLE_KEY"):
+    monkeypatch.delenv("SUPABASE_SECRET_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="SUPABASE_SECRET_KEY"):
         helper.publish_message(
             thread_id="image:abc",
             role="assistant",

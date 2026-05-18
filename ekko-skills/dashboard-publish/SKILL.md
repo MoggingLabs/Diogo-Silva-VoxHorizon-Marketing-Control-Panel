@@ -66,7 +66,7 @@ the module is cheap (no environment access at import time).
 Set in `/opt/data/.env` (loaded by the Hermes container at start):
 
 - `SUPABASE_URL` — e.g. `https://<project-ref>.supabase.co`
-- `SUPABASE_SERVICE_ROLE_KEY` — service-role JWT (bypasses RLS for writes)
+- `SUPABASE_SECRET_KEY` — service-role JWT (bypasses RLS for writes)
 
 Both are read lazily on the first call. Missing/empty values raise
 `DashboardPublishError` immediately so misconfiguration is obvious.

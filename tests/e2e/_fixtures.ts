@@ -32,19 +32,19 @@ import {
  *
  * Env vars:
  *  - `NEXT_PUBLIC_SUPABASE_URL`     — required.
- *  - `SUPABASE_SERVICE_ROLE_KEY`    — required. Read from `.env.local` (Next.js
+ *  - `SUPABASE_SECRET_KEY`    — required. Read from `.env.local` (Next.js
  *    autoloads `.env.local` for the dev server; the test runner reads it from
  *    `process.env` after Playwright spawns the dev server, so callers may need
  *    to source these into the runner's env explicitly).
  *  - `PLAYWRIGHT_BASE_URL`          — optional, defaults to localhost:3000 (see
  *    `playwright.config.ts`).
  *
- * If `SUPABASE_SERVICE_ROLE_KEY` is unset the fixture throws at the first
+ * If `SUPABASE_SECRET_KEY` is unset the fixture throws at the first
  * `test.use(...)` call so we fail fast rather than silently no-op.
  */
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const serviceRoleKey = process.env.SUPABASE_SECRET_KEY;
 
 /**
  * Lazily-built admin client. Throws a friendly error if env is missing so
@@ -59,7 +59,7 @@ function getAdminClient(): SupabaseClient<Database> {
   }
   if (!serviceRoleKey) {
     throw new Error(
-      "SUPABASE_SERVICE_ROLE_KEY is required for e2e tests — set it in .env.local before running pnpm test:e2e.",
+      "SUPABASE_SECRET_KEY is required for e2e tests — set it in .env.local before running pnpm test:e2e.",
     );
   }
   return createClient<Database>(supabaseUrl, serviceRoleKey, {
@@ -83,7 +83,7 @@ export const TEST_CLIENT_NAME = "E2E Test Client";
  * `status='done'` after the auto-advance trigger fired.
  *
  * Same env requirements + throw behaviour as the local `getAdminClient`
- * — fails fast with a friendly error if `SUPABASE_SERVICE_ROLE_KEY` is
+ * — fails fast with a friendly error if `SUPABASE_SECRET_KEY` is
  * unset.
  */
 export function getTestAdminClient(): SupabaseClient<Database> {

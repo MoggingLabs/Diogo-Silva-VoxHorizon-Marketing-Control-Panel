@@ -81,35 +81,35 @@ Fill in values from the vault. Key references:
 
 ### `.env.local` (Next.js)
 
-| Var                             | Source                                      | Notes                                                |
-| ------------------------------- | ------------------------------------------- | ---------------------------------------------------- |
-| `NEXT_PUBLIC_SUPABASE_URL`      | Supabase Dashboard → Project Settings → API | `https://jfzxlsaywztlytnobgej.supabase.co`           |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Same dashboard                              | Public; safe in browser                              |
-| `SUPABASE_SERVICE_ROLE_KEY`     | Same dashboard, "service_role"              | **SECRET** — server-only, bypasses RLS               |
-| `WORKER_URL`                    | Tailscale Funnel URL for the Mac            | e.g. `https://voxhorizon-worker.<tailnet>.ts.net`    |
-| `WORKER_SHARED_SECRET`          | Generated in step 6                         | Match `worker/.env`                                  |
-| `TAILSCALE_ONLY`                | Off by default                              | Set to `1` (log) or `strict` (403) in production     |
-| `TAILSCALE_CIDRS`               | Default `100.64.0.0/10`                     | Override only if your tailnet uses a different range |
-| `RESEND_API_KEY`                | Resend dashboard                            | Lands in M4                                          |
-| `NEXT_PUBLIC_VAPID_PUBLIC_KEY`  | Generated in M0-8                           | Public, ships to browser                             |
-| `VAPID_PRIVATE_KEY`             | Generated in M0-8                           | **SECRET** — server-only                             |
+| Var                             | Source                                                                     | Notes                                                |
+| ------------------------------- | -------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `NEXT_PUBLIC_SUPABASE_URL`      | Supabase Dashboard → Project Settings → API                                | `https://jfzxlsaywztlytnobgej.supabase.co`           |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Same dashboard                                                             | Public; safe in browser                              |
+| `SUPABASE_SECRET_KEY`           | Same dashboard, "Publishable and Secret API Keys" → Secret (`sb_secret_*`) | **SECRET** — server-only, bypasses RLS               |
+| `WORKER_URL`                    | Tailscale Funnel URL for the Mac                                           | e.g. `https://voxhorizon-worker.<tailnet>.ts.net`    |
+| `WORKER_SHARED_SECRET`          | Generated in step 6                                                        | Match `worker/.env`                                  |
+| `TAILSCALE_ONLY`                | Off by default                                                             | Set to `1` (log) or `strict` (403) in production     |
+| `TAILSCALE_CIDRS`               | Default `100.64.0.0/10`                                                    | Override only if your tailnet uses a different range |
+| `RESEND_API_KEY`                | Resend dashboard                                                           | Lands in M4                                          |
+| `NEXT_PUBLIC_VAPID_PUBLIC_KEY`  | Generated in M0-8                                                          | Public, ships to browser                             |
+| `VAPID_PRIVATE_KEY`             | Generated in M0-8                                                          | **SECRET** — server-only                             |
 
 ### `worker/.env` (FastAPI)
 
-| Var                         | Source                                        | Notes                                |
-| --------------------------- | --------------------------------------------- | ------------------------------------ |
-| `WORKER_SHARED_SECRET`      | Match `.env.local`                            | 64-byte hex                          |
-| `WORKER_PUBLIC_BASE_URL`    | Funnel URL or `http://localhost:8000` for dev |                                      |
-| `WORKER_CORS_ORIGIN`        | Next.js origin                                | `http://localhost:3000` for dev      |
-| `SUPABASE_URL`              | Same as `.env.local`                          |                                      |
-| `SUPABASE_SERVICE_ROLE_KEY` | Same as `.env.local`                          | Bypasses RLS; worker uses for writes |
-| `KIE_AI_API_KEY`            | Hermes config                                 | Image generation                     |
-| `ELEVENLABS_API_KEY`        | Hermes config                                 | Voiceover                            |
-| `SUBMAGIC_API_KEY`          | Submagic dashboard                            | Captions                             |
-| `META_ADS_API_KEY`          | Hermes config                                 | Performance pulls (lands in M4)      |
-| `BROLL_STORE_BACKEND`       | `local` (default)                             | Switch to `supabase` later           |
-| `BROLL_LOCAL_ROOT`          | `~/voxhorizon-worker/storage/broll-pool`      | Local b-roll pool                    |
-| `TAILSCALE_HOSTNAME`        | `voxhorizon-worker`                           | Used in `/work/health` payload       |
+| Var                      | Source                                        | Notes                                |
+| ------------------------ | --------------------------------------------- | ------------------------------------ |
+| `WORKER_SHARED_SECRET`   | Match `.env.local`                            | 64-byte hex                          |
+| `WORKER_PUBLIC_BASE_URL` | Funnel URL or `http://localhost:8000` for dev |                                      |
+| `WORKER_CORS_ORIGIN`     | Next.js origin                                | `http://localhost:3000` for dev      |
+| `SUPABASE_URL`           | Same as `.env.local`                          |                                      |
+| `SUPABASE_SECRET_KEY`    | Same as `.env.local`                          | Bypasses RLS; worker uses for writes |
+| `KIE_AI_API_KEY`         | Hermes config                                 | Image generation                     |
+| `ELEVENLABS_API_KEY`     | Hermes config                                 | Voiceover                            |
+| `SUBMAGIC_API_KEY`       | Submagic dashboard                            | Captions                             |
+| `META_ADS_API_KEY`       | Hermes config                                 | Performance pulls (lands in M4)      |
+| `BROLL_STORE_BACKEND`    | `local` (default)                             | Switch to `supabase` later           |
+| `BROLL_LOCAL_ROOT`       | `~/voxhorizon-worker/storage/broll-pool`      | Local b-roll pool                    |
+| `TAILSCALE_HOSTNAME`     | `voxhorizon-worker`                           | Used in `/work/health` payload       |
 
 Both halves trim whitespace via `cleanEnv()` (Next.js) and a pydantic validator (worker), so stray `\n` from dashboard copy-paste won't blow up at runtime.
 

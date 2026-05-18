@@ -47,7 +47,7 @@ discoverable by Hermes after a container restart.
 
    ```
    SUPABASE_URL=https://<project-ref>.supabase.co
-   SUPABASE_SERVICE_ROLE_KEY=<service-role JWT>
+   SUPABASE_SECRET_KEY=<service-role JWT>
    ```
 
 5. Restart Hermes so it picks up the new skill manifest:

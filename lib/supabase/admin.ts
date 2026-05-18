@@ -15,7 +15,7 @@ import type { Database } from "@/lib/supabase/types.gen";
 export function createAdminClient() {
   return createSupabaseClient<Database>(
     cleanEnv("NEXT_PUBLIC_SUPABASE_URL"),
-    cleanEnv("SUPABASE_SERVICE_ROLE_KEY"),
+    cleanEnv("SUPABASE_SECRET_KEY"),
     {
       auth: {
         autoRefreshToken: false,

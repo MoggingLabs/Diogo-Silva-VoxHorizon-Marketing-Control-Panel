@@ -32,7 +32,7 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BROLL_LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("TAILSCALE_HOSTNAME", "voxhorizon-worker-test")
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
-    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "test-service-role-key")
 
     from src.config import get_settings
 

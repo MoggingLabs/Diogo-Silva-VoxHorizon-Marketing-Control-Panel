@@ -51,7 +51,7 @@ Prereqs:
   - `NEXT_PUBLIC_SUPABASE_URL`
   - `NEXT_PUBLIC_SUPABASE_ANON_KEY` (used by the browser flows the tests
     drive)
-  - `SUPABASE_SERVICE_ROLE_KEY` (consumed by `_fixtures.ts`)
+  - `SUPABASE_SECRET_KEY` (consumed by `_fixtures.ts`)
 
 Then:
 
@@ -69,7 +69,7 @@ different origin.
 - The runner picks up env vars from the shell, not `.env.local` directly.
   Either export the vars before running, source `.env.local`
   (`set -a && . .env.local && set +a`), or run via `dotenv-cli`.
-- The fixture throws a friendly error if `SUPABASE_SERVICE_ROLE_KEY` is
+- The fixture throws a friendly error if `SUPABASE_SECRET_KEY` is
   missing so it fails fast rather than spinning on a non-deterministic
   network error.
 
