@@ -1,4 +1,14 @@
 /**
+ * DORMANT SINCE 2026-05-18 — Slack pivot.
+ *
+ * The high-urgency approval notification path moved from Resend email to
+ * Slack chat.postMessage. The active fan-out lives in
+ * `worker/src/services/approval_notifications.py` (`_post_slack`). This
+ * template + its route (`app/api/internal/approval-email/route.ts`) are
+ * preserved in the tree as dormant code so a future operator decision to
+ * revive email-based alerts is a one-config-flag flip rather than a
+ * full re-implementation.
+ *
  * High-urgency approval email template (HI-17).
  *
  * Rendered by `app/api/internal/approval-email/route.ts` and shipped via
