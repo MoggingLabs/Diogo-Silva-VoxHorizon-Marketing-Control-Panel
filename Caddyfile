@@ -1,7 +1,7 @@
-{$VOXHORIZON_WORKER_HOST:worker.voxhorizon.example.com} {
+{$VOXHORIZON_DASHBOARD_HOST:dashboard.voxhorizon.example.com} {
 	encode zstd gzip
 
-	reverse_proxy worker:8000 {
+	reverse_proxy web:3000 {
 		header_up Host {host}
 		header_up X-Real-IP {remote_host}
 		header_up X-Forwarded-For {remote_host}
