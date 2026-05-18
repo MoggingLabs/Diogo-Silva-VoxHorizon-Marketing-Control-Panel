@@ -72,12 +72,14 @@ from ..services.pipeline_runner import (
     EVENT_TASK_ERROR,
     EVENT_TASK_QUEUED,
     EVENT_TASK_RUNNING,
+    PipelineCancelled,
     emit_cost,
     emit_pipeline_event,
     fetch_pipeline,
     generation_state,
     ideation_already_ran,
     picks_from_pipeline,
+    pipeline_is_cancelled,
 )
 from ..services.queue import get_queue
 from ..services.storage import BUCKET, build_creative_path
@@ -1105,6 +1107,56 @@ def _fetch_creative(creative_id: str) -> dict[str, Any] | None:
     return resp.data if isinstance(resp.data, dict) else None
 
 
+def _abort_if_cancelled(
+    *,
+    pipeline_id: str,
+    kind: str,
+    substage: str | None = None,
+    creative_id: str | None = None,
+    ratio: str | None = None,
+) -> None:
+    """Poll ``pipelines.status`` and short-circuit when the operator cancelled.
+
+    Called immediately before each substage entry inside the two generation
+    producers. When the pipeline is cancelled we emit ONE ``task_error``
+    row tagged ``reason='cancelled_by_operator'`` so the timeline shows
+    where the worker stopped — the cancel route itself already wrote the
+    ``stage_advanced→cancelled`` row, so we don't duplicate that.
+
+    Raises :class:`PipelineCancelled` which the calling BackgroundTask
+    catches at its top level (no other exception handler in the substage
+    chain catches it — bare ``except Exception`` blocks in the substage
+    loop would otherwise mistake the cancel for a substage failure and
+    emit a misleading per-substage error).
+    """
+    if not pipeline_is_cancelled(pipeline_id):
+        return
+    payload: dict[str, Any] = {
+        "kind": kind,
+        "reason": "cancelled_by_operator",
+    }
+    if substage is not None:
+        payload["substage"] = substage
+    if creative_id is not None:
+        payload["creative_id"] = creative_id
+    if ratio is not None:
+        payload["ratio"] = ratio
+    emit_pipeline_event(
+        pipeline_id=pipeline_id,
+        kind=EVENT_TASK_ERROR,
+        stage="generation",
+        payload=payload,
+    )
+    log.info(
+        "pipeline_generation_cancelled",
+        pipeline_id=pipeline_id,
+        kind=kind,
+        substage=substage,
+        creative_id=creative_id,
+    )
+    raise PipelineCancelled()
+
+
 async def _produce_generation_image_picks(
     *,
     pipeline_id: str,
@@ -1117,7 +1169,18 @@ async def _produce_generation_image_picks(
     ratio. The two ratios are serialized via the per-brief queue
     because the image SOP forbids parallel kie.ai per brief; renders
     for *different* briefs can interleave.
+
+    Cancellation: between every ratio render we poll ``pipelines.status``
+    via :func:`pipeline_is_cancelled` and bail out cleanly when the
+    operator cancelled the pipeline from the dashboard. The in-flight
+    Kie call (if any) is not interrupted — we can't kill an external
+    HTTP call from outside — but no further Kie work is queued.
     """
+    try:
+        _abort_if_cancelled(pipeline_id=pipeline_id, kind="image")
+    except PipelineCancelled:
+        return
+
     try:
         kie_client = KieClient()
     except RuntimeError as e:
@@ -1135,6 +1198,30 @@ async def _produce_generation_image_picks(
     sb = get_supabase_admin()
     queue = get_queue()
 
+    try:
+        await _run_generation_image_substages(
+            kie_client=kie_client,
+            sb=sb,
+            queue=queue,
+            pipeline_id=pipeline_id,
+            creative_ids=creative_ids,
+        )
+    except PipelineCancelled:
+        return
+
+
+async def _run_generation_image_substages(
+    *,
+    kie_client: KieClient,
+    sb: Any,
+    queue: Any,
+    pipeline_id: str,
+    creative_ids: list[str],
+) -> None:
+    """Inner loop for image generation, factored out so the
+    :class:`PipelineCancelled` short-circuit can unwind the whole nested
+    structure (per-creative + per-ratio) with one ``try`` at the caller.
+    """
     for creative_id in creative_ids:
         parent = _fetch_creative(creative_id)
         if not parent:
@@ -1159,6 +1246,12 @@ async def _produce_generation_image_picks(
 
         async with queue.acquire(brief_id):
             for ratio in ("1x1", "9x16"):
+                _abort_if_cancelled(
+                    pipeline_id=pipeline_id,
+                    kind="image",
+                    creative_id=creative_id,
+                    ratio=ratio,
+                )
                 emit_pipeline_event(
                     pipeline_id=pipeline_id,
                     kind=EVENT_TASK_QUEUED,
@@ -1311,18 +1404,26 @@ async def _produce_generation_video_pick(
     """Run the substage chain for one picked video concept.
 
     For each substage:
-      1. Emit ``task_queued`` then ``task_running``.
-      2. Call the underlying worker route's helper (delegated to the
+      1. Poll ``pipelines.status`` — bail out cleanly on cancel.
+      2. Emit ``task_queued`` then ``task_running``.
+      3. Call the underlying worker route's helper (delegated to the
          existing video route handlers so we don't re-implement the
          ElevenLabs / yt-dlp / Hyperframes / Submagic plumbing).
-      3. Emit ``task_done`` with the resulting path / creative_id, OR
+      4. Emit ``task_done`` with the resulting path / creative_id, OR
          ``task_error`` if the substage failed.
-      4. Emit ``cost_recorded`` after each paid call.
+      5. Emit ``cost_recorded`` after each paid call.
 
     A substage failure within one concept short-circuits the rest of
     that concept's chain (you can't compose without a voiceover) but
     doesn't affect peer concepts — each peer runs in its own
     background task.
+
+    Cancellation: the cancel poll runs BEFORE each substage's
+    ``task_queued`` emit, so a cancelled pipeline mid-chain (e.g. after
+    voiceover but before compose) skips the rest with one
+    ``task_error(reason='cancelled_by_operator')`` event. The in-flight
+    substage (if any) is not killed — we can't interrupt an external
+    HTTP call from outside the worker — but no further substages run.
 
     For the v1 wave we delegate the actual heavy lifting to the
     existing /work/video/* endpoints via direct function calls rather
@@ -1330,6 +1431,13 @@ async def _produce_generation_video_pick(
     HTTPException on failure, and write to the same tables we want, so
     catching their exceptions is sufficient error handling here.
     """
+    try:
+        _abort_if_cancelled(
+            pipeline_id=pipeline_id, kind="video", creative_id=creative_id
+        )
+    except PipelineCancelled:
+        return
+
     creative = _fetch_video_creative(creative_id)
     if not creative:
         emit_pipeline_event(
@@ -1347,7 +1455,39 @@ async def _produce_generation_video_pick(
     # Lazy import to avoid a circular dep at module load.
     from ..routes import video as video_route  # noqa: PLC0415
 
+    try:
+        await _run_generation_video_substages(
+            video_route=video_route,
+            pipeline_id=pipeline_id,
+            creative_id=creative_id,
+            creative=creative,
+        )
+    except PipelineCancelled:
+        return
+
+
+async def _run_generation_video_substages(
+    *,
+    video_route: Any,
+    pipeline_id: str,
+    creative_id: str,
+    creative: dict[str, Any],
+) -> None:
+    """Inner per-substage loop for one video concept.
+
+    Factored out of :func:`_produce_generation_video_pick` so the
+    cancellation short-circuit unwinds the whole loop with one
+    ``except PipelineCancelled`` at the caller — without the bare
+    ``except Exception`` per-substage handler accidentally swallowing
+    the cancel signal.
+    """
     for substage in _VIDEO_SUBSTAGES:
+        _abort_if_cancelled(
+            pipeline_id=pipeline_id,
+            kind="video",
+            substage=substage,
+            creative_id=creative_id,
+        )
         emit_pipeline_event(
             pipeline_id=pipeline_id,
             kind=EVENT_TASK_QUEUED,
