@@ -55,6 +55,19 @@ services:
     # GID (`getent group docker`).
     group_add:
       - "${DOCKER_GID:-988}"
+    # Multi-network: the worker has to be reachable from the Hermes
+    # container (which runs in its own Hostinger-managed compose stack,
+    # network `hermes-agent-ekko_default`). The Hermes-side plugin
+    # (voxhorizon-approvals) POSTs to http://worker:8000 — that
+    # hostname has to resolve from inside ekko's network. We attach the
+    # worker to the external Hermes network with `worker` as a network
+    # alias, leaving the dashboard's web ↔ worker traffic on the
+    # default voxhorizon network unchanged.
+    networks:
+      default: {}
+      hermes-agent-ekko_default:
+        aliases:
+          - worker
     healthcheck:
       test:
         - CMD-SHELL
@@ -137,3 +150,15 @@ volumes:
     name: voxhorizon-caddy-config
   caddy-logs:
     name: voxhorizon-caddy-logs
+
+networks:
+  # Implicit default — keeps web, caddy, worker on a private bridge.
+  default:
+    name: voxhorizon_default
+  # Hostinger's Hermes-Ekko compose stack owns this network. We attach
+  # the worker as an external participant (with alias `worker`) so the
+  # in-container voxhorizon-approvals plugin can POST to the long-poll
+  # endpoint by service-name. Marked external so compose does not try
+  # to manage its lifecycle.
+  hermes-agent-ekko_default:
+    external: true
