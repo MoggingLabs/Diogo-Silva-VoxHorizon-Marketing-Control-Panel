@@ -18,7 +18,6 @@ from .routes import (
     pipeline,
     ping,
 )
-from .services.queue import get_queue
 
 
 def _configure_logging() -> None:
@@ -72,10 +71,9 @@ def create_app() -> FastAPI:
     # routes/ping.py and infra/monitoring/README.md (VPS-6).
     app.include_router(ping.router, tags=["ping"])
 
-    # === wave 10 pipeline routes ===
-    # /work/pipeline/config-draft streams Ekko's brief-strategist
-    # interview for the Configuration stage (PF-B). Future waves add
-    # /work/pipeline/ideation and /work/pipeline/generation.
+    # Empty stub router kept while HI-7 finishes repointing Next.js
+    # from /work/pipeline/* onto /work/hermes/*. The router carries no
+    # endpoints so a stale dashboard call lands as a clean 404.
     app.include_router(pipeline.router, tags=["pipeline"])
 
     # === wave 18 hermes-bridge routes ===
@@ -88,10 +86,6 @@ def create_app() -> FastAPI:
     app.include_router(hermes_chat.router, tags=["hermes-chat"])
     app.include_router(hermes_kanban.router, tags=["hermes-kanban"])
     app.include_router(hermes_webhook.router, tags=["hermes-webhook"])
-
-    # Eagerly construct the per-brief queue singleton so the first
-    # `/work/creative/*` request doesn't race on lazy init.
-    get_queue()
 
     structlog.get_logger(__name__).info(
         "worker_started",

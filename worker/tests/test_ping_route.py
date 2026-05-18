@@ -33,13 +33,10 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("TAILSCALE_HOSTNAME", "voxhorizon-worker-test")
 
     from src.config import get_settings
-    from src.services.queue import reset_queue
 
     get_settings.cache_clear()
-    reset_queue()
     yield
     get_settings.cache_clear()
-    reset_queue()
 
 
 @pytest.fixture
