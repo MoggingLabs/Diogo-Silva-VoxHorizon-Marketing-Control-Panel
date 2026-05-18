@@ -99,10 +99,11 @@ COPY skills ./skills
 COPY scripts ./scripts
 COPY pyproject.toml ./pyproject.toml
 
-# Create non-root user. The Playwright base ships its own `pwuser`
-# (uid 1000) — we use a fresh `app` uid to keep the boundary explicit.
-RUN groupadd --system --gid 1001 app \
-    && useradd --system --uid 1001 --gid app --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
+# Create non-root user. The Playwright Noble base reserves uid 1000
+# (pwuser) and now also 1001 (ubuntu) — pick 10001 to stay clear of any
+# default-user slots the upstream image may grow into.
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --create-home --home-dir /home/app --shell /usr/sbin/nologin app \
     && mkdir -p /app/storage \
     && chown -R app:app /app /opt/venv /home/app
 
