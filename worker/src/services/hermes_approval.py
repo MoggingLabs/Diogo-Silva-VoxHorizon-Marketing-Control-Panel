@@ -229,6 +229,32 @@ def _upsert_pending(
     )
 
 
+async def _notify_safely(row: dict[str, Any]) -> None:
+    """Wrapper around :func:`approval_notifications.fan_out` that never raises.
+
+    The long-poll schedules this via :func:`asyncio.create_task`; if it
+    ever raised, asyncio would log "Task exception was never retrieved"
+    and the operator would lose the notification with no visible signal.
+    Catching here keeps the log narrative inside our structlog stream and
+    means a future change to the fan-out helper can't accidentally break
+    the long-poll.
+    """
+    try:
+        # Lazy import — keeps the module importable in tests that don't
+        # touch notifications, and avoids a circular import between this
+        # module and ``approval_notifications`` (which in turn imports the
+        # push-delivery service).
+        from . import approval_notifications
+
+        await approval_notifications.fan_out(row)
+    except Exception as exc:  # noqa: BLE001 — best-effort fire-and-forget
+        log.warning(
+            "approval_notifications_failed",
+            approval_id=row.get("id"),
+            error=str(exc),
+        )
+
+
 def _mark_expired(supabase: Any, approval_id: str) -> None:
     """Flip ``pending`` → ``expired``. No-op when the row is decided/cancelled.
 
@@ -347,6 +373,22 @@ async def request_approval(
                 error=str(exc),
             )
             raise ApprovalError(f"approvals upsert failed: {exc}") from exc
+
+        # HI-17: fire notifications fan-out as a background task. Only for
+        # newly-inserted rows (skip on pending-resume retry, otherwise the
+        # operator gets a duplicate push every time the plugin reconnects
+        # to its long-poll). Fire-and-forget — the long-poll cannot wait on
+        # push delivery / Resend without blowing past the 500ms SLO.
+        new_row = {
+            "id": approval_id,
+            "ekko_session_id": ekko_session_id,
+            "ekko_tool_call_id": ekko_tool_call_id,
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            "risk_class": risk_class,
+            "context": context or {},
+        }
+        asyncio.create_task(_notify_safely(new_row))
 
     log.info(
         "hermes_approval_waiting",
@@ -503,3 +545,8 @@ __all__ = [
     "get_approval_token",
     "request_approval",
 ]
+
+
+# Re-export the notification fire-and-forget wrapper so tests can patch it
+# at the module boundary without poking private internals.
+notify_safely = _notify_safely

@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     # Observability
     tailscale_hostname: str = "voxhorizon-worker"
 
+    # Internal Next.js API (HI-17): the worker calls /api/internal/approval-email
+    # to render + ship Resend emails for high-urgency approvals. Both values
+    # are optional — when either is missing the fan-out helper logs and
+    # gracefully skips the email step (push still fires).
+    internal_api_base_url: str | None = None
+    internal_api_token: str | None = None
+
     @field_validator("*", mode="before")
     @classmethod
     def _strip_strings(cls, v: object) -> object:

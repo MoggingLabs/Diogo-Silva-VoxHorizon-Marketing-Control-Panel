@@ -737,3 +737,159 @@ def test_now_utc_returns_timezone_aware() -> None:
     """The clock helper always returns an aware datetime."""
     ts = service._now_utc()
     assert ts.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# HI-17 — fan-out fire-and-forget integration
+# ---------------------------------------------------------------------------
+
+
+def test_request_approval_schedules_notify_safely(
+    fake_sb: _FakeSupabase,
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When a fresh row is inserted, _notify_safely runs as a background task.
+
+    We replace the helper with a recorder, then drive the row to ``decided``
+    so the long-poll exits. Then we await the recorder's future to confirm
+    the task fired with the expected row payload.
+    """
+    captured: dict[str, Any] = {}
+    completed = asyncio.Event()
+
+    async def _fake_notify(row: dict[str, Any]) -> None:
+        captured["row"] = row
+        completed.set()
+
+    monkeypatch.setattr(service, "_notify_safely", _fake_notify)
+
+    def _driver(sb: _FakeSupabase) -> None:
+        row = sb.rows.get("ap-1")
+        if row and row["status"] == "pending":
+            row["status"] = "decided"
+            row["decision"] = "approved"
+
+    fake_sb.on_call = _driver
+
+    async def _run() -> service.ApprovalDecision:
+        result = await service.request_approval(**_kwargs(), timeout_s=10)
+        # The background task should already have run; wait for the event
+        # with a short timeout in case the scheduler is slow on this host.
+        await asyncio.wait_for(completed.wait(), timeout=1.0)
+        return result
+
+    result = asyncio.run(_run())
+    assert result.decision == "approved"
+    assert captured["row"]["id"] == "ap-1"
+    assert captured["row"]["tool_name"] == "BashTool"
+    assert captured["row"]["risk_class"] == "fs"
+
+
+def test_request_approval_skips_notify_on_pending_resume(
+    fake_sb: _FakeSupabase,
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the row is already pending (plugin retry), no new notification fires.
+
+    Otherwise a flaky plugin re-attaching to its long-poll would generate a
+    duplicate push for the operator on every reconnect.
+    """
+    fake_sb.rows["ap-1"] = {
+        "id": "ap-1",
+        "status": "pending",
+        "decision": None,
+        "decision_notes": None,
+    }
+    seen: dict[str, int] = {"calls": 0}
+
+    async def _fake_notify(row: dict[str, Any]) -> None:
+        seen["calls"] += 1
+
+    monkeypatch.setattr(service, "_notify_safely", _fake_notify)
+
+    def _driver(sb: _FakeSupabase) -> None:
+        row = sb.rows.get("ap-1")
+        if row and row["status"] == "pending":
+            row["status"] = "decided"
+            row["decision"] = "approved"
+
+    fake_sb.on_call = _driver
+
+    asyncio.run(service.request_approval(**_kwargs(), timeout_s=10))
+    # No notification on resume of an already-pending row.
+    assert seen["calls"] == 0
+
+
+def test_notify_safely_swallows_fan_out_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_notify_safely wraps fan_out so a fan-out exception never propagates.
+
+    Long-poll callers schedule us via asyncio.create_task; if we raised,
+    asyncio logs "Task exception was never retrieved" and the operator
+    silently loses the notification — we'd rather log explicitly.
+    """
+    from src.services import approval_notifications
+
+    async def _exploding_fan_out(_row: dict[str, Any]) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(approval_notifications, "fan_out", _exploding_fan_out)
+
+    async def _run() -> None:
+        # Must not raise.
+        await service._notify_safely({"id": "ap-1"})
+
+    asyncio.run(_run())
+
+
+def test_notify_safely_calls_fan_out_with_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Happy path: the helper forwards the row dict verbatim."""
+    from src.services import approval_notifications
+
+    captured: dict[str, Any] = {}
+
+    async def _capture(row: dict[str, Any]) -> None:
+        captured["row"] = row
+
+    monkeypatch.setattr(approval_notifications, "fan_out", _capture)
+
+    async def _run() -> None:
+        await service._notify_safely({"id": "ap-1", "tool_name": "x"})
+
+    asyncio.run(_run())
+    assert captured["row"]["id"] == "ap-1"
+    assert captured["row"]["tool_name"] == "x"
+
+
+def test_request_approval_fan_out_failure_does_not_affect_decision(
+    fake_sb: _FakeSupabase,
+    fast_poll: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fan-out exception MUST NOT raise from request_approval.
+
+    The whole point of the fire-and-forget wrapper is to keep the long-poll
+    decoupled from notification reliability.
+    """
+
+    async def _explode(_row: dict[str, Any]) -> None:
+        raise RuntimeError("notif blew up")
+
+    monkeypatch.setattr(service, "_notify_safely", _explode)
+
+    def _driver(sb: _FakeSupabase) -> None:
+        row = sb.rows.get("ap-1")
+        if row and row["status"] == "pending":
+            row["status"] = "decided"
+            row["decision"] = "approved"
+
+    fake_sb.on_call = _driver
+
+    # No raise — the long-poll completes cleanly.
+    result = asyncio.run(service.request_approval(**_kwargs(), timeout_s=10))
+    assert result.decision == "approved"
