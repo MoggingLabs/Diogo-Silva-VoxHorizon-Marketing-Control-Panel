@@ -302,6 +302,71 @@ def fetch_pipeline(pipeline_id: str) -> dict[str, Any] | None:
     return None
 
 
+# ---------------------------------------------------------------------------
+# Cancellation: worker-side abort plumbing for the dashboard cancel button.
+# ---------------------------------------------------------------------------
+#
+# Wave 13 (PF-G-1) shipped ``POST /api/pipelines/[id]/cancel`` which flips
+# ``pipelines.status`` to ``'cancelled'`` in Supabase. The worker, however,
+# can be mid-substage when the operator hits cancel — and without a signal
+# it keeps burning paid API calls (Kie, ElevenLabs, Submagic) and emitting
+# more ``pipeline_events`` rows for an abandoned pipeline.
+#
+# The fix here is intentionally simple: poll ``pipelines.status`` from the
+# worker between substages. The dashboard cancel route is the source of
+# truth, the worker doesn't need its own abort store, and the per-substage
+# overhead (~50-150ms per query) is negligible relative to a Kie render
+# (~60s) or a Submagic caption pass (~30s).
+#
+# A Realtime subscription would be marginally faster but adds a moving
+# part (extra connection, retry logic, ordering guarantees) for what is
+# already a low-frequency event. We can revisit if poll latency ever
+# becomes a real cost driver.
+
+
+class PipelineCancelled(Exception):
+    """Raised inside a substage chain when the pipeline was cancelled mid-flight.
+
+    The producer coroutine catches this at the top of each ``BackgroundTask``
+    so the rest of the substages are skipped without surfacing as a generic
+    exception. The cancel route has already flipped ``pipelines.status`` to
+    ``'cancelled'`` and emitted a ``stage_advanced→cancelled`` event; the
+    worker just emits one ``task_error(reason='cancelled_by_operator')``
+    row to mark where the run was abandoned in the timeline.
+    """
+
+
+def pipeline_is_cancelled(pipeline_id: str) -> bool:
+    """Return True iff ``pipelines.status`` is currently ``'cancelled'``.
+
+    Safe to call between substages — one indexed primary-key lookup per
+    invocation. Failures (Supabase down, row missing) return ``False`` so
+    a transient read error never aborts a running pipeline; the
+    authoritative side is the next emit_pipeline_event call which will
+    fail loudly if Supabase is truly unreachable.
+    """
+    sb = get_supabase_admin()
+    try:
+        resp = (
+            sb.table("pipelines")
+            .select("status")
+            .eq("id", pipeline_id)
+            .maybe_single()
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "pipeline_status_read_failed",
+            pipeline_id=pipeline_id,
+            error=str(e),
+        )
+        return False
+    row = resp.data
+    if not isinstance(row, dict):
+        return False
+    return row.get("status") == "cancelled"
+
+
 def picks_from_pipeline(pipeline: dict[str, Any]) -> tuple[list[str], list[str]]:
     """Read ``pipeline.picks`` into (image_ids, video_ids) tuples.
 

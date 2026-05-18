@@ -584,3 +584,58 @@ def test_emit_cost_omits_optional_fields_when_not_supplied(
     assert "extra" not in payload
     # Default stage is generation.
     assert row["stage"] == "generation"
+
+
+# ---------------------------------------------------------------------------
+# pipeline_is_cancelled — worker-side abort poll for the cancel flow
+# ---------------------------------------------------------------------------
+#
+# The dashboard's POST /api/pipelines/[id]/cancel route flips
+# ``pipelines.status`` to ``'cancelled'``. The worker polls this helper
+# between substages so a mid-flight Generation pipeline stops emitting
+# events / burning Kie credits when the operator has cancelled it.
+
+
+def test_pipeline_is_cancelled_true_when_status_cancelled(
+    fake_sb: _FakeSupabase,
+) -> None:
+    fake_sb.pipeline_row = {"status": "cancelled"}
+    assert pr.pipeline_is_cancelled("p-1") is True
+
+
+def test_pipeline_is_cancelled_false_when_status_active(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Every non-cancelled status (ideation, review, generation, done) must
+    return False so the worker continues normally."""
+    for status in ("configuration", "ideation", "review", "generation", "done"):
+        fake_sb.pipeline_row = {"status": status}
+        assert pr.pipeline_is_cancelled("p-1") is False, status
+
+
+def test_pipeline_is_cancelled_false_when_row_missing(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """A missing pipeline row must NOT trigger abort — that would short-
+    circuit any pipeline whose row was momentarily unreadable."""
+    fake_sb.pipeline_row = None
+    assert pr.pipeline_is_cancelled("p-missing") is False
+
+
+def test_pipeline_is_cancelled_false_when_row_not_dict(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Defensive: maybe_single may occasionally return a non-dict.
+    Treat as 'not cancelled' rather than crashing the substage loop."""
+    fake_sb.pipeline_row = ["unexpected"]  # type: ignore[assignment]
+    assert pr.pipeline_is_cancelled("p-1") is False
+
+
+def test_pipeline_is_cancelled_false_on_supabase_error(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """A read failure must NOT abort the pipeline — transient Supabase
+    flakes shouldn't cancel a running job. The worker carries on; the
+    next emit_pipeline_event call would surface a real outage."""
+    fake_sb.raise_on_execute = True
+    assert pr.pipeline_is_cancelled("p-err") is False
