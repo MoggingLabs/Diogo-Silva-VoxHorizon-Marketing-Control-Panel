@@ -1927,3 +1927,331 @@ def test_fetch_video_creative_returns_dict_when_present(
     pipeline_sb.video_creative_row = {"id": "vc-1", "video_briefs": {"id": "vb-1"}}
     row = _fetch_video_creative("vc-1")
     assert row == {"id": "vc-1", "video_briefs": {"id": "vb-1"}}
+
+
+# ===========================================================================
+# Pipeline cancellation — worker-side abort plumbing (Wave 17 D)
+# ===========================================================================
+#
+# The dashboard cancel button POSTs ``/api/pipelines/[id]/cancel`` and
+# flips ``pipelines.status='cancelled'`` in Supabase. The worker polls
+# this status between substages via ``pipeline_is_cancelled`` and bails
+# cleanly when the operator cancelled mid-flight — no further Kie calls,
+# no more ``task_done`` events, one ``task_error`` with
+# ``reason='cancelled_by_operator'`` so the timeline shows where the
+# worker stopped.
+
+
+def test_generation_image_pre_cancelled_emits_single_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipeline cancelled BEFORE the background producer starts.
+
+    The top-level ``_abort_if_cancelled`` fires immediately, emits one
+    ``task_error(reason='cancelled_by_operator')`` event, and returns
+    without constructing a Kie client or touching any creative. No
+    ``creatives`` inserts, no per-ratio events.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-cancel-pre",
+        # Both the route's ``fetch_pipeline`` and the worker's
+        # ``pipeline_is_cancelled`` poll the same row — set it cancelled
+        # so the producer sees the cancel on the first poll.
+        "status": "cancelled",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-cancel",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.events_data = []
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-cancel-pre"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # Exactly one task_error, tagged with the cancellation reason.
+    assert len(errors) == 1, errors
+    assert errors[0]["payload"]["reason"] == "cancelled_by_operator"
+    assert errors[0]["payload"]["kind"] == "image"
+    # No work was done — no creatives inserted, no task_queued events.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+    queued = [d for d in pe if d.get("kind") == "task_queued"]
+    assert queued == []
+
+
+def test_generation_image_cancelled_mid_flight_skips_remaining_ratios(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pipeline cancelled AFTER the first ratio render completes.
+
+    The 1x1 render finishes and emits ``task_done`` + ``cost_recorded``;
+    then the operator cancels; on the next ``_abort_if_cancelled`` poll
+    the worker sees the flip and bails out — the 9x16 render never runs.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-cancel-mid",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-cm",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-cm",
+        "concept": "midcancel",
+        "offer_text": "$99",
+        "prompt_used": {"prompt": "a roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-cm/p.png",
+    }
+    pipeline_sb.events_data = []
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    # Drive cancellation between ratio 1 and ratio 2 via a counter.
+    # The top-level check (before KieClient construction) reads 0 → not
+    # cancelled. The first ratio's check reads 1 → not cancelled. The
+    # second ratio's check reads 2 → cancelled.
+    call_count = {"n": 0}
+
+    def _stateful_is_cancelled(_pipeline_id: str) -> bool:
+        call_count["n"] += 1
+        # First poll (producer top-level) + second poll (1x1 ratio) =
+        # not cancelled. Third poll (9x16 ratio) = cancelled.
+        return call_count["n"] >= 3
+
+    monkeypatch.setattr(
+        pipeline_route, "pipeline_is_cancelled", _stateful_is_cancelled
+    )
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-cancel-mid"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    # Only the 1x1 ratio finished.
+    image_done = [d for d in done if d["payload"].get("kind") == "image"]
+    assert len(image_done) == 1
+    assert image_done[0]["payload"]["ratio"] == "1x1"
+
+    # Exactly one cancel error, tagged for the 9x16 substage that never ran.
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    cancel_errors = [
+        d for d in errors if d["payload"].get("reason") == "cancelled_by_operator"
+    ]
+    assert len(cancel_errors) == 1, cancel_errors
+    assert cancel_errors[0]["payload"]["ratio"] == "9x16"
+    assert cancel_errors[0]["payload"]["creative_id"] == "cr-parent"
+
+    # No second-ratio creative insert.
+    creative_inserts = [
+        d for n, d in pipeline_sb.inserts if n == "creatives"
+    ]
+    assert len(creative_inserts) == 1
+    assert creative_inserts[0]["ratio"] == "1x1"
+
+
+def test_generation_video_pre_cancelled_emits_single_error(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+) -> None:
+    """Cancelled video pipeline before the video producer starts.
+
+    Top-level ``_abort_if_cancelled`` fires, emits a single
+    ``task_error(reason='cancelled_by_operator')`` and returns without
+    fetching the video creative or entering the substage loop.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-vcancel-pre",
+        "status": "cancelled",
+        "format_choice": "video",
+        "client_id": "c-1",
+        "image_brief_id": None,
+        "video_brief_id": "vb-x",
+        "config_draft": {},
+        "picks": {"video": ["vc-p"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.events_data = []
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vcancel-pre"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # Exactly one task_error, tagged for the video kind.
+    assert len(errors) == 1, errors
+    assert errors[0]["payload"]["reason"] == "cancelled_by_operator"
+    assert errors[0]["payload"]["kind"] == "video"
+    assert errors[0]["payload"]["creative_id"] == "vc-p"
+    # No substage task_queued events.
+    queued = [d for d in pe if d.get("kind") == "task_queued"]
+    assert queued == []
+
+
+def test_generation_video_cancelled_mid_substage_chain(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancellation mid-substage-chain skips the rest cleanly.
+
+    Specifically: the script substage completes (status=generation on
+    poll 1+2). Then the operator cancels. On the second-substage check
+    the worker sees ``cancelled`` and aborts — no voiceover, no broll,
+    no compose, no caption. Exactly one cancel task_error event.
+    """
+    pipeline_sb.pipeline_row = _video_pick_pipeline_row()
+    pipeline_sb.video_creative_row = {
+        "id": "vc-p",
+        "brief_id": "vb-1",
+        # Skip the script-substage agent call.
+        "script_path": "vb-1/script.json",
+        "video_briefs": {"id": "vb-1"},
+    }
+    pipeline_sb.events_data = []
+
+    from src.routes import pipeline as pipeline_route
+
+    # First poll (top-level) + second poll (script substage) = not
+    # cancelled. Third poll (voiceover substage) = cancelled.
+    call_count = {"n": 0}
+
+    def _stateful_is_cancelled(_pipeline_id: str) -> bool:
+        call_count["n"] += 1
+        return call_count["n"] >= 3
+
+    monkeypatch.setattr(
+        pipeline_route, "pipeline_is_cancelled", _stateful_is_cancelled
+    )
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-vp"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    video_done = [d for d in done if d["payload"].get("kind") == "video"]
+    # Only the script substage finished.
+    assert len(video_done) == 1
+    assert video_done[0]["payload"]["substage"] == "script"
+
+    # Exactly one cancel error, tagged for the voiceover substage.
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    cancel_errors = [
+        d for d in errors if d["payload"].get("reason") == "cancelled_by_operator"
+    ]
+    assert len(cancel_errors) == 1, cancel_errors
+    assert cancel_errors[0]["payload"]["substage"] == "voiceover"
+    assert cancel_errors[0]["payload"]["creative_id"] == "vc-p"
+
+    # No task_queued events for substages past voiceover.
+    queued_substages = [
+        d["payload"].get("substage")
+        for d in pe
+        if d.get("kind") == "task_queued" and d["payload"].get("kind") == "video"
+    ]
+    # Only the script substage ever queued — the cancel fires BEFORE the
+    # voiceover task_queued event is emitted.
+    assert queued_substages == ["script"]
+
+
+def test_generation_image_no_cancel_runs_normally_regression(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: when ``pipeline_is_cancelled`` always returns False
+    (i.e., the pipeline stays in 'generation') BOTH ratios render fully
+    and zero cancel events land on the timeline. Guards against the
+    abort plumbing accidentally short-circuiting healthy runs."""
+    pipeline_sb.pipeline_row = {
+        "id": "p-no-cancel",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-nc",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"]},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-nc",
+        "concept": "noop",
+        "offer_text": None,
+        "prompt_used": {"prompt": "a roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-nc/p.png",
+    }
+    pipeline_sb.events_data = []
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-no-cancel"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    done = [d for d in pe if d.get("kind") == "task_done"]
+    image_done = [d for d in done if d["payload"].get("kind") == "image"]
+    assert len(image_done) == 2
+    # No cancel events on the happy path.
+    cancel_errors = [
+        d
+        for d in pe
+        if d.get("kind") == "task_error"
+        and d["payload"].get("reason") == "cancelled_by_operator"
+    ]
+    assert cancel_errors == []
