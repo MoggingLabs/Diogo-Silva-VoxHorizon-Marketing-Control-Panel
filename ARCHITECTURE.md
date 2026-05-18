@@ -10,23 +10,18 @@ Locked spec for the VoxHorizon Marketing Control Panel. Living document — upda
 
 ### Goal
 
-Replace VoxHorizon's existing Slack-driven AI marketing department with a single-operator control panel. The Slack flows (approval threads, channel notifications, ad-hoc Ekko mentions) are out. The new UI carries everything: brief intake, creative review, launch packaging, and audit.
+Replace VoxHorizon's existing Slack-driven AI marketing department with a single-operator control panel. The Slack flows (approval threads, channel notifications, ad-hoc Ekko mentions) are out. The new UI carries everything: brief intake, creative review, launch packaging, audit, and approval governance.
 
-The system has one operator (Diogo) and one upstream agent persona (Ekko). Ekko is a Claude Code agent whose behavior is shaped by **two skills**, one per pipeline format:
-
-- `image-ad-prompting` — drives the image-ad pipeline
-- `video-voiceover-broll` — drives the video pipeline
-
-Ekko is routed by `brief.type` (or the corresponding video table). The chat surface streams Ekko's tool-use back to the operator via SSE.
+The system has one operator (Diogo) and one upstream agent persona (Ekko). Ekko is the `hermes-agent-ekko` container — a Hostinger HVPS Hermes Agent running the Nous Research runtime, with 42 production marketing skills shipped by Hermes plus 3 dashboard-aware skills + 1 plugin we add. The dashboard's `web` container hosts the UI + Supabase persistence; a thin `worker` container bridges the dashboard to Hermes/Ekko.
 
 ### v1 scope
 
 Two pipelines, both end to end:
 
-- **Image-ad pipeline** — brief → prompt pack → generate image → review (with chat-with-Ekko iteration) → approve → mirror to Drive → assemble launch package → operator pushes to Meta manually
-- **Video pipeline** — brief → script → voiceover → b-roll search/assemble → compose → caption → review → approve → mirror to Drive → operator pushes manually
+- **Image-ad pipeline** — brief → prompt pack → generate image → review (with chat-with-Ekko iteration) → approve → mirror to Drive → assemble launch package → operator pushes to Meta manually.
+- **Video pipeline** — brief → script → voiceover → b-roll search/assemble → compose → caption → review → approve → mirror to Drive → operator pushes manually.
 
-Daily audit pulls Meta + GHL, computes Kill / Watch / Keep verdicts, surfaces them in the audit view. Notifications via web push + email.
+Daily audit pulls Meta + GHL, computes Kill / Watch / Keep verdicts, surfaces them in the audit view. Notifications via web push + email. Every tool call Ekko wants to make passes through a `pre_tool_call` plugin that consults a policy → dashboard → operator decision pipeline before the tool runs.
 
 ### Explicit non-goals for v1
 
@@ -38,12 +33,13 @@ Daily audit pulls Meta + GHL, computes Kill / Watch / Keep verdicts, surfaces th
 - ClickUp integration (the operator owns task management outside the panel).
 - Slack reintegration. Out of scope, full stop.
 - RLS policies. v1 ships RLS off. Any multi-operator follow-up starts with an RLS migration.
+- Claude Code as the agent runtime. **Dropped during the Hermes integration milestone (Waves 18–22, May 2026).** Hermes/Ekko is the engine.
 
 ---
 
 ## 2. System topology
 
-v1 production is a **single-host stack** on one Hostinger VPS: the Next.js dashboard and the FastAPI worker run as two containers, fronted by Caddy. The dashboard at `dashboard.voxhorizon.com` is the only public surface; the worker is internal-only on the Docker network and never receives a public hostname.
+v1 production is a **single-host stack** on one Hostinger VPS: the `hermes-agent-ekko` container (Hostinger's HVPS Hermes Agent image, runtime + 42 marketing skills) sits alongside our own Docker Compose stack (`caddy` + `web` + `worker`). All three of our containers and Ekko share the same Docker daemon and the same `/var/run/docker.sock`. The worker bridges into Ekko via that socket. The dashboard at `dashboard.voxhorizon.com` is the only public surface; the worker and `hermes-agent-ekko` are internal-only.
 
 ASCII version (always rendered, no Mermaid required):
 
@@ -56,48 +52,67 @@ ASCII version (always rendered, no Mermaid required):
         │
         │ HTTPS — TLS via Let's Encrypt cert held by Caddy
         ▼
-   ┌────────────────────────────────────────────────────────────────────┐
-   │  Hostinger VPS — single host                                       │
-   │                                                                    │
-   │   Caddy (caddy:2-alpine, :80 / :443 / :443-udp)                    │
-   │     · TLS on dashboard.voxhorizon.com                              │
-   │     · reverse_proxy → web:3000 (only public route)                 │
-   │     · flush_interval -1 (preserves SSE chunking)                   │
-   │                                                                    │
-   │   docker network "voxhorizon" (internal)                           │
-   │   ┌──────────────────────────────┐  ┌────────────────────────────┐ │
-   │   │  web (Next.js 15 :3000)      │  │  worker (FastAPI :8000)    │ │
-   │   │  ghcr.io/.../voxhorizon-web  │  │  ghcr.io/.../...-worker    │ │
-   │   │  · App Router pages          │  │  · routes/health,creative, │ │
-   │   │  · API routes (/api/*)       │  │    audit,upload,chat,broll │ │
-   │   │  · Server Supabase client    │  │  · services/claude_runner, │ │
-   │   │  · Realtime browser client   │  │    broll_store, storage    │ │
-   │   │  · lib/worker.ts → WORKER_URL│──┼─▶                           │ │
-   │   │    (= http://worker:8000)    │  │  · Bearer-only ingress      │ │
-   │   │    Bearer + retries          │  │    (no public port binding) │ │
-   │   └──────────────┬───────────────┘  └────────────┬────────────────┘ │
-   │                  │                               │                  │
-   └──────────────────┼───────────────────────────────┼──────────────────┘
-                      │ supabase-js (HTTPS)           │ service-role + Storage
-                      ▼                               ▼
+   ┌────────────────────────────────────────────────────────────────────────────┐
+   │  Hostinger VPS — single host                                               │
+   │                                                                            │
+   │   Caddy (caddy:2-alpine, :80 / :443 / :443-udp)                            │
+   │     · TLS on dashboard.voxhorizon.com                                      │
+   │     · reverse_proxy → web:3000 (only public route)                         │
+   │     · flush_interval -1 (preserves SSE chunking)                           │
+   │                                                                            │
+   │   docker network "voxhorizon" (internal)                                   │
+   │   ┌──────────────────────────────┐   ┌──────────────────────────────────┐  │
+   │   │  web (Next.js 15 :3000)      │   │  worker (FastAPI :8000)          │  │
+   │   │  ghcr.io/.../voxhorizon-web  │   │  ghcr.io/.../voxhorizon-worker   │  │
+   │   │  · App Router pages          │   │  · /work/hermes/chat (SSE)       │  │
+   │   │  · API routes (/api/*)       │   │  · /work/hermes/kanban           │  │
+   │   │  · Server Supabase client    │   │  · /work/hermes/webhook          │  │
+   │   │  · Realtime browser client   │──▶│  · /work/hermes/approval (long-  │  │
+   │   │  · lib/worker.ts → WORKER_URL│   │    poll)                         │  │
+   │   │  · Approval UI               │   │  · Bearer-only ingress           │  │
+   │   └──────────────┬───────────────┘   └─────┬──────────────────┬─────────┘  │
+   │                  │                         │                  │            │
+   │                  │ supabase-js (HTTPS)     │ docker.sock      │ /var/run/  │
+   │                  │                         │ exec + shell     │ docker.    │
+   │                  │                         │ hook target      │ sock       │
+   │                  │                         ▼                  │            │
+   │                  │   ┌──────────────────────────────────┐     │            │
+   │                  │   │  hermes-agent-ekko               │◀────┘            │
+   │                  │   │  ghcr.io/hostinger/hvps-hermes-  │                  │
+   │                  │   │  agent:latest                    │                  │
+   │                  │   │  · hermes chat -q (stdio)        │                  │
+   │                  │   │  · hermes kanban (cli)           │                  │
+   │                  │   │  · 42 marketing skills           │                  │
+   │                  │   │  · 3 dashboard-aware skills:     │                  │
+   │                  │   │      dashboard-publish           │                  │
+   │                  │   │      dashboard-chat-publish      │                  │
+   │                  │   │      dashboard-task-result       │                  │
+   │                  │   │  · plugin: voxhorizon-approvals  │                  │
+   │                  │   │      (in-process pre_tool_call)  │                  │
+   │                  │   │  · post-tool-call / session-end  │                  │
+   │                  │   │      hook → curl → worker        │                  │
+   │                  │   └──────────────┬───────────────────┘                  │
+   │                  │                  │                                      │
+   └──────────────────┼──────────────────┼──────────────────────────────────────┘
+                      │                  │ supabase-js (HTTPS, dashboard-publish skill)
+                      ▼                  ▼
             ┌─────────────────────────────────────────────────────┐
             │  Supabase (us-east-1) · project jfzxlsaywztlytnobgej │
             │  · Postgres 15 + Realtime publication               │
             │  · Storage bucket: creatives                        │
-            │  · Helper functions, enums                          │
+            │  · approvals + approvals_policy_cache + hermes_tasks│
+            │  · pipeline_events (with source enum)               │
             └─────────────────────────────────────────────────────┘
-
-        worker also reaches:
-        ┌───────────┬───────────┬───────────┬───────────┬───────────┬────────────┬───────────┐
-        ▼           ▼           ▼           ▼           ▼           ▼            ▼           ▼
-    Claude Code   Kie.ai   ElevenLabs   Hyperframes  Submagic   Meta Ads      GHL        Drive
-    (agent loop) (images)  (voiceover)  (video       (captions) (perf pull)   (pipeline) (gog CLI)
-                                       compose)
 ```
 
-Worker is no longer publicly addressable. Defense in depth: the Docker network is internal, the bearer secret guards every worker route, the host firewall blocks `:8000`. Even if Caddy is misconfigured, the worker cannot be reached without first compromising the host.
+Key properties:
 
-Mermaid version (richer renderers):
+- **One public surface.** Only `dashboard.voxhorizon.com` is reachable from the internet. The worker, `hermes-agent-ekko`, and Caddy's HTTP port for the worker have no public hostnames.
+- **Co-located by design.** Worker and Ekko run on the same Docker daemon. The worker mounts `/var/run/docker.sock` so it can `docker exec` into Ekko for low-latency chat and kanban. See [§7](#7-auth-model) and [`SECRETS.md`](./SECRETS.md#docker-socket-trade-off) for the security trade-off.
+- **Two GHCR images, one Hostinger image, one VPS.** `voxhorizon-web`, `voxhorizon-worker`, and `ghcr.io/hostinger/hvps-hermes-agent` (Ekko) are pulled independently. Our compose stack rolls our two; Ekko is rolled by Hostinger.
+- **One env file for both of our containers.** `/opt/voxhorizon/.env` is mounted via `env_file:` on `web` and `worker`. Ekko has its own env at `/opt/data/.env`. See [`SECRETS.md`](./SECRETS.md#vps-production-secrets) for the union inventory.
+
+### Mermaid version (richer renderers)
 
 ```mermaid
 flowchart TD
@@ -111,67 +126,209 @@ flowchart TD
   subgraph VPS[Hostinger VPS · single host]
     Caddy[Caddy · :80 / :443 / :443-udp<br/>reverse_proxy → web:3000]
     subgraph DockerNet[docker network · voxhorizon · internal]
-      Web[web container<br/>Next.js 15 · :3000<br/>ghcr.io/.../voxhorizon-web]
-      Worker[worker container<br/>FastAPI · :8000<br/>ghcr.io/.../voxhorizon-worker]
-      Pool[(named volume<br/>voxhorizon-worker-broll-pool)]
+      Web[web container<br/>Next.js 15 · :3000]
+      Worker[worker container<br/>FastAPI · :8000<br/>Hermes bridge]
+      Ekko[hermes-agent-ekko<br/>Hermes runtime<br/>42 marketing skills<br/>+ 3 dashboard-aware skills<br/>+ voxhorizon-approvals plugin]
     end
     Caddy --> Web
     Web -->|Authorization: Bearer ...<br/>WORKER_URL = http://worker:8000| Worker
-    Worker --> Pool
+    Worker -->|docker.sock<br/>exec / chat / kanban| Ekko
+    Ekko -.->|shell hook<br/>curl POST| Worker
   end
 
   subgraph Supabase[Supabase · us-east-1]
-    PG[(Postgres + Realtime)]
+    PG[(Postgres + Realtime<br/>approvals · hermes_tasks · pipeline_events)]
     Storage[(Storage · creatives bucket)]
   end
 
   Web --> Supabase
   Worker --> Supabase
-
-  Worker --> Claude[Claude Code · subprocess + SDK]
-  Worker --> Kie[Kie.ai · image gen]
-  Worker --> EL[ElevenLabs · voiceover]
-  Worker --> Hyper[Hyperframes · video compose]
-  Worker --> Sub[Submagic · captions]
-  Worker --> Meta[Meta Ads · perf]
-  Worker --> GHL[GoHighLevel · leads]
-  Worker --> Drive[Google Drive · gog]
+  Ekko -->|dashboard-publish skill| Supabase
 ```
-
-Key properties of the single-host stack:
-
-- **One public surface.** Only `dashboard.voxhorizon.com` is reachable from the internet. The worker has no public hostname; `WORKER_URL=http://worker:8000` resolves via Docker's internal DNS.
-- **One DNS record, one TLS cert, one Caddy.** No split between dashboard / worker hostnames; nothing for Cloudflare to validate twice.
-- **Two GHCR images, one VPS.** `voxhorizon-web` and `voxhorizon-worker` are built independently in CI but deployed as a single stack via `deploy-stack.yml` (see [§Deployment pipeline](#deployment-pipeline)).
-- **One env file for both containers.** `/opt/voxhorizon/.env` is mounted via `env_file:` on both services. See [`SECRETS.md`](./SECRETS.md#vps-production-secrets) for the union inventory.
 
 ---
 
-## 3. Data flow
+## 3. Communication patterns
+
+Four patterns lock in the post-Hermes topology. Each is the right tool for a different bandwidth / latency / persistence profile.
+
+### Pattern 1 — Docker socket exec for streaming chat
+
+Path: browser → web → worker → `docker.sock` → `hermes-agent-ekko`.
+
+The worker shells into Ekko with `docker exec hermes-agent-ekko hermes chat -q "<prompt>" --pass-session-id <id>` and streams stdout back as SSE. Implementation lives in `worker/src/services/hermes_bridge.py` and `worker/src/routes/hermes_chat.py`. Bridge overhead measured at **5–15ms** per turn before the LLM responds (~30–90s tail for the actual answer).
+
+Used for:
+
+- Operator chat with Ekko on a creative side panel.
+- Pipeline-stage proposals (Ekko drafts a config or picks the variants to ship).
+
+### Pattern 2 — Hermes kanban for long async operations
+
+Path: browser → web → worker → `docker.sock` → `hermes kanban create --assignee ekko --context <json>`.
+
+The worker creates a kanban task; Hermes' gateway dispatches it to Ekko within ~60s. Ekko runs the skill chain, then writes results to Supabase via the `dashboard-publish` / `dashboard-task-result` skills. The dashboard reads them off `hermes_tasks` and `pipeline_events` via Realtime. Implementation in `worker/src/services/hermes_kanban.py` and `worker/src/routes/hermes_kanban.py`.
+
+Used for:
+
+- Advancing a pipeline from configuration → ideation, ideation → review, review → generation, etc. — each long-running stage is a kanban task.
+- Retrying a single stage on failure.
+- Cancellation (marks the task `cancelled`; the agent loop polls between substages and exits gracefully).
+
+### Pattern 3 — In-process `pre_tool_call` plugin for approvals
+
+Path: Ekko's tool call → `voxhorizon_approvals` plugin (in-process Python inside the Hermes container) → policy check → optional worker long-poll → Supabase Realtime → operator decision → back through.
+
+This is the hot path. The plugin lives at `ekko-plugins/voxhorizon_approvals/` in this repo and is copied to `/opt/data/home/.hermes/plugins/` on the VPS. It registers a `pre_tool_call` hook which Hermes calls **in the same Python process** before every tool execution.
+
+- **Allowlisted tools** (`read_file`, `list_files`, `glob`, `grep`, etc.): the plugin returns `None` immediately. **<1ms** total.
+- **Cached-approved tools** (operator already approved the exact tool+args this session): same in-process check against `approvals_policy_cache` (hot cache). **<1ms**.
+- **Sensitive tools** (`kie_generate`, `elevenlabs_tts`, `submagic_caption`, `shell_command`, `write_file`, etc.): the plugin POSTs to the worker at `/work/hermes/approval`, then long-polls. The worker inserts the approval row, the dashboard wakes via Supabase Realtime, the operator decides, the worker returns the decision, the plugin returns `None` (approve) or `{"action": "block", "message": "Operator denied: …"}` (reject).
+
+Fail-closed: if the worker is unreachable mid-flight, the plugin **blocks** the tool call and writes an audit-trail line. Cron-scheduled Ekko runs cannot spend money on Kie or ElevenLabs without operator sanction.
+
+### Pattern 4 — Hermes shell hooks for non-blocking observability
+
+Path: Ekko → shell hook (post_tool_call / session_end / custom) → `curl POST` to worker `/work/hermes/webhook` → Supabase Realtime push → dashboard updates.
+
+Configured in Ekko's `/opt/data/config.yaml` (a patch lives at `infra/hermes/config.yaml.patch`). Used for events that don't suspend the agent loop — they just need to surface in the dashboard.
+
+Used for:
+
+- "Skill finished" / "tool completed" events that hydrate the pipeline timeline.
+- Session-end summaries.
+- Custom Ekko-initiated dashboard pings.
+
+Authenticated with `DASHBOARD_WEBHOOK_TOKEN` (a different token from the approvals token — see [`SECRETS.md`](./SECRETS.md#hermes-integration-secrets)).
+
+---
+
+## 4. Approval flow (end-to-end)
+
+The approval flow is the highest-stakes path in the system — it's the only thing between Ekko and unsanctioned spend on Kie.ai, ElevenLabs, Submagic, etc. The sequence:
+
+```
+Ekko's agent loop calls a tool (e.g. kie_generate)
+        │
+        ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Hermes runs every registered pre_tool_call hook IN-PROCESS    │
+│  (Python; no subprocess; <1ms floor)                           │
+│                                                                │
+│  voxhorizon-approvals plugin's hook:                           │
+│   1. policy.evaluate(tool_name, args, ctx)                     │
+│      → allowlisted? return None (allow). <1ms.                 │
+│      → cached-approved (this session)? return None. <1ms.      │
+│   2. Otherwise: POST /work/hermes/approval to worker, await.   │
+└────────────────────────────────────────────────────────────────┘
+        │ HTTP over Docker network (~1-5ms RTT)
+        ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Worker /work/hermes/approval:                                 │
+│   1. INSERT into Supabase `approvals` (status='pending').      │
+│   2. Long-poll: Supabase Realtime subscription (≤500ms wake)   │
+│      with 250ms polling fallback.                              │
+│   3. ALSO fan out a notification (see §5):                     │
+│       - VAPID push to operator's browser (always)              │
+│       - Resend email (if risk_class='external-write' OR        │
+│         context.estimated_cost > 50)                           │
+│   4. Configurable timeout (default 600s). On timeout, return   │
+│      {"action": "block", "message": "Operator did not respond"}│
+└────────────────────────────────────────────────────────────────┘
+        │ Supabase Realtime push (≤500ms after dashboard subscribes)
+        ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Dashboard receives approval-pending event:                    │
+│   1. <ApprovalModal /> opens with tool details, args diff,     │
+│      context (which brief, which session, which skill).        │
+│   2. Operator clicks Approve / Reject / Approve+remember.      │
+│      Keyboard: A / R / S.                                      │
+│   3. POST /api/approvals/{id}/decision → updates Supabase.     │
+│   4. If "remember": INSERT approvals_policy_cache row keyed on │
+│      (ekko_session_id, tool_name, sha256(canonical(args))).    │
+└────────────────────────────────────────────────────────────────┘
+        │ Supabase Realtime push back to worker
+        ▼
+┌────────────────────────────────────────────────────────────────┐
+│  Worker's long-poll wakes, returns to plugin:                  │
+│   decision=approved → return None to Hermes (tool runs)        │
+│   decision=rejected → return {"action": "block",               │
+│                               "message": "Operator denied: "+  │
+│                               notes}                            │
+└────────────────────────────────────────────────────────────────┘
+        │ in-process return — <1ms
+        ▼
+Hermes proceeds (or aborts) the tool call.
+```
+
+The dashboard surfaces this flow in three places: the modal that auto-opens on the active page, the queue sidebar (badge + dropdown of pending approvals), and the `/approvals` audit page (full history filterable by session/tool/decision).
+
+---
+
+## 5. Performance budget
+
+Per-tool-call latency floor on the approval hot path:
+
+| Path                                                 | Steady-state latency                                           |
+| ---------------------------------------------------- | -------------------------------------------------------------- |
+| Allowlisted tool (`read_file`, `glob`, `grep`, etc.) | **<1ms** (in-process allowlist check, no HTTP)                 |
+| Cached-approved tool (operator already approved)     | **<1ms** (in-process cache check via `approvals_policy_cache`) |
+| First-time approval-required tool                    | ~30ms worker round-trip + operator response (typically 3–30s)  |
+| Operator timeout                                     | 600s default; tool call aborts with the timeout message        |
+| Worker unreachable                                   | **block** (fail-closed) — local audit-file entry, no spend     |
+
+Per-turn budget: a typical Ekko turn fires 5–30 tool calls. Allowlisted reads dominate, so the plugin's overhead is **<30ms per turn**. The shell-hook subprocess approach would have been 250–3000ms per call — **the plugin is ~50–100× faster on the hot path.**
+
+Other budgets worth recording:
+
+- Chat first-token: bridge overhead 5–15ms; LLM tail 30–90s. Dominated by the LLM.
+- Kanban dispatch: ≤60s after `hermes kanban create` returns. The gateway polls on a 60s tick.
+- Realtime push: ≤500ms from `INSERT` on `approvals` to the modal opening, assuming the operator already has the dashboard mounted.
+
+---
+
+## 6. Notifications fan-out
+
+Every approval inserted via the worker triggers a fan-out:
+
+- **Always**: VAPID web-push to every device in `push_subscriptions` (best-effort; failures are logged, never block the approval).
+- **High-urgency only**: a Resend transactional email to `OPERATOR_EMAIL`. High-urgency is defined as `risk_class === "external-write"` OR `context.estimated_cost > 50`.
+
+Implementation lives in `worker/src/services/approval_notifications.py`. The email render endpoint (`/api/internal/emails/high-urgency-approval/render`) is a Next.js internal route — the worker POSTs the approval row + computed urgency rationale, the route renders the HTML via the React Email template at `lib/emails/HighUrgencyApprovalEmail.tsx`, and the worker hands the rendered body to Resend.
+
+Push delivery uses VAPID keys (`VAPID_PUBLIC_KEY` for the browser subscribe, `VAPID_PRIVATE_KEY` for the server-side sign). Failed deliveries (HTTP 410 / 404) prune the dead subscription row from `push_subscriptions`.
+
+The dashboard's sidebar badge counts every pending approval in `approvals` via a server-side query, refreshed on Realtime push.
+
+---
+
+## 7. Data flow
 
 Where each piece of state lives:
 
-| State                           | Home                                                                                                                                       | Why                                                                                                                                                                                                                                               |
-| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Briefs (image + video)          | Postgres                                                                                                                                   | Mutable, audited, queried by Kanban + funnel. Driver of everything downstream.                                                                                                                                                                    |
-| Creatives (image + video)       | Postgres metadata + Supabase Storage assets                                                                                                | Postgres tracks status and pipeline path; Storage holds the bytes.                                                                                                                                                                                |
-| Iteration / conversation thread | Postgres (`creative_iterations`, `video_iterations`)                                                                                       | Append-only; powers the side-panel timeline and the chat replay.                                                                                                                                                                                  |
-| Copy variants                   | Postgres                                                                                                                                   | Small, structured, no asset bytes.                                                                                                                                                                                                                |
-| Launch packages                 | Postgres                                                                                                                                   | Bundles refs to creatives + targeting/budget payload.                                                                                                                                                                                             |
-| B-roll pool                     | Named volume on the VPS (`voxhorizon-worker-broll-pool`, mounted at `/app/storage/broll-pool` in the worker container) — `LocalBrollStore` | Primary in v1. Deterministic SHA-256 dedup; JSON sidecars; HMAC-signed URLs for the browser. The named volume survives image rebuilds. Migrating to Supabase Storage is a flip of `BROLL_STORE_BACKEND` once `SupabaseBrollStore` is implemented. |
-| Performance snapshots           | Postgres (`campaign_perf_image`, `campaign_perf_video` + `v_campaign_perf` view)                                                           | Daily writes, served straight to the audit view.                                                                                                                                                                                                  |
-| Drive mirrors                   | Google Drive                                                                                                                               | Operator-shareable assets. The pipeline doesn't read back from Drive; it's a one-way write.                                                                                                                                                       |
-| Events                          | Postgres (`events`)                                                                                                                        | Append-only domain event log. **Not on Realtime** (too noisy).                                                                                                                                                                                    |
-| Cron / sync audit               | Postgres (`sync_log`)                                                                                                                      | Worker-run jobs check in here. Not on Realtime.                                                                                                                                                                                                   |
-| Operator overrides              | Postgres (`overrides`)                                                                                                                     | Hand-edits any cell on any table at read time via left-join, without mutating pipeline-produced rows.                                                                                                                                             |
-| Push subscriptions              | Postgres (`push_subscriptions`)                                                                                                            | One row per operator device.                                                                                                                                                                                                                      |
-| Secrets                         | `.env.example` (git) + GH Actions repo secrets (build) + `/opt/voxhorizon/.env` on VPS (runtime, chmod 600) + Vault                        | Never in Postgres, never in git. See [`SECRETS.md`](./SECRETS.md). Build-time `NEXT_PUBLIC_*` values come from GH Actions secrets; runtime values come from the VPS `.env`.                                                                       |
+| State                           | Home                                                                                                                                       | Why                                                                                                                                  |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| Briefs (image + video)          | Postgres                                                                                                                                   | Mutable, audited, queried by Kanban + funnel. Driver of everything downstream.                                                       |
+| Creatives (image + video)       | Postgres metadata + Supabase Storage assets                                                                                                | Postgres tracks status and pipeline path; Storage holds the bytes; Ekko's skills write artifacts here via `dashboard-publish`.       |
+| Iteration / conversation thread | Postgres (`creative_iterations`, `video_iterations`)                                                                                       | Append-only; powers the side-panel timeline and the chat replay.                                                                     |
+| Copy variants                   | Postgres                                                                                                                                   | Small, structured, no asset bytes.                                                                                                   |
+| Launch packages                 | Postgres                                                                                                                                   | Bundles refs to creatives + targeting/budget payload.                                                                                |
+| Performance snapshots           | Postgres (`campaign_perf_image`, `campaign_perf_video` + `v_campaign_perf` view)                                                           | Daily writes from Ekko's `campaign-audit` skill, served straight to the audit view.                                                  |
+| Drive mirrors                   | Google Drive                                                                                                                               | Operator-shareable assets. Ekko's skills mirror via the Hostinger-side `gog` credentials; the pipeline doesn't read back from Drive. |
+| Hermes tasks                    | Postgres (`hermes_tasks`)                                                                                                                  | Mirror of the Hermes kanban work queue so the dashboard can render task state via Realtime without polling Hermes.                   |
+| Pipeline events                 | Postgres (`pipeline_events` with `source` enum: `worker` / `hermes-hook` / `hermes-task` / `manual`)                                       | Append-only stage transitions; powers the stepper. The `source` column tracks which subsystem emitted the event.                     |
+| Approvals                       | Postgres (`approvals` + `approvals_policy_cache`)                                                                                          | Every pre_tool_call decision the operator makes, plus a per-session cache so "approve and remember" survives across the session.     |
+| Events                          | Postgres (`events`)                                                                                                                        | Append-only domain event log. **Not on Realtime** (too noisy).                                                                       |
+| Cron / sync audit               | Postgres (`sync_log`)                                                                                                                      | Ekko's `campaign-audit` skill checks in here on each daily run. Not on Realtime.                                                     |
+| Operator overrides              | Postgres (`overrides`)                                                                                                                     | Hand-edits any cell on any table at read time via left-join, without mutating pipeline-produced rows.                                |
+| Push subscriptions              | Postgres (`push_subscriptions`)                                                                                                            | One row per operator device.                                                                                                         |
+| Secrets                         | `.env.example` (git) + GH Actions repo secrets (build) + `/opt/voxhorizon/.env` on VPS (runtime, chmod 600) + `/opt/data/.env` (Ekko-side) | Never in Postgres, never in git. See [`SECRETS.md`](./SECRETS.md).                                                                   |
 
-Reads in the UI come from Supabase directly (server components use the server client; client components use the browser client + Realtime subscriptions). Writes go through Next.js API routes (running in the `web` container) that use the service-role client. Worker-side writes use the service-role key too — the dashboard never hands the operator's session to the worker, and the worker has no operator session model anyway (bearer-only ingress).
+Reads in the UI come from Supabase directly (server components use the server client; client components use the browser client + Realtime subscriptions). Writes go through Next.js API routes that use the service-role client. The worker uses the service-role key for its approval / webhook persistence. Ekko's `dashboard-publish` skill uses the service-role key via env on the Hermes side.
 
 ---
 
-## 4. Pipeline shapes
+## 8. Pipeline shapes
 
 ### Image pipeline
 
@@ -180,23 +337,23 @@ brief (status: draft → posted → approved)
   │
   ▼
 prompt pack JSON  ──┐
-                    │ Claude Code · skill: image-ad-prompting
+                    │ Ekko skill: image-ad-prompting (kanban task)
 brief context  ─────┘
   │
   ▼
-kie_generate.py (one concept at a time, sequential per SOP — ~60–90s/img)
+Ekko's chained skills generate the image (kie_generate via Hermes' native Kie.ai integration)
   │
   ▼
-creatives.file_path_supabase (private bucket "creatives")
+creatives.file_path_supabase (private bucket "creatives", written by dashboard-publish skill)
   │
   ▼   creative_iterations append: kind=generate, author=ekko
 side-panel review (variants grid + per-creative side panel)
   │
   ├─ operator edits → kind=user_edit
-  ├─ chat with Ekko → SSE → kind=regenerate (parent_creative_id chains lineage)
+  ├─ chat with Ekko → SSE via Docker exec → kind=regenerate
   │
   ▼   status → approved
-upload_images_drive.py (mirrors to Drive with naming convention)
+Ekko mirrors to Drive
   │
   ▼
 launch_packages row (status: validating → ready)
@@ -211,26 +368,19 @@ operator pushes to Meta Ads manually (explicit gate)
 video_brief (status: draft → posted → approved)
   │
   ▼
-Claude Code · skill: video-voiceover-broll → script outline (beats, hook ideas)
+Ekko skill: campaign-brief + voiceover-broll chain → script outline
   │
   ▼   video_creatives row created with status=script_ready
-ElevenLabs voiceover → voiceover_path
+Ekko's ad-creative skill: ElevenLabs voiceover → voiceover_path
   │
   ▼   status=voiceover_ready
-b-roll search & match
+Ekko's broll-sourcing skill: stock + brand library search
   │
-  │  per beat:
-  │   ├─ LocalBrollStore.list_pool(theme) → top candidates
-  │   ├─ broll_selection_mode:
-  │   │    · auto                — accept top candidate, no UI gate
-  │   │    · review_each         — UI shows each beat for approval
-  │   │    · review_low_confidence — UI gates only weak matches
-  │   └─ if no match: search external sources, ingest via LocalBrollStore.put
   ▼   status=broll_ready
-Hyperframes compose (voiceover + b-roll clips + transitions) → composed_path
+Ekko composes (Hyperframes-equivalent via Hermes) → composed_path
   │
   ▼   status=composed
-Submagic captions → captioned_path
+Ekko captions (Submagic via Hermes integration) → captioned_path
   │
   ▼   status=captioned
 side-panel review (similar to image side, with timeline scrubber)
@@ -242,198 +392,145 @@ Drive mirror + launch_packages (video variant)
 operator pushes manually
 ```
 
-Parallel-vertical separation: image and video are **structurally parallel** in the database (`briefs` vs `video_briefs`, `creatives` vs `video_creatives`, `creative_iterations` vs `video_iterations`, etc.). Shared concerns (`clients`, `events`, `overrides`, `sync_log`, `push_subscriptions`) live in one place. This keeps either side free to add format-specific columns without churning the other.
+Parallel-vertical separation: image and video are **structurally parallel** in the database (`briefs` vs `video_briefs`, `creatives` vs `video_creatives`, `creative_iterations` vs `video_iterations`, etc.). Shared concerns (`clients`, `events`, `overrides`, `sync_log`, `push_subscriptions`, `approvals`, `hermes_tasks`, `pipeline_events`) live in one place. This keeps either side free to add format-specific columns without churning the other.
 
 ---
 
-## 5. Two-track architecture
+## 9. Agent model
 
-The build is sliced into shared infrastructure + two format tracks. Phasing:
+Ekko is the marketing dept's persona. Post-Hermes-integration implementation:
 
-- **Shared (M0 + M4 + M5):** services, schema, scaffolding, audit pipeline, cron, notifications, polish, deploy. Both formats use this.
-- **Image track (M1 + M2 + M3):** brief lifecycle, image generation loop, Drive sync + launch packaging — wired against the image-side tables and the `image-ad-prompting` skill.
-- **Video track (V1 + V2 + V3, sibling milestones):** brief lifecycle, video generation loop, Drive sync + launch packaging — wired against the video-side tables and the `video-voiceover-broll` skill.
-
-Shared primitives (used by both tracks):
-
-- `lib/worker.ts` typed RPC — both tracks add their endpoints to the same `worker.*` object
-- `lib/supabase/*` clients
-- `app/api/worker/*` proxy routes
-- Realtime subscription helpers in `hooks/`
-- `components/funnel/*` and `components/kanban/*` (read off the `format` tag, render either side)
-- `components/chat/EkkoChat.tsx` (skill agnostic; routing is server-side based on `brief.type`)
-- LocalBrollStore + storage signing helpers
-- Override / sync_log / events plumbing
-- Web Push + Resend
-- The `overrides` left-join read pattern
-
-Format-specific surfaces:
-
-- Image: `components/creative/ImageVariantsGrid.tsx`, `components/creative/ImageSidePanel.tsx`
-- Video: `components/creative/VideoTimeline.tsx`, `components/creative/VideoSidePanel.tsx`
-
-The two tracks ship roughly in parallel after M0 is done. Format-specific UI surfaces live in their own component subtrees so a change to the image grid can't accidentally regress the video timeline.
+- **Hermes/Ekko owns the agent loop.** `hermes-agent-ekko` runs the Nous Research runtime with provider-agnostic LLM routing, persistent FTS5 session memory, durable kanban work queue, and 42 production marketing skills (`campaign-brief`, `campaign-audit`, `ad-creative`, `image-ad-prompting`, `broll-sourcing`, `launch-gate`, …). All shipped by Hostinger.
+- **We add 3 dashboard-aware skills.** `dashboard-publish` (generic Supabase upsert helper), `dashboard-chat-publish` (append assistant reply to `chat_messages`), and `dashboard-task-result` (write final artifacts + a `pipeline_events` row when a kanban task completes). Each ships with a small Python helper that hits Supabase via the service-role key from `/opt/data/.env`.
+- **We add 1 plugin.** `voxhorizon-approvals` registers a `pre_tool_call` hook to route sensitive tool calls through the dashboard. See [§4](#4-approval-flow-end-to-end).
+- **Two communication modes from the dashboard side.**
+  - **Streaming chat (Docker exec → `hermes chat -q`)** for operator chat with Ekko in the side panel. Stdout is parsed and emitted as SSE.
+  - **Kanban tasks (Docker exec → `hermes kanban create`)** for long-running work. Ekko's gateway dispatches within ~60s.
+- **No subprocess from the worker.** The worker no longer spawns Claude Code or any agent binary itself. Every agent action is dispatched into the Hermes container.
 
 ---
 
-## 6. Agent model
-
-Ekko is the marketing dept's persona. Implementation:
-
-- **One agent, two skills.** Claude Code skills live alongside the upstream `voxhorizon-marketing-dept` repo (symlinked into the worker so the source of truth stays upstream). The worker selects which skill to load per request based on `brief.type` (image vs video).
-- **Two execution modes.**
-  - **Batch (subprocess).** For structured outputs (prompt packs, scripts, audit synthesis). The worker spawns `claude -p "<task>" --permission-mode bypassPermissions` and parses the result. Each task is a fresh process — no shared session.
-  - **Streaming chat (Agent SDK).** For chat-with-Ekko in the side panel. Long-lived SDK session per conversation. Streams tokens + tool calls back via SSE.
-- **Routing.** `worker/src/services/claude_runner.py` is the shared entry point. It dispatches to the right skill based on the caller's hint. Skills are self-contained; the runner doesn't need to know what's inside them.
-- **Sequential queue per brief.** Within a single brief, requests serialize (one regenerate at a time). Across briefs, the worker can run in parallel up to a small limit (configured per route in M2/V2). The Kie.ai image gen is the practical bottleneck — 60–90s per image, so sequential is fine for v1.
-- **Hyperframes for video render.** The video track uses Hyperframes for the heavy compose step (voiceover + b-roll + transitions). The worker manages the job lifecycle; the result is a finalized MP4 staged in the `creatives` bucket.
-- **B-roll backends.** `LocalBrollStore` is the v1 primary — deterministic content-hash dedup, JSON sidecars per clip, HMAC-signed URLs valid for `ttl_s`. `SupabaseBrollStore` is a stub today; the migration path is a flip of `BROLL_STORE_BACKEND` and a follow-up SQL migration to provision the `broll-pool` bucket.
-
----
-
-## 7. Auth model
+## 10. Auth model
 
 Layered. No single failure removes all defenses.
 
-- **Network boundary: Caddy + Cloudflare.** Only `dashboard.voxhorizon.com` is publicly addressable. The worker container has no published port (`expose: ["8000"]` on the compose network only); the host firewall blocks inbound `:8000`. Even if Caddy is misconfigured, the worker is unreachable without first compromising the host.
-- **Worker boundary: shared-secret bearer.** Every web→worker call carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. The worker compares with `hmac.compare_digest` (constant-time). 64-byte hex token, rotatable. Calls travel over the Docker network (`http://worker:8000`) — never a public TLS hop.
+- **Network boundary: Caddy + Cloudflare.** Only `dashboard.voxhorizon.com` is publicly addressable. The worker container has no published port (`expose: ["8000"]` on the compose network only); the host firewall blocks inbound `:8000`. `hermes-agent-ekko` exposes `ttyd :4860` only on localhost (or behind a Hostinger-managed reverse proxy if the operator wants the admin TTY public).
+- **Worker boundary: shared-secret bearer.** Every web→worker call carries `Authorization: Bearer <WORKER_SHARED_SECRET>`. The worker compares with `hmac.compare_digest` (constant-time). Calls travel over the Docker network (`http://worker:8000`) — never a public TLS hop.
+- **Hermes → worker boundary: bearer tokens, distinct per surface.**
+  - `DASHBOARD_WEBHOOK_TOKEN` — Ekko's shell hooks → worker webhook.
+  - `VOXHORIZON_APPROVAL_TOKEN` — `voxhorizon-approvals` plugin → worker approval long-poll.
+  - `INTERNAL_API_TOKEN` — worker → Next.js internal email render endpoint.
+    Keeping the tokens distinct means an Ekko compromise that leaks the webhook token can't pivot to the approval surface.
+- **Worker → Hermes: Docker socket.** The worker mounts `/var/run/docker.sock`. This is **root-equivalent access on the host** — mitigations documented in [`SECRETS.md`](./SECRETS.md#docker-socket-trade-off): only the worker mounts it, the worker has strict bearer auth on every route, no untrusted code paths run in the worker, the worker and Ekko are co-located by design.
 - **Optional middleware.** `middleware.ts` implements an IP gate hook. Default: off. Setting `TAILSCALE_ONLY=1` logs non-tailnet IPs; `TAILSCALE_ONLY=strict` returns 403. Repurposable when the operator wants a Tailscale-only access layer in front of the dashboard for staging.
-- **B-roll signed URLs.** The b-roll streaming route uses a separate HMAC scheme: the URL embeds `clip_id`, `exp`, and a signature. The worker validates without consulting the shared secret, so the browser can fetch a clip without leaking the bearer.
 - **No Supabase Auth.** No user accounts. No magic links. No JWT issuance. RLS is off. The service-role key is the only credential the app ever uses against Postgres.
 - **No CSRF tokens.** Single-operator + same-origin POSTs (web container is the only origin) mean there's no cross-site attacker to defeat. If the boundary changes (multi-operator, public auth), CSRF and RLS are the entry points.
 
 ---
 
-### Containerization (VPS path)
+## 11. Deployment
 
-v1 production runs as a single-host Docker Compose stack on one Hostinger VPS. Two services share a compose network: the Next.js dashboard (`web`) and the FastAPI worker (`worker`). Caddy fronts the dashboard for public HTTPS; the worker is reachable only on the internal Docker network at `http://worker:8000`.
+v1 production runs as a single-host Docker Compose stack on one Hostinger VPS: `caddy` + `web` + `worker` plus the operator-managed `hermes-agent-ekko`. Two GHCR images for our stack (`voxhorizon-web`, `voxhorizon-worker`); the Hermes image is pulled by the operator at provisioning time. Caddy fronts the dashboard for public HTTPS; the worker is internal-only.
 
-- **Two containers, one host.**
-  - `web` — `ghcr.io/pveloso01/voxhorizon-web` (built from the repo root `Dockerfile`, Next.js 15 standalone build, listens on `:3000`). The only service Caddy fronts publicly. Lands in [VPS-7 / #228](../../issues/228) and [VPS-8 / #229](../../issues/229).
-  - `worker` — `ghcr.io/pveloso01/voxhorizon-worker` (multi-stage build: stage 1 produces a `uv`-frozen virtualenv from `pyproject.toml` + `uv.lock`; stage 2 runs on the Playwright Python base — Chromium + system deps preinstalled — plus Node 22 for the Hyperframes CLI, `ffmpeg`, `yt-dlp`, and the prebuilt venv). Final image stays under 2 GB. Uvicorn binds `:8000` inside the container; non-root `app` user; healthcheck hits `/work/health` with the bearer secret read from env at runtime. **`expose: ["8000"]` only — no public port binding.**
-- **Caddy fronts only the dashboard.** [VPS-9 / #230](../../issues/230) configures Caddy's site address as `dashboard.voxhorizon.com` and `reverse_proxy`s to `web:3000`. The worker route was dropped — the public surface for the worker no longer exists. The compose network is the only path web→worker.
-- **`WORKER_URL=http://worker:8000`.** The dashboard's `lib/worker.ts` reaches the worker via Docker's internal DNS. Docker Compose resolves the service name `worker` to the container's network address on the `voxhorizon` network. No public TLS hop, no internet round-trip — the only credentials the call needs are the bearer (`WORKER_SHARED_SECRET`).
+### Image pipeline
 
-#### Reverse proxy (Caddy ↔ Cloudflare ↔ web)
+- **`build-web.yml`** builds the repo-root `Dockerfile` (Next.js standalone) and pushes `ghcr.io/pveloso01/voxhorizon-web:{latest,<sha>}`. Build-time secrets (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_VAPID_PUBLIC_KEY`) are injected as `--build-arg`s — Next.js inlines them at build time.
+- **`build-worker.yml`** builds `worker/Dockerfile` and pushes `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`. The worker reads every secret at runtime; no build-time secrets needed. The worker image includes the Python Docker SDK (`docker>=7.0`) so the `hermes_bridge.py` service can `exec_run` into Ekko.
 
-Public HTTPS for the dashboard terminates at Caddy. The chain is:
+### Compose stack
 
-```
-   Diogo's browser
-            │
-            │ HTTPS (TLS via Cloudflare edge cert)
-            ▼
-   Cloudflare edge (proxy = ON, orange cloud)
-            │
-            │ HTTPS (TLS via Let's Encrypt cert held by Caddy)
-            │ SSL/TLS mode = Full (strict) — Cloudflare validates Caddy's cert
-            ▼
-   Caddy (caddy:2-alpine, ports 80/443/443-udp)
-            │
-            │ HTTP on the compose network
-            ▼
-   web:3000 (Next.js standalone server)
-            │
-            │ HTTP on the compose network · Authorization: Bearer …
-            ▼
-   worker:8000 (FastAPI / Uvicorn, expose-only)
+```yaml
+services:
+  caddy: # public TLS termination on dashboard.voxhorizon.com
+  web: # Next.js, expose:3000
+  worker: # FastAPI, expose:8000
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    group_add:
+      - "${DOCKER_GID}" # so the non-root app user can use the socket
+    environment:
+      HERMES_CONTAINER_NAME: hermes-agent-ekko
 ```
 
-- **Site address.** The Caddyfile uses `dashboard.voxhorizon.com` as the site matcher (with a `{$VOXHORIZON_WEB_HOST:...}` env hook for staging / local dev). The var is set in `/opt/voxhorizon/.env` on the VPS.
-- **TLS.** Caddy obtains and renews a Let's Encrypt cert for the configured host automatically. State (ACME account, cert chain, OCSP staples) lives in the named volume `voxhorizon-caddy-data`; site state in `voxhorizon-caddy-config`.
-- **Cloudflare.** DNS A record (`dashboard.voxhorizon.com` → VPS public IP) with proxy ON. SSL/TLS mode is **Full (strict)** so Cloudflare validates the upstream cert from Let's Encrypt end-to-end.
-- **SSE preservation.** Caddy's `reverse_proxy` is configured with `flush_interval -1` — every token written by the dashboard's SSE proxy (`/api/worker/chat/*`) is flushed to the client immediately. Without this, chat-with-Ekko would receive the entire agent turn at once instead of streaming.
-- **HTTP/3.** Port `443/udp` is exposed so Caddy can serve HTTP/3 to clients that support it; Cloudflare's edge negotiates HTTP/3 separately on the user side.
-- **Logs.** Caddy writes JSON access logs to `/var/log/caddy/access.log` inside the container, persisted via the `voxhorizon-caddy-logs` named volume. Log rotation is configured in the Caddyfile (50 MB per file, keep 5).
-- **Local dev.** Caddy is not required for local development — the dev workflow runs `pnpm dev` against `http://localhost:3000` and the worker via `bash scripts/serve.sh` on `http://localhost:8000`. See [`infra/caddy/README.md`](./infra/caddy/README.md) for the local-Caddy + self-signed-cert path when reproducing a TLS-specific bug.
+The `hermes-agent-ekko` container is **not** declared in our compose file — it's managed by the operator under `/docker/hermes-agent-t4k4/` on the VPS. Our worker simply addresses it by container name on the shared Docker daemon.
 
-#### Image pipeline + env handling
+### Hermes-side install (post-deploy, one-shot)
 
-- **GHCR image pipeline.** Two GitHub Actions workflows build the images on every push to `main`:
-  - `build-web.yml` builds the repo-root `Dockerfile` and tags `ghcr.io/pveloso01/voxhorizon-web:{latest,<sha>}`. Build-time secrets (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_VAPID_PUBLIC_KEY`) are injected as `--build-arg`s — Next.js inlines them at build time, which is why rotating any `NEXT_PUBLIC_*` value forces a CI rebuild + redeploy, not just a container restart. See [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets).
-  - `build-worker.yml` builds `worker/Dockerfile` and tags `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`. The worker reads every secret at runtime from `/opt/voxhorizon/.env`, so no build-time secrets are needed.
-- **Env on the VPS.** `/opt/voxhorizon/.env` (chmod 600, owned by the `deploy` user) is mounted by **both** `web` and `worker` via `env_file:` — the union of variables both containers need (see [`SECRETS.md`](./SECRETS.md#vps-production-secrets) for the full inventory). Locally the dev overrides are `env_file: ./.env.local` for web and `env_file: ./worker/.env` for the worker.
-- **Health routes.** The worker exposes `/work/health` (bearer-authed) for the container healthcheck. The dashboard exposes `/api/health` for its own container healthcheck and for Caddy upstream probes.
-- **State.** Named volumes keep the b-roll pool (`voxhorizon-worker-broll-pool`) and worker runtime sidecars (`voxhorizon-worker-logs`) across image rebuilds. Caddy state lives in `voxhorizon-caddy-data` / `voxhorizon-caddy-config` / `voxhorizon-caddy-logs`. The `web` container is stateless (Next.js standalone — all state is in Supabase or the worker's volumes).
+After our compose stack is up, the operator applies the Hermes-side overlay (idempotent):
 
-### Deployment pipeline
+1. Apply `infra/hermes/config.yaml.patch` to `/docker/hermes-agent-t4k4/config.yaml` — adds the `post_tool_call` / `session_end` hooks and registers `voxhorizon-approvals` in `plugins.enabled`.
+2. Copy `ekko-skills/{dashboard-publish,dashboard-chat-publish,dashboard-task-result}/` to `/opt/data/skills/` on the VPS.
+3. Copy `ekko-plugins/voxhorizon_approvals/` to `/opt/data/home/.hermes/plugins/`.
+4. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `DASHBOARD_WEBHOOK_URL`, `DASHBOARD_WEBHOOK_TOKEN`, `VOXHORIZON_APPROVAL_WORKER_URL`, `VOXHORIZON_APPROVAL_TOKEN` in `/opt/data/.env`.
+5. Restart `hermes-agent-ekko`.
 
-Pushes to `main` trigger one or both image-build workflows (`build-web.yml`, `build-worker.yml`) depending on what changed. After either build succeeds, the `deploy-stack.yml` workflow (renamed from `deploy-worker.yml` by [VPS-10 / #231](../../issues/231)) SSHes into the VPS as the `deploy` user with a dedicated ed25519 key and rolls the affected service(s).
+Health-check the bridge:
 
-The remote rollout script:
+- `curl http://worker:8000/work/health` (inside the compose network) → `{ok:true, hermes_container:"running"}`.
+- `curl http://worker:8000/work/hermes/approval` → `200` with a valid bearer.
+- `docker compose exec worker python -c "import docker; print(docker.from_env().containers.get('hermes-agent-ekko').status)"` → `running`.
+
+See [`infra/deploy/README.md`](./infra/deploy/README.md) for the full deploy contract.
+
+### Per-service rollback
+
+Each container has its own image tag; rollback pins only the broken service:
 
 ```bash
-cd /opt/voxhorizon
-git fetch --quiet origin main
-git reset --hard origin/main            # sync compose file + Caddyfile
-docker login ghcr.io …                  # GHA token, password-stdin
-docker compose pull                      # pulls whichever images changed
-docker compose up -d --remove-orphans    # rolls only services with new images
-# poll healthchecks (web + worker) for ~50s each
-docker image prune -f
-```
-
-`docker compose up -d` is idempotent: services whose image digest hasn't changed are left running; only the affected container(s) restart. So a worker-only change rolls only the worker; a web-only change rolls only the dashboard. The healthcheck loop checks both containers and fails the rollout (non-zero exit, log dump from the unhealthy service) if either doesn't report healthy within ~50s.
-
-Concurrency: `group: deploy-stack`, `cancel-in-progress: false`. Two pushes in quick succession queue rather than racing.
-
-**Rollback is per-service.** Because each container has its own image tag, the operator can pin only the bad service to a previous SHA:
-
-```bash
-# roll back ONLY web
 WEB_IMAGE_TAG=<prev-web-sha>   docker compose up -d web
-
-# roll back ONLY worker
 WORKER_IMAGE_TAG=<prev-worker-sha> docker compose up -d worker
 ```
 
-See [`infra/deploy/README.md`](./infra/deploy/README.md) for the full operator contract (per-service rollback walkthrough, log locations, manual-dispatch flow) and [`SECRETS.md`](./SECRETS.md#github-actions-deploy-secrets) for the SSH-key + build-arg handling.
+The Hermes container is operator-rolled (Hostinger's image, pinned in `/docker/hermes-agent-t4k4/docker-compose.yml`).
 
 ---
 
-## 8. Decision log
+## 12. Decision log
 
-Locked decisions from the six discovery rounds. Dated. **Master Tracker [#72](../../issues/72) is the canonical source if anything below drifts.**
+Locked decisions, dated. **Master Tracker [#72](../../issues/72) is the canonical source if anything below drifts.**
 
-| Date       | Decision                                                                                           | Rationale                                                                                                                                                                                                                                                                                                                         |
-| ---------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-05-16 | Two-pipeline v1 (image + video), parallel-vertical schema.                                         | Image alone was insufficient; video is core to VoxHorizon's output cadence. Parallel-vertical lets either side evolve independently.                                                                                                                                                                                              |
-| 2026-05-16 | Single operator (Diogo). No app-level auth.                                                        | Network boundary (Caddy + Cloudflare) + worker bearer is enough; building multi-user auth pre-product-market-fit is waste.                                                                                                                                                                                                        |
-| 2026-05-16 | Slack dropped from the marketing dept.                                                             | The Slack workflow was the bottleneck this build replaces. Keeping it would dilute the rebuild.                                                                                                                                                                                                                                   |
-| 2026-05-18 | Single-host VPS stack (web + worker as two containers fronted by Caddy on one Hostinger VPS).      | Lower latency (web→worker is a Docker-network hop, not public TLS), single ops surface, smaller attack surface (worker has no public port), no Vercel dependency. Supersedes the Mac+Tailscale-Funnel and Vercel paths. See Master Tracker [#72](../../issues/72) for the full topology-revision decision-log entry (2026-05-18). |
-| 2026-05-16 | Supabase (Postgres + Realtime + Storage). Region us-east-1. Project `jfzxlsaywztlytnobgej`.        | Real-time UI updates from Postgres are the killer feature; Storage colocates well; us-east-1 is geographically close to the VPS region.                                                                                                                                                                                           |
-| 2026-05-16 | Next.js 15 (App Router) + React 19 + Tailwind + shadcn/ui. Light mode only.                        | Matches Diogo's familiarity, has best-in-class server-side rendering for Realtime-driven UI, light mode matches the developer-tool aesthetic.                                                                                                                                                                                     |
-| 2026-05-16 | Hybrid Kanban + funnel header.                                                                     | Discovery: pure Kanban hides funnel pressure; pure funnel hides individual brief state. Hybrid carries both.                                                                                                                                                                                                                      |
-| 2026-05-16 | Per-creative side panel for review (image + prompt + thread + chat-with-Ekko + approve/reject).    | Single locus for everything an operator needs; cuts back-and-forth between tabs.                                                                                                                                                                                                                                                  |
-| 2026-05-16 | Drive mirror with naming enforcement.                                                              | Operator shares Drive URLs externally; the worker controls naming so links stay stable.                                                                                                                                                                                                                                           |
-| 2026-05-16 | Browser push + email notifications (Resend).                                                       | Two channels for redundancy. Push for live presence, email for offline.                                                                                                                                                                                                                                                           |
-| 2026-05-16 | Cron jobs on the worker. No cloud cron.                                                            | Single operator + always-on VPS container means cron is a local scheduler problem, not a SaaS one.                                                                                                                                                                                                                                |
-| 2026-05-16 | RLS off for v1.                                                                                    | Single operator. RLS becomes the entry point for the multi-operator follow-up; not blocking it.                                                                                                                                                                                                                                   |
-| 2026-05-16 | LocalBrollStore primary; SupabaseBrollStore deferred.                                              | Local-first matches the b-roll pool's growth pattern (Diogo curates over time); Supabase migration is a flip later.                                                                                                                                                                                                               |
-| 2026-05-16 | Claude Code as the agent runtime. Subprocess for batch, Agent SDK for chat.                        | Authenticated via `ANTHROPIC_API_KEY` in the worker container's env; supports both modes natively; skills layer is the right abstraction for two pipeline shapes.                                                                                                                                                                 |
-| 2026-05-16 | Conventional Commits + single-author workflow. No Co-Authored-By or AI attribution in commits/PRs. | Aesthetic preference; preserves a clean human-authored history for the operator.                                                                                                                                                                                                                                                  |
-| 2026-05-16 | `events` and `sync_log` excluded from Realtime publication.                                        | Noise. The UI doesn't need to react to every domain event; targeted queries serve the surfaces that care.                                                                                                                                                                                                                         |
-| 2026-05-16 | `overrides` table as the operator-correction layer.                                                | Hand-edits without mutating pipeline rows; left-join at read time.                                                                                                                                                                                                                                                                |
+| Date           | Decision                                                                                                                                                                                 | Rationale                                                                                                                                                                                                                                                |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-05-16     | Two-pipeline v1 (image + video), parallel-vertical schema.                                                                                                                               | Image alone was insufficient; video is core to VoxHorizon's output cadence. Parallel-vertical lets either side evolve independently.                                                                                                                     |
+| 2026-05-16     | Single operator (Diogo). No app-level auth.                                                                                                                                              | Network boundary (Caddy + Cloudflare) + worker bearer is enough; building multi-user auth pre-product-market-fit is waste.                                                                                                                               |
+| 2026-05-16     | Slack dropped from the marketing dept.                                                                                                                                                   | The Slack workflow was the bottleneck this build replaces. Keeping it would dilute the rebuild.                                                                                                                                                          |
+| 2026-05-18     | Single-host VPS stack (web + worker as two containers fronted by Caddy on one Hostinger VPS).                                                                                            | Lower latency, single ops surface, smaller attack surface. Supersedes the Mac+Tailscale-Funnel and Vercel paths.                                                                                                                                         |
+| 2026-05-16     | Supabase (Postgres + Realtime + Storage). Region us-east-1. Project `jfzxlsaywztlytnobgej`.                                                                                              | Real-time UI updates from Postgres are the killer feature; Storage colocates well.                                                                                                                                                                       |
+| 2026-05-16     | Next.js 15 (App Router) + React 19 + Tailwind + shadcn/ui.                                                                                                                               | Familiar, server-side-rendering-friendly, matches the developer-tool aesthetic.                                                                                                                                                                          |
+| 2026-05-16     | Hybrid Kanban + funnel header.                                                                                                                                                           | Pure Kanban hides funnel pressure; pure funnel hides individual brief state. Hybrid carries both.                                                                                                                                                        |
+| 2026-05-16     | Per-creative side panel for review (image + prompt + thread + chat-with-Ekko + approve/reject).                                                                                          | Single locus for everything; cuts back-and-forth between tabs.                                                                                                                                                                                           |
+| 2026-05-16     | Browser push + email notifications (Resend).                                                                                                                                             | Two channels for redundancy. Push for live presence, email for offline.                                                                                                                                                                                  |
+| 2026-05-16     | RLS off for v1.                                                                                                                                                                          | Single operator. Becomes the entry point for the multi-operator follow-up.                                                                                                                                                                               |
+| 2026-05-16     | Conventional Commits + single-author workflow. No Co-Authored-By or AI attribution in commits/PRs.                                                                                       | Aesthetic preference; preserves a clean human-authored history for the operator.                                                                                                                                                                         |
+| **2026-05-18** | **Hermes/Ekko replaces Claude Code as the agent engine.** Worker LOC reduced ~80%; the worker becomes a thin Hermes bridge (Docker socket exec + kanban + webhook + approval long-poll). | Probed the VPS: Hostinger's HVPS Hermes Agent already has 42 production marketing skills, durable kanban, FTS5 memory, provider-agnostic LLM routing. Reusing it skipped ~3,000 LOC of orchestration work and put the dashboard on a known-good runtime. |
+| **2026-05-18** | **Dashboard-driven approvals via in-process `pre_tool_call` plugin.**                                                                                                                    | Plugin path is **50–100× faster** than a shell-hook subprocess on the hot path (allowlisted reads dominate). Fail-closed when the worker is unreachable.                                                                                                 |
+| **2026-05-18** | **Distinct bearer tokens per Hermes→worker surface** (`DASHBOARD_WEBHOOK_TOKEN`, `VOXHORIZON_APPROVAL_TOKEN`, `INTERNAL_API_TOKEN`).                                                     | Containment: an Ekko compromise that leaks the webhook token can't pivot to the approval surface or the internal email render endpoint.                                                                                                                  |
+| 2026-05-16     | `events` and `sync_log` excluded from Realtime publication.                                                                                                                              | Noise. The UI doesn't need to react to every domain event; targeted queries serve the surfaces that care.                                                                                                                                                |
+| 2026-05-16     | `overrides` table as the operator-correction layer.                                                                                                                                      | Hand-edits without mutating pipeline rows; left-join at read time.                                                                                                                                                                                       |
 
 ---
 
-## 9. What's intentionally NOT in v1
+## 13. What's intentionally NOT in v1
 
 - Multi-tenant. `client_id` exists for analytical hygiene only.
-- Public worker surface. The worker is internal-only on the Docker network; only the dashboard is publicly addressable.
+- Public worker surface. The worker is internal-only on the Docker network.
+- Public Hermes ttyd. The admin TTY stays on localhost (or behind Hostinger's reverse proxy if the operator wants it remote).
 - Automated Meta posting. Manual approval gate, explicit, retained intentionally.
-- Multi-host / multi-VPS deploy. v1 is one VPS, one stack. Scaling horizontally is post-v1.
-- Vercel hosting. The dashboard runs as a container on the VPS alongside the worker; Vercel is not in the v1 production path.
+- Multi-host / multi-VPS deploy. v1 is one VPS, one stack.
+- Vercel hosting.
 - Slack reintegration of any kind.
 - ClickUp integration. The operator manages tasks outside the panel.
-- RLS policies. RLS is off; a future migration is the entry point.
+- RLS policies. A future migration is the entry point.
 - Multi-language UI. English only.
 - Theme toggle. Light mode only.
-- Mobile-first responsive. Desktop-first; mobile responsive sweep lands in M5.
+- Mobile-first responsive. Desktop-first; mobile responsive sweep lands later.
 - Web Application Firewall.
 - Cross-client portfolio analytics beyond per-client perf rollups.
 - Per-creative comments from non-operator parties.
 - Email reply parsing.
 - File version history (Drive holds canonical revisions externally).
 - Granular per-feature permissions.
-- Audit log retention policy. Append-only forever; if size becomes an issue, partition `events` later.
+- Audit log retention policy. Append-only forever; if size becomes an issue, partition `events` / `approvals` later.
+- Approval batching ("approve all 4 of these `kie_generate` calls at once"). v1 is one approval per tool call.
+- LLM-driven risk classification. v1 uses a static policy file; a follow-up could use `ctx.llm.complete()` inside the plugin.
+- Multi-agent kanban dispatch (Forge / Archer / Monarch in parallel — explore once Ekko-only proves stable).

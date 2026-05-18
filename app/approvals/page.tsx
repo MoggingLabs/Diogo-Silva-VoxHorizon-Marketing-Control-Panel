@@ -1,7 +1,13 @@
 import type { Route } from "next";
 import Link from "next/link";
 
-import { ApprovalStatusEnum, ApprovalDecisionEnum, type Approval } from "@/lib/approvals/types";
+import {
+  ApprovalStatusEnum,
+  ApprovalDecisionEnum,
+  type Approval,
+  type ApprovalDecision,
+  type ApprovalStatus,
+} from "@/lib/approvals/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 import { ApprovalsTable } from "./ApprovalsTable";
@@ -37,21 +43,21 @@ export default async function ApprovalsAuditPage({ searchParams }: { searchParam
   const decisionParam = first(params.decision);
 
   const supabase = createAdminClient();
-  // Cast to `any` until Wave 22 regenerates the Supabase types.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let q: any = (supabase as any)
+  let q = supabase
     .from("approvals")
     .select("*")
     .order("requested_at", { ascending: false })
     .limit(200);
 
   const status =
-    statusParam && ApprovalStatusEnum.safeParse(statusParam).success ? statusParam : undefined;
+    statusParam && ApprovalStatusEnum.safeParse(statusParam).success
+      ? (statusParam as ApprovalStatus)
+      : undefined;
   if (status) q = q.eq("status", status);
   if (sessionParam) q = q.eq("ekko_session_id", sessionParam);
   if (toolParam) q = q.eq("tool_name", toolParam);
   if (decisionParam && ApprovalDecisionEnum.safeParse(decisionParam).success) {
-    q = q.eq("decision", decisionParam);
+    q = q.eq("decision", decisionParam as ApprovalDecision);
   }
 
   const { data, error } = await q;

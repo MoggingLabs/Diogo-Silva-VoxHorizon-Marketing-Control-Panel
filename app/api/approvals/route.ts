@@ -39,11 +39,7 @@ export async function GET(req: NextRequest) {
   const effectiveStatus = status ?? "pending";
 
   const supabase = createAdminClient();
-  // The generated types don't yet include the `approvals` table; cast the
-  // chain to `any` so column-name typing doesn't reject the new fields.
-  // Wave 22 regenerates types and removes this cast.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let q: any = (supabase as any)
+  let q = supabase
     .from("approvals")
     .select("*")
     .order("requested_at", { ascending: false })
