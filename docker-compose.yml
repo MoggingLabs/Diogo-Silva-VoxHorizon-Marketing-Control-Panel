@@ -25,6 +25,12 @@ services:
       - /opt/voxhorizon/.env
     expose:
       - "8000"
+    # Hermes bridge (HI-5, #247): the worker exec_runs into the co-located
+    # Hermes container (Ekko runtime) via the host's Docker socket. Names
+    # are sourced from env so dev/prod can target different containers.
+    environment:
+      HERMES_CONTAINER_NAME: ${HERMES_CONTAINER_NAME:-hermes-agent-ekko}
+      DASHBOARD_WEBHOOK_TOKEN: ${DASHBOARD_WEBHOOK_TOKEN}
     volumes:
       # B-roll pool — Diogo curates this over time; persistent named
       # volume keeps it across image rebuilds.
@@ -33,6 +39,22 @@ services:
       # structlog), but anything written under /app/storage (sidecars,
       # tmp transcode buffers) lives here.
       - worker-logs:/app/storage/logs
+      # Host Docker socket — rw, required for the Hermes bridge to
+      # exec_run into hermes-agent-ekko. SECURITY: this is effectively
+      # root-equivalent access on the host; the worker is co-located
+      # with Ekko by design (already trusted neighbors), all worker
+      # routes are bearer-authed, and the worker has no untrusted code
+      # path. See SECRETS.md (HI-12) for the full threat model.
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The `app` user inside the worker image (uid 1001) needs to be a
+    # member of the host's docker group to read /var/run/docker.sock.
+    # `group_add` injects the supplementary GID into the container's
+    # process at runtime — no Dockerfile change required. Default 988
+    # matches the Hostinger VPS probes; override via DOCKER_GID in
+    # /opt/voxhorizon/.env if the host's docker group has a different
+    # GID (`getent group docker`).
+    group_add:
+      - "${DOCKER_GID:-988}"
     healthcheck:
       test:
         - CMD-SHELL
