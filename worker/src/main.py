@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import get_settings
 from .routes import (
     health,
+    hermes_approval,
     hermes_chat,
     hermes_kanban,
     hermes_webhook,
@@ -86,6 +87,16 @@ def create_app() -> FastAPI:
     app.include_router(hermes_chat.router, tags=["hermes-chat"])
     app.include_router(hermes_kanban.router, tags=["hermes-kanban"])
     app.include_router(hermes_webhook.router, tags=["hermes-webhook"])
+
+    # === wave 19 dashboard-driven approvals ===
+    # /work/hermes/approval is the worker side of the approval long-poll.
+    # The Hermes plugin (voxhorizon-approvals, HI-13) POSTs here from
+    # inside the Ekko container; this endpoint inserts a pending row,
+    # polls Supabase for the operator's decision, and returns the verdict
+    # to the plugin so the agent's tool call can proceed or abort.
+    # Bearer-authed with VOXHORIZON_APPROVAL_TOKEN (separate from
+    # WORKER_SHARED_SECRET — the plugin doesn't share the dashboard's key).
+    app.include_router(hermes_approval.router, tags=["hermes-approval"])
 
     structlog.get_logger(__name__).info(
         "worker_started",
