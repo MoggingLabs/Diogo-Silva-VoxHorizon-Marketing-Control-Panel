@@ -1,4 +1,17 @@
 /**
+ * DORMANT SINCE 2026-05-18 — Slack pivot.
+ *
+ * The high-urgency approval notification path moved from Resend email
+ * to a direct Slack chat.postMessage call inside the worker. The active
+ * surface is `worker/src/services/approval_notifications.py::_post_slack`.
+ *
+ * This route + its react-email template
+ * (`lib/emails/HighUrgencyApprovalEmail.tsx`) are kept in the tree as
+ * dormant code so reviving the email channel is a one-config-flag flip
+ * rather than a full re-implementation. The Python worker no longer
+ * POSTs here in v1; the route stays mounted for parity with the
+ * existing tests and for forward compatibility.
+ *
  * POST /api/internal/approval-email — HI-17 internal route.
  *
  * The Python worker calls this endpoint after inserting a high-urgency

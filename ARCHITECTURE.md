@@ -228,10 +228,10 @@ Ekko's agent loop calls a tool (e.g. kie_generate)
 │   1. INSERT into Supabase `approvals` (status='pending').      │
 │   2. Long-poll: Supabase Realtime subscription (≤500ms wake)   │
 │      with 250ms polling fallback.                              │
-│   3. ALSO fan out a notification (see §5):                     │
+│   3. ALSO fan out a notification (see §6):                     │
 │       - VAPID push to operator's browser (always)              │
-│       - Resend email (if risk_class='external-write' OR        │
-│         context.estimated_cost > 50)                           │
+│       - Slack chat.postMessage (if risk_class='external-write' │
+│         OR context.estimated_cost > 50)                        │
 │   4. Configurable timeout (default 600s). On timeout, return   │
 │      {"action": "block", "message": "Operator did not respond"}│
 └────────────────────────────────────────────────────────────────┘
@@ -292,11 +292,44 @@ Other budgets worth recording:
 Every approval inserted via the worker triggers a fan-out:
 
 - **Always**: VAPID web-push to every device in `push_subscriptions` (best-effort; failures are logged, never block the approval).
-- **High-urgency only**: a Resend transactional email to `OPERATOR_EMAIL`. High-urgency is defined as `risk_class === "external-write"` OR `context.estimated_cost > 50`.
+- **High-urgency only**: a Block Kit message to the `#mkt-dept-updates` Slack channel (workspace `voxhorizon-internal`, channel ID `C0B43582YJF`) via `chat.postMessage`. High-urgency is defined as `risk_class === "external-write"` OR `context.estimated_cost > 50`.
 
-Implementation lives in `worker/src/services/approval_notifications.py`. The email render endpoint (`/api/internal/emails/high-urgency-approval/render`) is a Next.js internal route — the worker POSTs the approval row + computed urgency rationale, the route renders the HTML via the React Email template at `lib/emails/HighUrgencyApprovalEmail.tsx`, and the worker hands the rendered body to Resend.
+```
+                           ┌──────────────────────────────────────┐
+                           │ approvals INSERT (status='pending')  │
+                           └──────────────────────────────────────┘
+                                              │
+                          ┌───────────────────┴───────────────────┐
+                          ▼                                       ▼
+            ┌─────────────────────────┐         ┌──────────────────────────────┐
+            │ ALWAYS                  │         │ HIGH-URGENCY ONLY            │
+            │ push_delivery.fanout_  │         │ external-write OR cost > $50 │
+            │ push → pywebpush →     │         │                              │
+            │ every push_subscription│         │ chat.postMessage →           │
+            │                        │         │   #mkt-dept-updates          │
+            │  expired (404/410) →   │         │   ↳ Block Kit (header +      │
+            │  prune row             │         │     context + cost +         │
+            └─────────────────────────┘         │     args + CTA)              │
+                                                └──────────────────────────────┘
+```
+
+Implementation lives in `worker/src/services/approval_notifications.py`. The Slack call goes directly to `https://slack.com/api/chat.postMessage` using the `Ekko` bot token sourced at deploy time from `/docker/hermes-shared/config/secrets.json` (key `EKKO_SLACK_BOT_TOKEN`) and surfaced as `SLACK_BOT_TOKEN`. Sensitive keys in `tool_args` (`*_token`, `*_secret`, `password`, `api_key`) are redacted before serialization — Slack channels are logged + indexed so anything we post becomes permanent.
+
+The Block Kit body is composed of:
+
+1. `header` — `Approval needed: <tool>` with a leading icon (`⚠️` for `external-write`, `💰` for cost-driven).
+2. `section` — context fields (pipeline, brief, creative, skill, session, risk) — only the keys actually present.
+3. `section` — `Estimated cost: $X.XX`; above $100, decorated as `🚨 HIGH SPEND` for at-a-glance triage.
+4. `section` — sanitized JSON args, truncated to ≤600 chars, wrapped in a triple-backtick code fence.
+5. `actions` — single primary button "Open in dashboard" linking to `${DASHBOARD_BASE_URL}/approvals/{id}`.
+
+The Slack call is fire-and-forget — any failure (`ok: false`, network error, malformed JSON) is logged as `slack_post_failed` / `slack_post_exception` and swallowed; the badge still updates via Supabase Realtime regardless. If `SLACK_BOT_TOKEN` or `SLACK_APPROVAL_CHANNEL_ID` is unset, the worker logs `slack_notification_skipped_missing_env` and continues — push still runs.
 
 Push delivery uses VAPID keys (`VAPID_PUBLIC_KEY` for the browser subscribe, `VAPID_PRIVATE_KEY` for the server-side sign). Failed deliveries (HTTP 410 / 404) prune the dead subscription row from `push_subscriptions`.
+
+### Dormant: Resend email path
+
+Pre-2026-05-18, the high-urgency surface was a transactional email shipped through Resend, rendered server-side via a `react-email` template at `lib/emails/HighUrgencyApprovalEmail.tsx` and routed through `app/api/internal/approval-email/route.ts`. The route and template are preserved in the tree as dormant code so the pivot is reversible — reviving the email channel is a one-config-flag flip plus restoring `RESEND_API_KEY`, `OPERATOR_EMAIL`, and `INTERNAL_API_TOKEN` rather than re-implementing.
 
 The dashboard's sidebar badge counts every pending approval in `approvals` via a server-side query, refreshed on Realtime push.
 
@@ -419,8 +452,9 @@ Layered. No single failure removes all defenses.
 - **Hermes → worker boundary: bearer tokens, distinct per surface.**
   - `DASHBOARD_WEBHOOK_TOKEN` — Ekko's shell hooks → worker webhook.
   - `VOXHORIZON_APPROVAL_TOKEN` — `voxhorizon-approvals` plugin → worker approval long-poll.
-  - `INTERNAL_API_TOKEN` — worker → Next.js internal email render endpoint.
+  - `INTERNAL_API_TOKEN` (dormant) — worker → Next.js internal email render endpoint. Currently unused after the 2026-05-18 Slack pivot; preserved so reviving the email channel is a config-only change.
     Keeping the tokens distinct means an Ekko compromise that leaks the webhook token can't pivot to the approval surface.
+- **Worker → Slack boundary: bot token.** `SLACK_BOT_TOKEN` (the `Ekko` bot in workspace `voxhorizon-internal`) is sent only as a request header to `slack.com/api/chat.postMessage`; the worker never accepts inbound Slack traffic.
 - **Worker → Hermes: Docker socket.** The worker mounts `/var/run/docker.sock`. This is **root-equivalent access on the host** — mitigations documented in [`SECRETS.md`](./SECRETS.md#docker-socket-trade-off): only the worker mounts it, the worker has strict bearer auth on every route, no untrusted code paths run in the worker, the worker and Ekko are co-located by design.
 - **Optional middleware.** `middleware.ts` implements an IP gate hook. Default: off. Setting `TAILSCALE_ONLY=1` logs non-tailnet IPs; `TAILSCALE_ONLY=strict` returns 403. Repurposable when the operator wants a Tailscale-only access layer in front of the dashboard for staging.
 - **No Supabase Auth.** No user accounts. No magic links. No JWT issuance. RLS is off. The service-role key is the only credential the app ever uses against Postgres.
@@ -500,6 +534,7 @@ Locked decisions, dated. **Master Tracker [#72](../../issues/72) is the canonica
 | 2026-05-16     | Hybrid Kanban + funnel header.                                                                                                                                                           | Pure Kanban hides funnel pressure; pure funnel hides individual brief state. Hybrid carries both.                                                                                                                                                        |
 | 2026-05-16     | Per-creative side panel for review (image + prompt + thread + chat-with-Ekko + approve/reject).                                                                                          | Single locus for everything; cuts back-and-forth between tabs.                                                                                                                                                                                           |
 | 2026-05-16     | Browser push + email notifications (Resend).                                                                                                                                             | Two channels for redundancy. Push for live presence, email for offline.                                                                                                                                                                                  |
+| **2026-05-18** | **Slack `chat.postMessage` replaces Resend email for the high-urgency surface.** Resend route + react-email template kept in-tree as dormant code.                                       | The operator already lives in Slack daily; surfacing high-urgency approvals where attention is shortens response time. Pivot is reversible via a single config-flag flip, so the email infrastructure stays in place.                                    |
 | 2026-05-16     | RLS off for v1.                                                                                                                                                                          | Single operator. Becomes the entry point for the multi-operator follow-up.                                                                                                                                                                               |
 | 2026-05-16     | Conventional Commits + single-author workflow. No Co-Authored-By or AI attribution in commits/PRs.                                                                                       | Aesthetic preference; preserves a clean human-authored history for the operator.                                                                                                                                                                         |
 | **2026-05-18** | **Hermes/Ekko replaces Claude Code as the agent engine.** Worker LOC reduced ~80%; the worker becomes a thin Hermes bridge (Docker socket exec + kanban + webhook + approval long-poll). | Probed the VPS: Hostinger's HVPS Hermes Agent already has 42 production marketing skills, durable kanban, FTS5 memory, provider-agnostic LLM routing. Reusing it skipped ~3,000 LOC of orchestration work and put the dashboard on a known-good runtime. |

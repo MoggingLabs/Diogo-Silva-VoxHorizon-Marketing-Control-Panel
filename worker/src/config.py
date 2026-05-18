@@ -58,12 +58,19 @@ class Settings(BaseSettings):
     # Observability
     tailscale_hostname: str = "voxhorizon-worker"
 
-    # Internal Next.js API (HI-17): the worker calls /api/internal/approval-email
-    # to render + ship Resend emails for high-urgency approvals. Both values
-    # are optional — when either is missing the fan-out helper logs and
-    # gracefully skips the email step (push still fires).
-    internal_api_base_url: str | None = None
-    internal_api_token: str | None = None
+    # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
+    # posts high-urgency approval notifications to a single Slack channel via
+    # chat.postMessage. The bot token is sourced at deploy time from
+    # /docker/hermes-shared/config/secrets.json (key EKKO_SLACK_BOT_TOKEN) and
+    # surfaced into the container as SLACK_BOT_TOKEN. The channel ID is the
+    # static Slack ID for #mkt-dept-updates. Both values are optional at boot —
+    # when either is missing the fan-out helper logs and gracefully skips
+    # the Slack step (push still fires).
+    slack_bot_token: str | None = None
+    slack_approval_channel_id: str | None = None
+    # Base URL the Slack "Open in dashboard" CTA links to. The worker never
+    # serves this URL itself; the link resolves on the operator's browser.
+    dashboard_base_url: str = "https://dashboard.voxhorizon.com"
 
     @field_validator("*", mode="before")
     @classmethod
