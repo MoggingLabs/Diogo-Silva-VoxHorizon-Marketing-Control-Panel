@@ -11,15 +11,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .routes import (
-    chat,
-    chat_stream,
     health,
     hermes_chat,
     hermes_kanban,
     hermes_webhook,
     pipeline,
     ping,
-    upload,
 )
 from .services.queue import get_queue
 
@@ -74,14 +71,6 @@ def create_app() -> FastAPI:
     # (Uptime Robot etc.). MUST stay free of auth dependencies — see
     # routes/ping.py and infra/monitoring/README.md (VPS-6).
     app.include_router(ping.router, tags=["ping"])
-    app.include_router(upload.router, tags=["upload"])
-    app.include_router(chat.router, tags=["chat"])
-
-    # === wave 5 chat routes ===
-    # SSE streaming endpoints for chat-with-Ekko (image + video). Lives on
-    # its own router so the chat.py placeholder for non-streaming agent
-    # work can evolve independently.
-    app.include_router(chat_stream.router, tags=["chat-stream"])
 
     # === wave 10 pipeline routes ===
     # /work/pipeline/config-draft streams Ekko's brief-strategist
