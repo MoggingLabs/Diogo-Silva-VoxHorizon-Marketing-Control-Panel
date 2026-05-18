@@ -1,0 +1,111 @@
+# Repo-root .dockerignore — applies to every build whose context is `.`.
+#
+# Today that's the web container (web/Dockerfile, see VPS-7 / #228 and
+# the compose service definition in VPS-8). The worker has its own
+# scoped context (./worker) and its own worker/.dockerignore — entries
+# here do NOT affect worker builds.
+#
+# Goal: keep the build context lean, never ship secrets, and exclude
+# anything irrelevant to the Next.js runtime image. Be conservative —
+# do NOT exclude files that legitimately need to be available at build
+# time (e.g. tsconfig.json, package.json, app/, components/, lib/,
+# middleware.ts, next.config.ts, postcss.config.mjs, tailwind.config.ts,
+# styles/, db/migrations referenced by typegen, etc.).
+
+# -----------------------------------------------------------------------------
+# Sibling service — never needed by the web image
+# -----------------------------------------------------------------------------
+worker/
+
+# -----------------------------------------------------------------------------
+# Infra / deployment scripts — not consumed by the runtime image
+# -----------------------------------------------------------------------------
+infra/
+docker-compose.yml
+Caddyfile
+
+# -----------------------------------------------------------------------------
+# Node / Next build outputs (rebuilt inside the container)
+# -----------------------------------------------------------------------------
+node_modules/
+.next/
+.turbo/
+out/
+dist/
+.vercel/
+*.tsbuildinfo
+next-env.d.ts
+
+# -----------------------------------------------------------------------------
+# Tests — not part of the runtime image
+# -----------------------------------------------------------------------------
+tests/
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+middleware.test.ts
+vitest.config.ts
+playwright.config.ts
+playwright-report/
+test-results/
+coverage/
+.nyc_output/
+
+# -----------------------------------------------------------------------------
+# Secrets — MUST never enter the build context
+# -----------------------------------------------------------------------------
+.env
+.env.local
+.env.*.local
+.env.development
+.env.test
+.env.production
+*.pem
+*.key
+.gh-token
+!.env.example
+!web/.env.example
+!worker/.env.example
+
+# -----------------------------------------------------------------------------
+# VCS / editor / OS noise
+# -----------------------------------------------------------------------------
+.git/
+.gitignore
+.gitattributes
+.github/
+.husky/
+.vscode/
+.idea/
+.claude/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# -----------------------------------------------------------------------------
+# Docs / scratch — not needed inside the image
+# -----------------------------------------------------------------------------
+README.md
+ARCHITECTURE.md
+SECRETS.md
+SETUP.md
+.plans/
+.scratch/
+*.log
+logs/
+
+# -----------------------------------------------------------------------------
+# Docker artefacts (self-reference + worker's local ignore)
+# -----------------------------------------------------------------------------
+.dockerignore
+web/Dockerfile
+worker/.dockerignore
+
+# -----------------------------------------------------------------------------
+# Supabase CLI scratch (the migrations themselves stay — they're tiny
+# SQL files referenced by typegen).
+# -----------------------------------------------------------------------------
+supabase/.temp/
+supabase/.branches/
