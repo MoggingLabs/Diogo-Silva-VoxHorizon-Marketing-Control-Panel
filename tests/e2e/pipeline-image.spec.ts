@@ -1,37 +1,22 @@
-import { test, expect, TEST_CLIENT_NAME } from "./_fixtures";
+import { test, expect, getTestAdminClient, TEST_CLIENT_NAME } from "./_fixtures";
+import { mockEkkoDraft, mockWorkerGeneration, mockWorkerIdeation } from "./_mocks/sse-harness";
 
 /**
  * Pipeline image-only happy path (PF-G-3 / #204).
  *
- * Walks the operator-driven slice of the pipeline from creation through
- * Configuration → Ideation, asserting each stage's scaffolding renders
- * correctly. The Generation → Done auto-advance depends on the worker
- * (Realtime task events + DB triggers); we cover the UI's empty-states /
- * stepper progression instead of mocking the worker — see the spec
- * description below for the explicit scope.
+ * Walks the full operator-driven slice of the pipeline from creation through
+ * Configuration → Ideation → Review → Generation → Done. The Generation
+ * auto-advance is driven by the SSE mock harness:
  *
- * What this spec verifies:
- *   1. `/pipeline/new` → creates a pipeline and lands the operator on the
- *      Configuration stage with `format=image` preselected (the default).
- *   2. Filling the required image-brief fields keeps the Continue CTA
- *      gated on the canonical zod schema, mirroring how the production
- *      UI behaves before the worker has any role.
- *   3. The cancel-pipeline header CTA is present on non-terminal stages
- *      and successfully cancels via the modal confirm.
+ *   * The `pipeline_events_auto_advance_done_trg` DB trigger flips the
+ *     pipeline forward when every `task_queued` is matched by a
+ *     `task_done`. We seed those events directly via the harness
+ *     (`tests/e2e/_mocks/`).
+ *   * Ekko's draft SSE is intercepted via `page.route` and a canned
+ *     `propose_config` payload is returned. The form hydrates from it.
  *
- * Scope intentionally excluded (lives outside the UI's owned surface):
- *   - Worker mock / SSE interception. The pipeline's Ideation→Done
- *     transitions are driven by Realtime events from the worker; with
- *     no worker running the pipeline never advances past Ideation's
- *     empty state. We assert that empty state directly instead.
- *   - End-to-end auto-advance to Done via `task_done` events. The DB
- *     trigger (PF-E-5) handles this on the server side; cross-server
- *     mocking isn't worth wiring through Playwright route interception
- *     for v1.
- *
- * If the worker mock infrastructure lands later, the post-Ideation steps
- * can be filled in (`page.route` interception for `/work/pipeline/*`)
- * without needing to touch this scaffold.
+ * The Wave 13 scope (configuration → cancel) is preserved as a separate
+ * `test()` so both the happy and cancel paths stay covered.
  */
 
 test.describe("pipeline — image format", () => {
@@ -102,5 +87,187 @@ test.describe("pipeline — image format", () => {
     // The cost-table doesn't render until Review stage. Verify the
     // Configuration subtitle is rendered (it documents the autosave behaviour).
     await expect(page.getByText(/autosaves as you go/i)).toBeVisible();
+  });
+
+  test("full happy path: configuration → ideation → review → generation → done", async ({
+    page,
+    clientId,
+  }) => {
+    void clientId;
+
+    // -----------------------------------------------------------------
+    // Step 1. Create a new pipeline (defaults to format='image').
+    // -----------------------------------------------------------------
+    await page.goto("/pipeline/new");
+    await expect(page).toHaveURL(/\/pipeline\/[a-f0-9-]{36}$/);
+    const url = page.url();
+    const pipelineId = url.match(/\/pipeline\/([a-f0-9-]{36})$/)?.[1];
+    if (!pipelineId) throw new Error(`could not extract pipeline id from ${url}`);
+
+    // -----------------------------------------------------------------
+    // Step 2. Configure: pick client + fill image brief.
+    // -----------------------------------------------------------------
+    const clientTrigger = page.locator("#stage-config-client");
+    await expect(clientTrigger).toBeEnabled();
+    await clientTrigger.click();
+    await page.getByRole("option", { name: new RegExp(TEST_CLIENT_NAME, "i") }).click();
+
+    // Select "Remodeling" — matches the seeded test client's service_type.
+    await page.getByLabel("Remodeling", { exact: true }).click();
+
+    await page.getByLabel(/^market$/i).fill("Austin, TX");
+    await page.getByLabel(/total budget/i).fill("5000");
+    await page.getByLabel(/landing page url/i).fill("https://example.com/lp");
+    // Add an offer so the brief is rich enough for downstream stages.
+    await page.getByLabel(/^offer$/i).fill("Free roof inspection");
+
+    // Wait for autosave to settle — the form debounces at 1s so an extra
+    // beat ensures the PATCH lands before we trigger the advance.
+    await expect(page.getByText("Saved", { exact: true })).toBeVisible({ timeout: 15_000 });
+
+    // -----------------------------------------------------------------
+    // Step 3. Advance to Ideation. The Continue button is gated on a
+    //         valid brief — after the autosave it should be enabled.
+    // -----------------------------------------------------------------
+    const continueBtn = page.getByRole("button", { name: /continue to ideation/i });
+    await expect(continueBtn).toBeEnabled();
+    await continueBtn.click();
+
+    // The advance route updates `status='ideation'` and stamps
+    // `image_brief_id`; the page refreshes server-side.
+    await expect(page.getByText("Ideation", { exact: true }).first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // -----------------------------------------------------------------
+    // Step 4. Seed ideation variants — the worker isn't running so
+    //         StageIdeation would otherwise stay empty.
+    // -----------------------------------------------------------------
+    const seeded = await mockWorkerIdeation(page, { pipelineId, n: 4 });
+    expect(seeded.image).toHaveLength(4);
+
+    // Wait for the cards to render via realtime; the StageIdeation grid
+    // subscribes to `creatives` filtered by brief_id. The "Picked: X of Y"
+    // counter in the column header reflects total card count once the
+    // grid has rendered.
+    await expect(page.getByText(/Picked:\s*0\s*of\s*4/)).toBeVisible({ timeout: 15_000 });
+
+    // -----------------------------------------------------------------
+    // Step 5. Pick two image variants.
+    // -----------------------------------------------------------------
+    const pickedIds = [seeded.image[0]!.id, seeded.image[1]!.id];
+    const pickButtons = page.getByRole("checkbox", { name: /pick concept/i });
+    // Click the first two checkbox-styled cards. The order in `seeded`
+    // matches the insert order, which matches the card render order
+    // (the grid sorts by created_at asc).
+    await pickButtons.nth(0).click();
+    await pickButtons.nth(1).click();
+    // Picked counter should reflect both selections — the StageShell
+    // subtitle renders "Image: 2 picked" once the toggles land.
+    await expect(page.getByText(/Image:\s*2\s*picked/)).toBeVisible();
+
+    // -----------------------------------------------------------------
+    // Step 6. Advance Ideation → Review.
+    // -----------------------------------------------------------------
+    const reviewCta = page.getByRole("button", { name: /continue to review/i });
+    await expect(reviewCta).toBeEnabled();
+    await reviewCta.click();
+    await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // The Review stage renders the picks summary + cost table.
+    await expect(page.getByText(/image picks/i)).toBeVisible();
+    await expect(page.getByText(/cost forecast/i)).toBeVisible();
+
+    // -----------------------------------------------------------------
+    // Step 7. Approve. The decision route flips status='generation'.
+    // -----------------------------------------------------------------
+    await page.getByRole("button", { name: /^approve$/i }).click();
+    await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // -----------------------------------------------------------------
+    // Step 8. Drive the generation chain via the harness — the DB
+    //         trigger auto-advances `generation → done` on the last
+    //         task_done.
+    // -----------------------------------------------------------------
+    await mockWorkerGeneration(page, {
+      pipelineId,
+      picks: { image: pickedIds },
+    });
+
+    // The trigger flips the row to `done` server-side. The detail
+    // page's Realtime listener picks up the `pipelines` UPDATE and
+    // calls `router.refresh()`; we also poll cost every 4s so the
+    // refresh should land within ~5s.
+    await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({
+      timeout: 20_000,
+    });
+
+    // Verify the post-update row carries `status='done'` server-side too.
+    const admin = getTestAdminClient();
+    const { data: finalPipeline } = await admin
+      .from("pipelines")
+      .select("status, advanced_at")
+      .eq("id", pipelineId)
+      .maybeSingle();
+    expect(finalPipeline?.status).toBe("done");
+
+    // -----------------------------------------------------------------
+    // Step 9. Done stage assertions — gallery + launch CTA visible.
+    // -----------------------------------------------------------------
+    // Image finals heading.
+    await expect(page.getByText(/image finals/i)).toBeVisible();
+    // The launch handoff section + CTA. Two finals per pick × 2 picks = 4
+    // creatives — they'll group into 2 concept buckets.
+    await expect(page.getByRole("button", { name: /build launch package/i })).toBeVisible();
+  });
+});
+
+test.describe("pipeline — image format — Ekko draft mock", () => {
+  test("Ekko proposal hydrates the form via SSE mock", async ({ page, clientId }) => {
+    void clientId;
+
+    await page.goto("/pipeline/new");
+    await expect(page).toHaveURL(/\/pipeline\/[a-f0-9-]{36}$/);
+    const url = page.url();
+    const pipelineId = url.match(/\/pipeline\/([a-f0-9-]{36})$/)?.[1];
+    if (!pipelineId) throw new Error(`could not extract pipeline id from ${url}`);
+
+    // Mock Ekko's draft endpoint before the operator opens the modal —
+    // the propose_config result will hydrate the form fields.
+    await mockEkkoDraft(page, {
+      pipelineId,
+      proposedConfig: {
+        format_choice: "image",
+        image_payload: {
+          service: "remodeling",
+          market: "Phoenix, AZ",
+          budget: 3500,
+          landing_page_url: "https://example.com/phx-lp",
+          offer_text: "Spring remodeling sale",
+        },
+        notes: "Filled by Ekko — review and edit before continuing.",
+      },
+    });
+
+    await page.getByRole("button", { name: /let ekko draft this/i }).click();
+    await expect(page.getByRole("dialog")).toBeVisible();
+    // Send any message to trigger the SSE fetch — the harness replies
+    // immediately with the canned propose_config payload.
+    await page.getByPlaceholder(/type your answer/i).fill("Roofing in Phoenix, $3500 budget.");
+    await page.getByRole("button", { name: /send to ekko/i }).click();
+
+    // Confirmation banner appears once the proposal lands.
+    await expect(page.getByText(/draft delivered/i)).toBeVisible({ timeout: 10_000 });
+    // Close the modal — the form should have hydrated.
+    await page.getByRole("button", { name: /review draft|cancel/i }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+
+    // The hydrated market value should appear in the input.
+    await expect(page.getByLabel(/^market$/i)).toHaveValue("Phoenix, AZ");
+    await expect(page.getByLabel(/total budget/i)).toHaveValue("3500");
   });
 });
