@@ -90,7 +90,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - 'curl -fsS http://localhost:3000/ || exit 1'
+        - "curl -fsS http://localhost:3000/ || exit 1"
       interval: 30s
       timeout: 5s
       start_period: 30s
@@ -116,6 +116,12 @@ services:
       # process does not read this — Caddy substitutes it into the
       # Caddyfile site address at startup.
       VOXHORIZON_DASHBOARD_HOST: ${VOXHORIZON_DASHBOARD_HOST:-dashboard.voxhorizon.example.com}
+      # HTTP Basic Auth credentials at the edge. Hash lives in the VPS
+      # .env (CADDY_BASIC_AUTH_HASH=$2b$14$…), generated with bcrypt.
+      # An unset hash fails Caddy validation (fail-closed). User name
+      # defaults to 'diogo' if not overridden.
+      CADDY_BASIC_AUTH_USER: ${CADDY_BASIC_AUTH_USER:-diogo}
+      CADDY_BASIC_AUTH_HASH: ${CADDY_BASIC_AUTH_HASH}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # ACME certs

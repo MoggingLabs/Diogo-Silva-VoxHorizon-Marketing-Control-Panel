@@ -1,6 +1,22 @@
 {$VOXHORIZON_DASHBOARD_HOST:dashboard.voxhorizon.example.com} {
 	encode zstd gzip
 
+	# Single-operator HTTP Basic Auth gate at the edge.
+	#
+	# v1 is one user (Diogo). The bcrypt hash lives in
+	# /opt/voxhorizon/.env on the VPS — never in the repo. Caddy reads
+	# it as $CADDY_BASIC_AUTH_HASH at startup; substituting an unset
+	# value fails Caddy validation (deliberate fail-closed). Browsers
+	# cache the Authorization header for the session, so assets, /api
+	# routes, and SSE streams all carry the credential without extra
+	# round trips.
+	#
+	# Future: replace with Cloudflare Access (NS migration to CF +
+	# email-PIN or Google SSO) when we want SSO + audit logs.
+	basic_auth {
+		{$CADDY_BASIC_AUTH_USER:diogo} {$CADDY_BASIC_AUTH_HASH}
+	}
+
 	reverse_proxy web:3000 {
 		header_up Host {host}
 		header_up X-Real-IP {remote_host}
