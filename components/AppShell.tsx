@@ -15,6 +15,7 @@ import {
   Settings,
 } from "lucide-react";
 
+import { ApprovalQueue } from "@/components/approvals/ApprovalQueue";
 import { WorkerStatus } from "@/components/WorkerStatus";
 import {
   Sheet,
@@ -173,6 +174,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           </Link>
         </div>
         <div className="flex items-center gap-2">
+          <ApprovalQueue />
           <WorkerStatus />
         </div>
       </header>
