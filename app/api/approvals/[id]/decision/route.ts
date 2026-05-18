@@ -58,17 +58,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const { decision, notes, cache_for_session, cache_for_minutes } = parsed.data;
 
   const supabase = createAdminClient();
-  // Cast to `any`: until Wave 22 regenerates the types, the `approvals`
-  // table is not in the schema so column-name checks would reject these
-  // operations.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const supabaseAny: any = supabase;
 
   // Idempotency guard: only update when still pending. If the WHERE clause
   // matches nothing, the row either does not exist OR has already been
   // decided/cancelled — we read it back to disambiguate.
   const decided_at = new Date().toISOString();
-  const { data: updateData, error: updateErr } = await supabaseAny
+  const { data: updateData, error: updateErr } = await supabase
     .from("approvals")
     .update({
       status: "decided",
@@ -90,7 +85,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!updateData) {
     // Either the row is missing or it's already been decided. Re-read so we
     // can return the right status code + the current state.
-    const { data: existing, error: readErr } = await supabaseAny
+    const { data: existing, error: readErr } = await supabase
       .from("approvals")
       .select("*")
       .eq("id", id)
@@ -109,22 +104,18 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   //   - cache_for_session is true
   //   - the row carries a usable session id + tool name + tool_args
   if (cache_for_session) {
-    const row = updateData as {
-      ekko_session_id?: string;
-      tool_name?: string;
-      tool_args?: Record<string, unknown>;
-    };
-    if (row.ekko_session_id && row.tool_name && row.tool_args !== undefined) {
+    const { ekko_session_id, tool_name, tool_args } = updateData;
+    if (ekko_session_id && tool_name && tool_args !== null && tool_args !== undefined) {
       const minutes = cache_for_minutes ?? DEFAULT_CACHE_MINUTES;
       const expiresAt = new Date(Date.now() + minutes * 60_000).toISOString();
       const cacheRow = {
-        ekko_session_id: row.ekko_session_id,
-        tool_name: row.tool_name,
-        tool_args_hash: hashToolArgs(row.tool_args),
+        ekko_session_id,
+        tool_name,
+        tool_args_hash: hashToolArgs(tool_args as Record<string, unknown>),
         decision,
         expires_at: expiresAt,
       };
-      const { error: cacheErr } = await supabaseAny.from("approvals_policy_cache").insert(cacheRow);
+      const { error: cacheErr } = await supabase.from("approvals_policy_cache").insert(cacheRow);
       if (cacheErr) {
         // Cache write is best-effort — log and keep the 200 because the
         // approval row update is the primary artifact.

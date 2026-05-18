@@ -8,1040 +8,1199 @@ export type Json =
   | boolean
   | null
   | { [key: string]: Json | undefined }
-  | Json[];
+  | Json[]
 
 export type Database = {
+  // Allows to automatically instantiate createClient with right options
+  // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.5";
-  };
+    PostgrestVersion: "14.5"
+  }
   public: {
     Tables: {
+      approvals: {
+        Row: {
+          cache_for_minutes: number | null
+          cache_for_session: boolean | null
+          context: Json | null
+          decided_at: string | null
+          decided_by: string | null
+          decision: Database["public"]["Enums"]["approval_decision_enum"] | null
+          decision_notes: string | null
+          ekko_session_id: string
+          ekko_tool_call_id: string
+          expires_at: string
+          id: string
+          requested_at: string
+          risk_class: string | null
+          status: Database["public"]["Enums"]["approval_status_enum"]
+          tool_args: Json
+          tool_name: string
+          worker_received_at: string | null
+        }
+        Insert: {
+          cache_for_minutes?: number | null
+          cache_for_session?: boolean | null
+          context?: Json | null
+          decided_at?: string | null
+          decided_by?: string | null
+          decision?:
+            | Database["public"]["Enums"]["approval_decision_enum"]
+            | null
+          decision_notes?: string | null
+          ekko_session_id: string
+          ekko_tool_call_id: string
+          expires_at: string
+          id: string
+          requested_at?: string
+          risk_class?: string | null
+          status?: Database["public"]["Enums"]["approval_status_enum"]
+          tool_args: Json
+          tool_name: string
+          worker_received_at?: string | null
+        }
+        Update: {
+          cache_for_minutes?: number | null
+          cache_for_session?: boolean | null
+          context?: Json | null
+          decided_at?: string | null
+          decided_by?: string | null
+          decision?:
+            | Database["public"]["Enums"]["approval_decision_enum"]
+            | null
+          decision_notes?: string | null
+          ekko_session_id?: string
+          ekko_tool_call_id?: string
+          expires_at?: string
+          id?: string
+          requested_at?: string
+          risk_class?: string | null
+          status?: Database["public"]["Enums"]["approval_status_enum"]
+          tool_args?: Json
+          tool_name?: string
+          worker_received_at?: string | null
+        }
+        Relationships: []
+      }
+      approvals_policy_cache: {
+        Row: {
+          cached_at: string
+          decision: Database["public"]["Enums"]["approval_decision_enum"]
+          ekko_session_id: string
+          expires_at: string
+          id: string
+          tool_args_hash: string
+          tool_name: string
+        }
+        Insert: {
+          cached_at?: string
+          decision: Database["public"]["Enums"]["approval_decision_enum"]
+          ekko_session_id: string
+          expires_at: string
+          id?: string
+          tool_args_hash: string
+          tool_name: string
+        }
+        Update: {
+          cached_at?: string
+          decision?: Database["public"]["Enums"]["approval_decision_enum"]
+          ekko_session_id?: string
+          expires_at?: string
+          id?: string
+          tool_args_hash?: string
+          tool_name?: string
+        }
+        Relationships: []
+      }
       briefs: {
         Row: {
-          brief_id_human: string;
-          client_id: string | null;
-          created_at: string;
-          decided_at: string | null;
-          decided_by: string | null;
-          decided_notes: string | null;
-          id: string;
-          payload: Json;
-          posted_at: string | null;
-          status: Database["public"]["Enums"]["brief_status"];
-        };
+          brief_id_human: string
+          client_id: string | null
+          created_at: string
+          decided_at: string | null
+          decided_by: string | null
+          decided_notes: string | null
+          id: string
+          payload: Json
+          posted_at: string | null
+          status: Database["public"]["Enums"]["brief_status"]
+        }
         Insert: {
-          brief_id_human: string;
-          client_id?: string | null;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_by?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload: Json;
-          posted_at?: string | null;
-          status?: Database["public"]["Enums"]["brief_status"];
-        };
+          brief_id_human: string
+          client_id?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload: Json
+          posted_at?: string | null
+          status?: Database["public"]["Enums"]["brief_status"]
+        }
         Update: {
-          brief_id_human?: string;
-          client_id?: string | null;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_by?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload?: Json;
-          posted_at?: string | null;
-          status?: Database["public"]["Enums"]["brief_status"];
-        };
+          brief_id_human?: string
+          client_id?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload?: Json
+          posted_at?: string | null
+          status?: Database["public"]["Enums"]["brief_status"]
+        }
         Relationships: [
           {
-            foreignKeyName: "briefs_client_id_fkey";
-            columns: ["client_id"];
-            isOneToOne: false;
-            referencedRelation: "clients";
-            referencedColumns: ["id"];
+            foreignKeyName: "briefs_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       campaign_perf_image: {
         Row: {
-          campaign_id: string;
-          clicks: number | null;
-          client_id: string | null;
-          cpl_real: number | null;
-          ctr: number | null;
-          freq: number | null;
-          id: string;
-          impressions: number | null;
-          leads_ghl: number | null;
-          leads_meta: number | null;
-          pulled_at: string;
-          spend: number | null;
-          verdict: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason: string | null;
-          window_days: number;
-        };
+          campaign_id: string
+          clicks: number | null
+          client_id: string | null
+          cpl_real: number | null
+          ctr: number | null
+          freq: number | null
+          id: string
+          impressions: number | null
+          leads_ghl: number | null
+          leads_meta: number | null
+          pulled_at: string
+          spend: number | null
+          verdict: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason: string | null
+          window_days: number
+        }
         Insert: {
-          campaign_id: string;
-          clicks?: number | null;
-          client_id?: string | null;
-          cpl_real?: number | null;
-          ctr?: number | null;
-          freq?: number | null;
-          id?: string;
-          impressions?: number | null;
-          leads_ghl?: number | null;
-          leads_meta?: number | null;
-          pulled_at?: string;
-          spend?: number | null;
-          verdict?: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason?: string | null;
-          window_days: number;
-        };
+          campaign_id: string
+          clicks?: number | null
+          client_id?: string | null
+          cpl_real?: number | null
+          ctr?: number | null
+          freq?: number | null
+          id?: string
+          impressions?: number | null
+          leads_ghl?: number | null
+          leads_meta?: number | null
+          pulled_at?: string
+          spend?: number | null
+          verdict?: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason?: string | null
+          window_days: number
+        }
         Update: {
-          campaign_id?: string;
-          clicks?: number | null;
-          client_id?: string | null;
-          cpl_real?: number | null;
-          ctr?: number | null;
-          freq?: number | null;
-          id?: string;
-          impressions?: number | null;
-          leads_ghl?: number | null;
-          leads_meta?: number | null;
-          pulled_at?: string;
-          spend?: number | null;
-          verdict?: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason?: string | null;
-          window_days?: number;
-        };
+          campaign_id?: string
+          clicks?: number | null
+          client_id?: string | null
+          cpl_real?: number | null
+          ctr?: number | null
+          freq?: number | null
+          id?: string
+          impressions?: number | null
+          leads_ghl?: number | null
+          leads_meta?: number | null
+          pulled_at?: string
+          spend?: number | null
+          verdict?: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason?: string | null
+          window_days?: number
+        }
         Relationships: [
           {
-            foreignKeyName: "campaign_perf_image_client_id_fkey";
-            columns: ["client_id"];
-            isOneToOne: false;
-            referencedRelation: "clients";
-            referencedColumns: ["id"];
+            foreignKeyName: "campaign_perf_image_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       campaign_perf_video: {
         Row: {
-          campaign_id: string;
-          clicks: number | null;
-          client_id: string | null;
-          cpl_real: number | null;
-          ctr: number | null;
-          drop_off_3s: number | null;
-          freq: number | null;
-          hook_rate: number | null;
-          id: string;
-          impressions: number | null;
-          leads_ghl: number | null;
-          leads_meta: number | null;
-          pulled_at: string;
-          spend: number | null;
-          verdict: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason: string | null;
-          view_rate_avg: number | null;
-          watch_time_p50: number | null;
-          window_days: number;
-        };
+          campaign_id: string
+          clicks: number | null
+          client_id: string | null
+          cpl_real: number | null
+          ctr: number | null
+          drop_off_3s: number | null
+          freq: number | null
+          hook_rate: number | null
+          id: string
+          impressions: number | null
+          leads_ghl: number | null
+          leads_meta: number | null
+          pulled_at: string
+          spend: number | null
+          verdict: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason: string | null
+          view_rate_avg: number | null
+          watch_time_p50: number | null
+          window_days: number
+        }
         Insert: {
-          campaign_id: string;
-          clicks?: number | null;
-          client_id?: string | null;
-          cpl_real?: number | null;
-          ctr?: number | null;
-          drop_off_3s?: number | null;
-          freq?: number | null;
-          hook_rate?: number | null;
-          id?: string;
-          impressions?: number | null;
-          leads_ghl?: number | null;
-          leads_meta?: number | null;
-          pulled_at?: string;
-          spend?: number | null;
-          verdict?: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason?: string | null;
-          view_rate_avg?: number | null;
-          watch_time_p50?: number | null;
-          window_days: number;
-        };
+          campaign_id: string
+          clicks?: number | null
+          client_id?: string | null
+          cpl_real?: number | null
+          ctr?: number | null
+          drop_off_3s?: number | null
+          freq?: number | null
+          hook_rate?: number | null
+          id?: string
+          impressions?: number | null
+          leads_ghl?: number | null
+          leads_meta?: number | null
+          pulled_at?: string
+          spend?: number | null
+          verdict?: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason?: string | null
+          view_rate_avg?: number | null
+          watch_time_p50?: number | null
+          window_days: number
+        }
         Update: {
-          campaign_id?: string;
-          clicks?: number | null;
-          client_id?: string | null;
-          cpl_real?: number | null;
-          ctr?: number | null;
-          drop_off_3s?: number | null;
-          freq?: number | null;
-          hook_rate?: number | null;
-          id?: string;
-          impressions?: number | null;
-          leads_ghl?: number | null;
-          leads_meta?: number | null;
-          pulled_at?: string;
-          spend?: number | null;
-          verdict?: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason?: string | null;
-          view_rate_avg?: number | null;
-          watch_time_p50?: number | null;
-          window_days?: number;
-        };
+          campaign_id?: string
+          clicks?: number | null
+          client_id?: string | null
+          cpl_real?: number | null
+          ctr?: number | null
+          drop_off_3s?: number | null
+          freq?: number | null
+          hook_rate?: number | null
+          id?: string
+          impressions?: number | null
+          leads_ghl?: number | null
+          leads_meta?: number | null
+          pulled_at?: string
+          spend?: number | null
+          verdict?: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason?: string | null
+          view_rate_avg?: number | null
+          watch_time_p50?: number | null
+          window_days?: number
+        }
         Relationships: [
           {
-            foreignKeyName: "campaign_perf_video_client_id_fkey";
-            columns: ["client_id"];
-            isOneToOne: false;
-            referencedRelation: "clients";
-            referencedColumns: ["id"];
+            foreignKeyName: "campaign_perf_video_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       chat_messages: {
         Row: {
-          author: Database["public"]["Enums"]["chat_author"];
-          content: string | null;
-          content_type: Database["public"]["Enums"]["chat_content_type"];
-          created_at: string;
-          creative_id: string;
-          creative_type: Database["public"]["Enums"]["chat_creative_type"];
-          id: string;
-          is_edited: boolean;
-          metadata: Json | null;
-          reply_to_id: string | null;
-          tool_call_id: string | null;
-          updated_at: string;
-        };
+          author: Database["public"]["Enums"]["chat_author"]
+          content: string | null
+          content_type: Database["public"]["Enums"]["chat_content_type"]
+          created_at: string
+          creative_id: string
+          creative_type: Database["public"]["Enums"]["chat_creative_type"]
+          id: string
+          is_edited: boolean
+          metadata: Json | null
+          reply_to_id: string | null
+          tool_call_id: string | null
+          updated_at: string
+        }
         Insert: {
-          author: Database["public"]["Enums"]["chat_author"];
-          content?: string | null;
-          content_type?: Database["public"]["Enums"]["chat_content_type"];
-          created_at?: string;
-          creative_id: string;
-          creative_type: Database["public"]["Enums"]["chat_creative_type"];
-          id?: string;
-          is_edited?: boolean;
-          metadata?: Json | null;
-          reply_to_id?: string | null;
-          tool_call_id?: string | null;
-          updated_at?: string;
-        };
+          author: Database["public"]["Enums"]["chat_author"]
+          content?: string | null
+          content_type?: Database["public"]["Enums"]["chat_content_type"]
+          created_at?: string
+          creative_id: string
+          creative_type: Database["public"]["Enums"]["chat_creative_type"]
+          id?: string
+          is_edited?: boolean
+          metadata?: Json | null
+          reply_to_id?: string | null
+          tool_call_id?: string | null
+          updated_at?: string
+        }
         Update: {
-          author?: Database["public"]["Enums"]["chat_author"];
-          content?: string | null;
-          content_type?: Database["public"]["Enums"]["chat_content_type"];
-          created_at?: string;
-          creative_id?: string;
-          creative_type?: Database["public"]["Enums"]["chat_creative_type"];
-          id?: string;
-          is_edited?: boolean;
-          metadata?: Json | null;
-          reply_to_id?: string | null;
-          tool_call_id?: string | null;
-          updated_at?: string;
-        };
+          author?: Database["public"]["Enums"]["chat_author"]
+          content?: string | null
+          content_type?: Database["public"]["Enums"]["chat_content_type"]
+          created_at?: string
+          creative_id?: string
+          creative_type?: Database["public"]["Enums"]["chat_creative_type"]
+          id?: string
+          is_edited?: boolean
+          metadata?: Json | null
+          reply_to_id?: string | null
+          tool_call_id?: string | null
+          updated_at?: string
+        }
         Relationships: [
           {
-            foreignKeyName: "chat_messages_reply_to_id_fkey";
-            columns: ["reply_to_id"];
-            isOneToOne: false;
-            referencedRelation: "chat_messages";
-            referencedColumns: ["id"];
+            foreignKeyName: "chat_messages_reply_to_id_fkey"
+            columns: ["reply_to_id"]
+            isOneToOne: false
+            referencedRelation: "chat_messages"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       clients: {
         Row: {
-          brand_colors: Json | null;
-          cpl_target: number | null;
-          created_at: string;
-          drive_root_folder_id: string | null;
-          ghl_location_id: string | null;
-          id: string;
-          meta_account_id: string | null;
-          name: string;
-          service_type: Database["public"]["Enums"]["service_type"];
-          slug: string;
-          status: string;
-          updated_at: string;
-        };
+          brand_colors: Json | null
+          cpl_target: number | null
+          created_at: string
+          drive_root_folder_id: string | null
+          ghl_location_id: string | null
+          id: string
+          meta_account_id: string | null
+          name: string
+          service_type: Database["public"]["Enums"]["service_type"]
+          slug: string
+          status: string
+          updated_at: string
+        }
         Insert: {
-          brand_colors?: Json | null;
-          cpl_target?: number | null;
-          created_at?: string;
-          drive_root_folder_id?: string | null;
-          ghl_location_id?: string | null;
-          id?: string;
-          meta_account_id?: string | null;
-          name: string;
-          service_type: Database["public"]["Enums"]["service_type"];
-          slug: string;
-          status?: string;
-          updated_at?: string;
-        };
+          brand_colors?: Json | null
+          cpl_target?: number | null
+          created_at?: string
+          drive_root_folder_id?: string | null
+          ghl_location_id?: string | null
+          id?: string
+          meta_account_id?: string | null
+          name: string
+          service_type: Database["public"]["Enums"]["service_type"]
+          slug: string
+          status?: string
+          updated_at?: string
+        }
         Update: {
-          brand_colors?: Json | null;
-          cpl_target?: number | null;
-          created_at?: string;
-          drive_root_folder_id?: string | null;
-          ghl_location_id?: string | null;
-          id?: string;
-          meta_account_id?: string | null;
-          name?: string;
-          service_type?: Database["public"]["Enums"]["service_type"];
-          slug?: string;
-          status?: string;
-          updated_at?: string;
-        };
-        Relationships: [];
-      };
+          brand_colors?: Json | null
+          cpl_target?: number | null
+          created_at?: string
+          drive_root_folder_id?: string | null
+          ghl_location_id?: string | null
+          id?: string
+          meta_account_id?: string | null
+          name?: string
+          service_type?: Database["public"]["Enums"]["service_type"]
+          slug?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       copy_variants: {
         Row: {
-          body: string | null;
-          created_at: string;
-          creative_id: string;
-          cta: string | null;
-          headline: string | null;
-          humanized: boolean | null;
-          id: string;
-          status: string | null;
-        };
+          body: string | null
+          created_at: string
+          creative_id: string
+          cta: string | null
+          headline: string | null
+          humanized: boolean | null
+          id: string
+          status: string | null
+        }
         Insert: {
-          body?: string | null;
-          created_at?: string;
-          creative_id: string;
-          cta?: string | null;
-          headline?: string | null;
-          humanized?: boolean | null;
-          id?: string;
-          status?: string | null;
-        };
+          body?: string | null
+          created_at?: string
+          creative_id: string
+          cta?: string | null
+          headline?: string | null
+          humanized?: boolean | null
+          id?: string
+          status?: string | null
+        }
         Update: {
-          body?: string | null;
-          created_at?: string;
-          creative_id?: string;
-          cta?: string | null;
-          headline?: string | null;
-          humanized?: boolean | null;
-          id?: string;
-          status?: string | null;
-        };
+          body?: string | null
+          created_at?: string
+          creative_id?: string
+          cta?: string | null
+          headline?: string | null
+          humanized?: boolean | null
+          id?: string
+          status?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "copy_variants_creative_id_fkey";
-            columns: ["creative_id"];
-            isOneToOne: false;
-            referencedRelation: "creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "copy_variants_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       creative_iterations: {
         Row: {
-          author: Database["public"]["Enums"]["iteration_author"];
-          content: Json | null;
-          created_at: string;
-          creative_id: string;
-          id: string;
-          image_path_supabase: string | null;
-          kind: Database["public"]["Enums"]["image_iteration_kind"];
-          parent_creative_id: string | null;
-        };
+          author: Database["public"]["Enums"]["iteration_author"]
+          content: Json | null
+          created_at: string
+          creative_id: string
+          id: string
+          image_path_supabase: string | null
+          kind: Database["public"]["Enums"]["image_iteration_kind"]
+          parent_creative_id: string | null
+        }
         Insert: {
-          author: Database["public"]["Enums"]["iteration_author"];
-          content?: Json | null;
-          created_at?: string;
-          creative_id: string;
-          id?: string;
-          image_path_supabase?: string | null;
-          kind: Database["public"]["Enums"]["image_iteration_kind"];
-          parent_creative_id?: string | null;
-        };
+          author: Database["public"]["Enums"]["iteration_author"]
+          content?: Json | null
+          created_at?: string
+          creative_id: string
+          id?: string
+          image_path_supabase?: string | null
+          kind: Database["public"]["Enums"]["image_iteration_kind"]
+          parent_creative_id?: string | null
+        }
         Update: {
-          author?: Database["public"]["Enums"]["iteration_author"];
-          content?: Json | null;
-          created_at?: string;
-          creative_id?: string;
-          id?: string;
-          image_path_supabase?: string | null;
-          kind?: Database["public"]["Enums"]["image_iteration_kind"];
-          parent_creative_id?: string | null;
-        };
+          author?: Database["public"]["Enums"]["iteration_author"]
+          content?: Json | null
+          created_at?: string
+          creative_id?: string
+          id?: string
+          image_path_supabase?: string | null
+          kind?: Database["public"]["Enums"]["image_iteration_kind"]
+          parent_creative_id?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "creative_iterations_creative_id_fkey";
-            columns: ["creative_id"];
-            isOneToOne: false;
-            referencedRelation: "creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "creative_iterations_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "creative_iterations_parent_creative_id_fkey";
-            columns: ["parent_creative_id"];
-            isOneToOne: false;
-            referencedRelation: "creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "creative_iterations_parent_creative_id_fkey"
+            columns: ["parent_creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       creatives: {
         Row: {
-          approved_at: string | null;
-          brief_id: string;
-          concept: string | null;
-          created_at: string;
-          file_path_drive: string | null;
-          file_path_supabase: string | null;
-          id: string;
-          offer_text: string | null;
-          prompt_used: Json | null;
-          ratio: Database["public"]["Enums"]["ratio"] | null;
-          status: Database["public"]["Enums"]["image_creative_status"];
-          type: Database["public"]["Enums"]["creative_type"];
-          version: string;
-        };
+          approved_at: string | null
+          brief_id: string
+          concept: string | null
+          created_at: string
+          file_path_drive: string | null
+          file_path_supabase: string | null
+          id: string
+          offer_text: string | null
+          prompt_used: Json | null
+          ratio: Database["public"]["Enums"]["ratio"] | null
+          status: Database["public"]["Enums"]["image_creative_status"]
+          type: Database["public"]["Enums"]["creative_type"]
+          version: string
+        }
         Insert: {
-          approved_at?: string | null;
-          brief_id: string;
-          concept?: string | null;
-          created_at?: string;
-          file_path_drive?: string | null;
-          file_path_supabase?: string | null;
-          id?: string;
-          offer_text?: string | null;
-          prompt_used?: Json | null;
-          ratio?: Database["public"]["Enums"]["ratio"] | null;
-          status?: Database["public"]["Enums"]["image_creative_status"];
-          type?: Database["public"]["Enums"]["creative_type"];
-          version?: string;
-        };
+          approved_at?: string | null
+          brief_id: string
+          concept?: string | null
+          created_at?: string
+          file_path_drive?: string | null
+          file_path_supabase?: string | null
+          id?: string
+          offer_text?: string | null
+          prompt_used?: Json | null
+          ratio?: Database["public"]["Enums"]["ratio"] | null
+          status?: Database["public"]["Enums"]["image_creative_status"]
+          type?: Database["public"]["Enums"]["creative_type"]
+          version?: string
+        }
         Update: {
-          approved_at?: string | null;
-          brief_id?: string;
-          concept?: string | null;
-          created_at?: string;
-          file_path_drive?: string | null;
-          file_path_supabase?: string | null;
-          id?: string;
-          offer_text?: string | null;
-          prompt_used?: Json | null;
-          ratio?: Database["public"]["Enums"]["ratio"] | null;
-          status?: Database["public"]["Enums"]["image_creative_status"];
-          type?: Database["public"]["Enums"]["creative_type"];
-          version?: string;
-        };
+          approved_at?: string | null
+          brief_id?: string
+          concept?: string | null
+          created_at?: string
+          file_path_drive?: string | null
+          file_path_supabase?: string | null
+          id?: string
+          offer_text?: string | null
+          prompt_used?: Json | null
+          ratio?: Database["public"]["Enums"]["ratio"] | null
+          status?: Database["public"]["Enums"]["image_creative_status"]
+          type?: Database["public"]["Enums"]["creative_type"]
+          version?: string
+        }
         Relationships: [
           {
-            foreignKeyName: "creatives_brief_id_fkey";
-            columns: ["brief_id"];
-            isOneToOne: false;
-            referencedRelation: "briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "creatives_brief_id_fkey"
+            columns: ["brief_id"]
+            isOneToOne: false
+            referencedRelation: "briefs"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       events: {
         Row: {
-          created_at: string;
-          id: string;
-          kind: string;
-          payload: Json | null;
-          ref_id: string | null;
-          ref_table: string | null;
-        };
+          created_at: string
+          id: string
+          kind: string
+          payload: Json | null
+          ref_id: string | null
+          ref_table: string | null
+        }
         Insert: {
-          created_at?: string;
-          id?: string;
-          kind: string;
-          payload?: Json | null;
-          ref_id?: string | null;
-          ref_table?: string | null;
-        };
+          created_at?: string
+          id?: string
+          kind: string
+          payload?: Json | null
+          ref_id?: string | null
+          ref_table?: string | null
+        }
         Update: {
-          created_at?: string;
-          id?: string;
-          kind?: string;
-          payload?: Json | null;
-          ref_id?: string | null;
-          ref_table?: string | null;
-        };
-        Relationships: [];
-      };
+          created_at?: string
+          id?: string
+          kind?: string
+          payload?: Json | null
+          ref_id?: string | null
+          ref_table?: string | null
+        }
+        Relationships: []
+      }
+      hermes_tasks: {
+        Row: {
+          assignee: string
+          context: Json
+          created_at: string
+          id: string
+          kanban_task_id: string
+          pipeline_id: string | null
+          result: Json | null
+          status: Database["public"]["Enums"]["hermes_task_status_enum"]
+          updated_at: string
+        }
+        Insert: {
+          assignee: string
+          context?: Json
+          created_at?: string
+          id?: string
+          kanban_task_id: string
+          pipeline_id?: string | null
+          result?: Json | null
+          status?: Database["public"]["Enums"]["hermes_task_status_enum"]
+          updated_at?: string
+        }
+        Update: {
+          assignee?: string
+          context?: Json
+          created_at?: string
+          id?: string
+          kanban_task_id?: string
+          pipeline_id?: string | null
+          result?: Json | null
+          status?: Database["public"]["Enums"]["hermes_task_status_enum"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "hermes_tasks_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       launch_packages: {
         Row: {
-          brief_id: string;
-          created_at: string;
-          decided_at: string | null;
-          decided_notes: string | null;
-          id: string;
-          payload: Json;
-          status: string;
-        };
+          brief_id: string
+          created_at: string
+          decided_at: string | null
+          decided_notes: string | null
+          id: string
+          payload: Json
+          status: string
+        }
         Insert: {
-          brief_id: string;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload: Json;
-          status?: string;
-        };
+          brief_id: string
+          created_at?: string
+          decided_at?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload: Json
+          status?: string
+        }
         Update: {
-          brief_id?: string;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload?: Json;
-          status?: string;
-        };
+          brief_id?: string
+          created_at?: string
+          decided_at?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload?: Json
+          status?: string
+        }
         Relationships: [
           {
-            foreignKeyName: "launch_packages_brief_id_fkey";
-            columns: ["brief_id"];
-            isOneToOne: false;
-            referencedRelation: "briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "launch_packages_brief_id_fkey"
+            columns: ["brief_id"]
+            isOneToOne: false
+            referencedRelation: "briefs"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       overrides: {
         Row: {
-          corrected_value: Json;
-          edited_at: string;
-          edited_by: string;
-          field_name: string;
-          id: string;
-          row_id: string;
-          table_name: string;
-        };
+          corrected_value: Json
+          edited_at: string
+          edited_by: string
+          field_name: string
+          id: string
+          row_id: string
+          table_name: string
+        }
         Insert: {
-          corrected_value: Json;
-          edited_at?: string;
-          edited_by?: string;
-          field_name: string;
-          id?: string;
-          row_id: string;
-          table_name: string;
-        };
+          corrected_value: Json
+          edited_at?: string
+          edited_by?: string
+          field_name: string
+          id?: string
+          row_id: string
+          table_name: string
+        }
         Update: {
-          corrected_value?: Json;
-          edited_at?: string;
-          edited_by?: string;
-          field_name?: string;
-          id?: string;
-          row_id?: string;
-          table_name?: string;
-        };
-        Relationships: [];
-      };
+          corrected_value?: Json
+          edited_at?: string
+          edited_by?: string
+          field_name?: string
+          id?: string
+          row_id?: string
+          table_name?: string
+        }
+        Relationships: []
+      }
       pipeline_events: {
         Row: {
-          created_at: string;
-          id: string;
-          kind: string;
-          payload: Json | null;
-          pipeline_id: string;
-          stage: Database["public"]["Enums"]["pipeline_status_enum"] | null;
-        };
+          created_at: string
+          id: string
+          kind: string
+          payload: Json | null
+          pipeline_id: string
+          source: Database["public"]["Enums"]["pipeline_event_source_enum"]
+          stage: Database["public"]["Enums"]["pipeline_status_enum"] | null
+        }
         Insert: {
-          created_at?: string;
-          id?: string;
-          kind: string;
-          payload?: Json | null;
-          pipeline_id: string;
-          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null;
-        };
+          created_at?: string
+          id?: string
+          kind: string
+          payload?: Json | null
+          pipeline_id: string
+          source?: Database["public"]["Enums"]["pipeline_event_source_enum"]
+          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null
+        }
         Update: {
-          created_at?: string;
-          id?: string;
-          kind?: string;
-          payload?: Json | null;
-          pipeline_id?: string;
-          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null;
-        };
+          created_at?: string
+          id?: string
+          kind?: string
+          payload?: Json | null
+          pipeline_id?: string
+          source?: Database["public"]["Enums"]["pipeline_event_source_enum"]
+          stage?: Database["public"]["Enums"]["pipeline_status_enum"] | null
+        }
         Relationships: [
           {
-            foreignKeyName: "pipeline_events_pipeline_id_fkey";
-            columns: ["pipeline_id"];
-            isOneToOne: false;
-            referencedRelation: "pipelines";
-            referencedColumns: ["id"];
+            foreignKeyName: "pipeline_events_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       pipelines: {
         Row: {
-          advanced_at: Json;
-          approval: Json | null;
-          client_id: string | null;
-          config_draft: Json;
-          cost_actual: Json | null;
-          cost_estimate: Json | null;
-          created_at: string;
-          format_choice: Database["public"]["Enums"]["pipeline_format_enum"];
-          id: string;
-          image_brief_id: string | null;
-          launch_package_id: string | null;
-          picks: Json;
-          status: Database["public"]["Enums"]["pipeline_status_enum"];
-          updated_at: string;
-          video_brief_id: string | null;
-        };
+          advanced_at: Json
+          approval: Json | null
+          client_id: string | null
+          config_draft: Json
+          cost_actual: Json | null
+          cost_estimate: Json | null
+          created_at: string
+          format_choice: Database["public"]["Enums"]["pipeline_format_enum"]
+          id: string
+          image_brief_id: string | null
+          launch_package_id: string | null
+          picks: Json
+          status: Database["public"]["Enums"]["pipeline_status_enum"]
+          updated_at: string
+          video_brief_id: string | null
+        }
         Insert: {
-          advanced_at?: Json;
-          approval?: Json | null;
-          client_id?: string | null;
-          config_draft?: Json;
-          cost_actual?: Json | null;
-          cost_estimate?: Json | null;
-          created_at?: string;
-          format_choice: Database["public"]["Enums"]["pipeline_format_enum"];
-          id?: string;
-          image_brief_id?: string | null;
-          launch_package_id?: string | null;
-          picks?: Json;
-          status?: Database["public"]["Enums"]["pipeline_status_enum"];
-          updated_at?: string;
-          video_brief_id?: string | null;
-        };
+          advanced_at?: Json
+          approval?: Json | null
+          client_id?: string | null
+          config_draft?: Json
+          cost_actual?: Json | null
+          cost_estimate?: Json | null
+          created_at?: string
+          format_choice: Database["public"]["Enums"]["pipeline_format_enum"]
+          id?: string
+          image_brief_id?: string | null
+          launch_package_id?: string | null
+          picks?: Json
+          status?: Database["public"]["Enums"]["pipeline_status_enum"]
+          updated_at?: string
+          video_brief_id?: string | null
+        }
         Update: {
-          advanced_at?: Json;
-          approval?: Json | null;
-          client_id?: string | null;
-          config_draft?: Json;
-          cost_actual?: Json | null;
-          cost_estimate?: Json | null;
-          created_at?: string;
-          format_choice?: Database["public"]["Enums"]["pipeline_format_enum"];
-          id?: string;
-          image_brief_id?: string | null;
-          launch_package_id?: string | null;
-          picks?: Json;
-          status?: Database["public"]["Enums"]["pipeline_status_enum"];
-          updated_at?: string;
-          video_brief_id?: string | null;
-        };
+          advanced_at?: Json
+          approval?: Json | null
+          client_id?: string | null
+          config_draft?: Json
+          cost_actual?: Json | null
+          cost_estimate?: Json | null
+          created_at?: string
+          format_choice?: Database["public"]["Enums"]["pipeline_format_enum"]
+          id?: string
+          image_brief_id?: string | null
+          launch_package_id?: string | null
+          picks?: Json
+          status?: Database["public"]["Enums"]["pipeline_status_enum"]
+          updated_at?: string
+          video_brief_id?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "pipelines_client_id_fkey";
-            columns: ["client_id"];
-            isOneToOne: false;
-            referencedRelation: "clients";
-            referencedColumns: ["id"];
+            foreignKeyName: "pipelines_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "pipelines_image_brief_id_fkey";
-            columns: ["image_brief_id"];
-            isOneToOne: false;
-            referencedRelation: "briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "pipelines_image_brief_id_fkey"
+            columns: ["image_brief_id"]
+            isOneToOne: false
+            referencedRelation: "briefs"
+            referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "pipelines_launch_package_id_fkey";
-            columns: ["launch_package_id"];
-            isOneToOne: false;
-            referencedRelation: "launch_packages";
-            referencedColumns: ["id"];
+            foreignKeyName: "pipelines_launch_package_id_fkey"
+            columns: ["launch_package_id"]
+            isOneToOne: false
+            referencedRelation: "launch_packages"
+            referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "pipelines_video_brief_id_fkey";
-            columns: ["video_brief_id"];
-            isOneToOne: false;
-            referencedRelation: "video_briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "pipelines_video_brief_id_fkey"
+            columns: ["video_brief_id"]
+            isOneToOne: false
+            referencedRelation: "video_briefs"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       push_subscriptions: {
         Row: {
-          created_at: string;
-          endpoint: string;
-          id: string;
-          keys: Json;
-          last_seen: string | null;
-        };
+          created_at: string
+          endpoint: string
+          id: string
+          keys: Json
+          last_seen: string | null
+        }
         Insert: {
-          created_at?: string;
-          endpoint: string;
-          id?: string;
-          keys: Json;
-          last_seen?: string | null;
-        };
+          created_at?: string
+          endpoint: string
+          id?: string
+          keys: Json
+          last_seen?: string | null
+        }
         Update: {
-          created_at?: string;
-          endpoint?: string;
-          id?: string;
-          keys?: Json;
-          last_seen?: string | null;
-        };
-        Relationships: [];
-      };
+          created_at?: string
+          endpoint?: string
+          id?: string
+          keys?: Json
+          last_seen?: string | null
+        }
+        Relationships: []
+      }
       sync_log: {
         Row: {
-          error_text: string | null;
-          finished_at: string | null;
-          id: string;
-          payload: Json | null;
-          rows_upserted: number | null;
-          source: string;
-          started_at: string;
-          status: Database["public"]["Enums"]["sync_status"];
-        };
+          error_text: string | null
+          finished_at: string | null
+          id: string
+          payload: Json | null
+          rows_upserted: number | null
+          source: string
+          started_at: string
+          status: Database["public"]["Enums"]["sync_status"]
+        }
         Insert: {
-          error_text?: string | null;
-          finished_at?: string | null;
-          id?: string;
-          payload?: Json | null;
-          rows_upserted?: number | null;
-          source: string;
-          started_at?: string;
-          status?: Database["public"]["Enums"]["sync_status"];
-        };
+          error_text?: string | null
+          finished_at?: string | null
+          id?: string
+          payload?: Json | null
+          rows_upserted?: number | null
+          source: string
+          started_at?: string
+          status?: Database["public"]["Enums"]["sync_status"]
+        }
         Update: {
-          error_text?: string | null;
-          finished_at?: string | null;
-          id?: string;
-          payload?: Json | null;
-          rows_upserted?: number | null;
-          source?: string;
-          started_at?: string;
-          status?: Database["public"]["Enums"]["sync_status"];
-        };
-        Relationships: [];
-      };
+          error_text?: string | null
+          finished_at?: string | null
+          id?: string
+          payload?: Json | null
+          rows_upserted?: number | null
+          source?: string
+          started_at?: string
+          status?: Database["public"]["Enums"]["sync_status"]
+        }
+        Relationships: []
+      }
       video_briefs: {
         Row: {
-          brief_id_human: string;
-          broll_selection_mode: string;
-          captions_style: string | null;
-          client_id: string | null;
-          created_at: string;
-          decided_at: string | null;
-          decided_by: string | null;
-          decided_notes: string | null;
-          dimensions: Database["public"]["Enums"]["ratio"] | null;
-          hook_style: string | null;
-          id: string;
-          music_track: string | null;
-          payload: Json | null;
-          posted_at: string | null;
-          script_outline: Json | null;
-          status: Database["public"]["Enums"]["video_brief_status"];
-          target_duration_s: number | null;
-          voice_id: string | null;
-        };
+          brief_id_human: string
+          broll_selection_mode: string
+          captions_style: string | null
+          client_id: string | null
+          created_at: string
+          decided_at: string | null
+          decided_by: string | null
+          decided_notes: string | null
+          dimensions: Database["public"]["Enums"]["ratio"] | null
+          hook_style: string | null
+          id: string
+          music_track: string | null
+          payload: Json | null
+          posted_at: string | null
+          script_outline: Json | null
+          status: Database["public"]["Enums"]["video_brief_status"]
+          target_duration_s: number | null
+          voice_id: string | null
+        }
         Insert: {
-          brief_id_human: string;
-          broll_selection_mode?: string;
-          captions_style?: string | null;
-          client_id?: string | null;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_by?: string | null;
-          decided_notes?: string | null;
-          dimensions?: Database["public"]["Enums"]["ratio"] | null;
-          hook_style?: string | null;
-          id?: string;
-          music_track?: string | null;
-          payload?: Json | null;
-          posted_at?: string | null;
-          script_outline?: Json | null;
-          status?: Database["public"]["Enums"]["video_brief_status"];
-          target_duration_s?: number | null;
-          voice_id?: string | null;
-        };
+          brief_id_human: string
+          broll_selection_mode?: string
+          captions_style?: string | null
+          client_id?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          decided_notes?: string | null
+          dimensions?: Database["public"]["Enums"]["ratio"] | null
+          hook_style?: string | null
+          id?: string
+          music_track?: string | null
+          payload?: Json | null
+          posted_at?: string | null
+          script_outline?: Json | null
+          status?: Database["public"]["Enums"]["video_brief_status"]
+          target_duration_s?: number | null
+          voice_id?: string | null
+        }
         Update: {
-          brief_id_human?: string;
-          broll_selection_mode?: string;
-          captions_style?: string | null;
-          client_id?: string | null;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_by?: string | null;
-          decided_notes?: string | null;
-          dimensions?: Database["public"]["Enums"]["ratio"] | null;
-          hook_style?: string | null;
-          id?: string;
-          music_track?: string | null;
-          payload?: Json | null;
-          posted_at?: string | null;
-          script_outline?: Json | null;
-          status?: Database["public"]["Enums"]["video_brief_status"];
-          target_duration_s?: number | null;
-          voice_id?: string | null;
-        };
+          brief_id_human?: string
+          broll_selection_mode?: string
+          captions_style?: string | null
+          client_id?: string | null
+          created_at?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          decided_notes?: string | null
+          dimensions?: Database["public"]["Enums"]["ratio"] | null
+          hook_style?: string | null
+          id?: string
+          music_track?: string | null
+          payload?: Json | null
+          posted_at?: string | null
+          script_outline?: Json | null
+          status?: Database["public"]["Enums"]["video_brief_status"]
+          target_duration_s?: number | null
+          voice_id?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "video_briefs_client_id_fkey";
-            columns: ["client_id"];
-            isOneToOne: false;
-            referencedRelation: "clients";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_briefs_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       video_copy_variants: {
         Row: {
-          body: string | null;
-          created_at: string;
-          creative_id: string;
-          cta: string | null;
-          headline: string | null;
-          humanized: boolean | null;
-          id: string;
-          status: string | null;
-        };
+          body: string | null
+          created_at: string
+          creative_id: string
+          cta: string | null
+          headline: string | null
+          humanized: boolean | null
+          id: string
+          status: string | null
+        }
         Insert: {
-          body?: string | null;
-          created_at?: string;
-          creative_id: string;
-          cta?: string | null;
-          headline?: string | null;
-          humanized?: boolean | null;
-          id?: string;
-          status?: string | null;
-        };
+          body?: string | null
+          created_at?: string
+          creative_id: string
+          cta?: string | null
+          headline?: string | null
+          humanized?: boolean | null
+          id?: string
+          status?: string | null
+        }
         Update: {
-          body?: string | null;
-          created_at?: string;
-          creative_id?: string;
-          cta?: string | null;
-          headline?: string | null;
-          humanized?: boolean | null;
-          id?: string;
-          status?: string | null;
-        };
+          body?: string | null
+          created_at?: string
+          creative_id?: string
+          cta?: string | null
+          headline?: string | null
+          humanized?: boolean | null
+          id?: string
+          status?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "video_copy_variants_creative_id_fkey";
-            columns: ["creative_id"];
-            isOneToOne: false;
-            referencedRelation: "video_creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_copy_variants_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "video_creatives"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       video_creatives: {
         Row: {
-          approved_at: string | null;
-          brief_id: string;
-          broll_clips: Json | null;
-          captioned_path: string | null;
-          composed_path: string | null;
-          created_at: string;
-          drive_url: string | null;
-          duration_actual_s: number | null;
-          id: string;
-          script_path: string | null;
-          status: Database["public"]["Enums"]["video_creative_status"];
-          version: number;
-          voiceover_path: string | null;
-        };
+          approved_at: string | null
+          brief_id: string
+          broll_clips: Json | null
+          captioned_path: string | null
+          composed_path: string | null
+          created_at: string
+          drive_url: string | null
+          duration_actual_s: number | null
+          id: string
+          script_path: string | null
+          status: Database["public"]["Enums"]["video_creative_status"]
+          version: number
+          voiceover_path: string | null
+        }
         Insert: {
-          approved_at?: string | null;
-          brief_id: string;
-          broll_clips?: Json | null;
-          captioned_path?: string | null;
-          composed_path?: string | null;
-          created_at?: string;
-          drive_url?: string | null;
-          duration_actual_s?: number | null;
-          id?: string;
-          script_path?: string | null;
-          status?: Database["public"]["Enums"]["video_creative_status"];
-          version?: number;
-          voiceover_path?: string | null;
-        };
+          approved_at?: string | null
+          brief_id: string
+          broll_clips?: Json | null
+          captioned_path?: string | null
+          composed_path?: string | null
+          created_at?: string
+          drive_url?: string | null
+          duration_actual_s?: number | null
+          id?: string
+          script_path?: string | null
+          status?: Database["public"]["Enums"]["video_creative_status"]
+          version?: number
+          voiceover_path?: string | null
+        }
         Update: {
-          approved_at?: string | null;
-          brief_id?: string;
-          broll_clips?: Json | null;
-          captioned_path?: string | null;
-          composed_path?: string | null;
-          created_at?: string;
-          drive_url?: string | null;
-          duration_actual_s?: number | null;
-          id?: string;
-          script_path?: string | null;
-          status?: Database["public"]["Enums"]["video_creative_status"];
-          version?: number;
-          voiceover_path?: string | null;
-        };
+          approved_at?: string | null
+          brief_id?: string
+          broll_clips?: Json | null
+          captioned_path?: string | null
+          composed_path?: string | null
+          created_at?: string
+          drive_url?: string | null
+          duration_actual_s?: number | null
+          id?: string
+          script_path?: string | null
+          status?: Database["public"]["Enums"]["video_creative_status"]
+          version?: number
+          voiceover_path?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "video_creatives_brief_id_fkey";
-            columns: ["brief_id"];
-            isOneToOne: false;
-            referencedRelation: "video_briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_creatives_brief_id_fkey"
+            columns: ["brief_id"]
+            isOneToOne: false
+            referencedRelation: "video_briefs"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       video_iterations: {
         Row: {
-          author: Database["public"]["Enums"]["iteration_author"];
-          content: Json | null;
-          created_at: string;
-          creative_id: string;
-          id: string;
-          image_path_supabase: string | null;
-          kind: Database["public"]["Enums"]["video_iteration_kind"];
-          parent_creative_id: string | null;
-        };
+          author: Database["public"]["Enums"]["iteration_author"]
+          content: Json | null
+          created_at: string
+          creative_id: string
+          id: string
+          image_path_supabase: string | null
+          kind: Database["public"]["Enums"]["video_iteration_kind"]
+          parent_creative_id: string | null
+        }
         Insert: {
-          author: Database["public"]["Enums"]["iteration_author"];
-          content?: Json | null;
-          created_at?: string;
-          creative_id: string;
-          id?: string;
-          image_path_supabase?: string | null;
-          kind: Database["public"]["Enums"]["video_iteration_kind"];
-          parent_creative_id?: string | null;
-        };
+          author: Database["public"]["Enums"]["iteration_author"]
+          content?: Json | null
+          created_at?: string
+          creative_id: string
+          id?: string
+          image_path_supabase?: string | null
+          kind: Database["public"]["Enums"]["video_iteration_kind"]
+          parent_creative_id?: string | null
+        }
         Update: {
-          author?: Database["public"]["Enums"]["iteration_author"];
-          content?: Json | null;
-          created_at?: string;
-          creative_id?: string;
-          id?: string;
-          image_path_supabase?: string | null;
-          kind?: Database["public"]["Enums"]["video_iteration_kind"];
-          parent_creative_id?: string | null;
-        };
+          author?: Database["public"]["Enums"]["iteration_author"]
+          content?: Json | null
+          created_at?: string
+          creative_id?: string
+          id?: string
+          image_path_supabase?: string | null
+          kind?: Database["public"]["Enums"]["video_iteration_kind"]
+          parent_creative_id?: string | null
+        }
         Relationships: [
           {
-            foreignKeyName: "video_iterations_creative_id_fkey";
-            columns: ["creative_id"];
-            isOneToOne: false;
-            referencedRelation: "video_creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_iterations_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "video_creatives"
+            referencedColumns: ["id"]
           },
           {
-            foreignKeyName: "video_iterations_parent_creative_id_fkey";
-            columns: ["parent_creative_id"];
-            isOneToOne: false;
-            referencedRelation: "video_creatives";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_iterations_parent_creative_id_fkey"
+            columns: ["parent_creative_id"]
+            isOneToOne: false
+            referencedRelation: "video_creatives"
+            referencedColumns: ["id"]
           },
-        ];
-      };
+        ]
+      }
       video_launch_packages: {
         Row: {
-          brief_id: string;
-          created_at: string;
-          decided_at: string | null;
-          decided_notes: string | null;
-          id: string;
-          payload: Json;
-          status: string;
-        };
+          brief_id: string
+          created_at: string
+          decided_at: string | null
+          decided_notes: string | null
+          id: string
+          payload: Json
+          status: string
+        }
         Insert: {
-          brief_id: string;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload: Json;
-          status?: string;
-        };
+          brief_id: string
+          created_at?: string
+          decided_at?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload: Json
+          status?: string
+        }
         Update: {
-          brief_id?: string;
-          created_at?: string;
-          decided_at?: string | null;
-          decided_notes?: string | null;
-          id?: string;
-          payload?: Json;
-          status?: string;
-        };
+          brief_id?: string
+          created_at?: string
+          decided_at?: string | null
+          decided_notes?: string | null
+          id?: string
+          payload?: Json
+          status?: string
+        }
         Relationships: [
           {
-            foreignKeyName: "video_launch_packages_brief_id_fkey";
-            columns: ["brief_id"];
-            isOneToOne: false;
-            referencedRelation: "video_briefs";
-            referencedColumns: ["id"];
+            foreignKeyName: "video_launch_packages_brief_id_fkey"
+            columns: ["brief_id"]
+            isOneToOne: false
+            referencedRelation: "video_briefs"
+            referencedColumns: ["id"]
           },
-        ];
-      };
-    };
+        ]
+      }
+    }
     Views: {
       v_campaign_perf: {
         Row: {
-          campaign_id: string | null;
-          clicks: number | null;
-          client_id: string | null;
-          cpl_real: number | null;
-          ctr: number | null;
-          format: string | null;
-          freq: number | null;
-          id: string | null;
-          impressions: number | null;
-          leads_ghl: number | null;
-          leads_meta: number | null;
-          pulled_at: string | null;
-          spend: number | null;
-          verdict: Database["public"]["Enums"]["ad_verdict"] | null;
-          verdict_reason: string | null;
-          window_days: number | null;
-        };
-        Relationships: [];
-      };
-    };
+          campaign_id: string | null
+          clicks: number | null
+          client_id: string | null
+          cpl_real: number | null
+          ctr: number | null
+          format: string | null
+          freq: number | null
+          id: string | null
+          impressions: number | null
+          leads_ghl: number | null
+          leads_meta: number | null
+          pulled_at: string | null
+          spend: number | null
+          verdict: Database["public"]["Enums"]["ad_verdict"] | null
+          verdict_reason: string | null
+          window_days: number | null
+        }
+        Relationships: []
+      }
+    }
     Functions: {
-      gen_brief_id_human: { Args: { p_client_slug: string }; Returns: string };
+      gen_brief_id_human: { Args: { p_client_slug: string }; Returns: string }
       gen_video_brief_id_human: {
-        Args: { p_client_slug: string };
-        Returns: string;
-      };
-      show_limit: { Args: never; Returns: number };
-      show_trgm: { Args: { "": string }; Returns: string[] };
-    };
+        Args: { p_client_slug: string }
+        Returns: string
+      }
+      show_limit: { Args: never; Returns: number }
+      show_trgm: { Args: { "": string }; Returns: string[] }
+    }
     Enums: {
-      ad_verdict: "kill" | "watch" | "keep";
+      ad_verdict: "kill" | "watch" | "keep"
+      approval_decision_enum: "approved" | "rejected" | "approved_with_caveat"
+      approval_status_enum: "pending" | "decided" | "expired" | "cancelled"
       brief_status:
         | "draft"
         | "posted"
         | "approved"
         | "approved_with_changes"
-        | "rejected";
-      broll_store_backend: "local" | "supabase";
-      chat_author: "user" | "ekko" | "system";
-      chat_content_type: "text" | "tool_call" | "tool_result" | "system";
-      chat_creative_type: "image" | "video";
-      creative_type: "image" | "video";
+        | "rejected"
+      broll_store_backend: "local" | "supabase"
+      chat_author: "user" | "ekko" | "system"
+      chat_content_type: "text" | "tool_call" | "tool_result" | "system"
+      chat_creative_type: "image" | "video"
+      creative_type: "image" | "video"
+      hermes_task_status_enum:
+        | "pending"
+        | "ready"
+        | "claimed"
+        | "running"
+        | "completed"
+        | "failed"
+        | "blocked"
+        | "cancelled"
       image_creative_status:
         | "draft"
         | "approved"
         | "rejected"
         | "live"
-        | "killed";
+        | "killed"
       image_iteration_kind:
         | "generate"
         | "regenerate"
         | "annotate"
         | "comment"
-        | "user_edit";
-      iteration_author: "user" | "ekko";
-      pipeline_format_enum: "image" | "video" | "both";
+        | "user_edit"
+      iteration_author: "user" | "ekko"
+      pipeline_event_source_enum:
+        | "worker"
+        | "hermes-hook"
+        | "hermes-task"
+        | "manual"
+      pipeline_format_enum: "image" | "video" | "both"
       pipeline_status_enum:
         | "configuration"
         | "ideation"
         | "review"
         | "generation"
         | "done"
-        | "cancelled";
-      ratio: "1x1" | "9x16" | "16x9";
-      service_type: "roofing" | "remodeling";
-      sync_status: "running" | "ok" | "error";
+        | "cancelled"
+      ratio: "1x1" | "9x16" | "16x9"
+      service_type: "roofing" | "remodeling"
+      sync_status: "running" | "ok" | "error"
       video_brief_status:
         | "draft"
         | "posted"
         | "approved"
         | "approved_with_changes"
-        | "rejected";
+        | "rejected"
       video_creative_status:
         | "draft"
         | "script_ready"
@@ -1050,7 +1209,7 @@ export type Database = {
         | "composed"
         | "captioned"
         | "approved"
-        | "rejected";
+        | "rejected"
       video_iteration_kind:
         | "generate_script"
         | "regenerate_voiceover"
@@ -1059,8 +1218,219 @@ export type Database = {
         | "rerender"
         | "recaption"
         | "comment"
-        | "user_edit";
-    };
-    CompositeTypes: Record<string, never>;
-  };
-};
+        | "user_edit"
+    }
+    CompositeTypes: {
+      [_ in never]: never
+    }
+  }
+}
+
+type DatabaseWithoutInternals = Omit<Database, "__InternalSupabase">
+
+type DefaultSchema = DatabaseWithoutInternals[Extract<keyof Database, "public">]
+
+export type Tables<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+        DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
+      DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])[TableName] extends {
+      Row: infer R
+    }
+    ? R
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])
+    ? (DefaultSchema["Tables"] &
+        DefaultSchema["Views"])[DefaultSchemaTableNameOrOptions] extends {
+        Row: infer R
+      }
+      ? R
+      : never
+    : never
+
+export type TablesInsert<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Insert: infer I
+    }
+    ? I
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Insert: infer I
+      }
+      ? I
+      : never
+    : never
+
+export type TablesUpdate<
+  DefaultSchemaTableNameOrOptions extends
+    | keyof DefaultSchema["Tables"]
+    | { schema: keyof DatabaseWithoutInternals },
+  TableName extends DefaultSchemaTableNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
+    : never = never,
+> = DefaultSchemaTableNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"][TableName] extends {
+      Update: infer U
+    }
+    ? U
+    : never
+  : DefaultSchemaTableNameOrOptions extends keyof DefaultSchema["Tables"]
+    ? DefaultSchema["Tables"][DefaultSchemaTableNameOrOptions] extends {
+        Update: infer U
+      }
+      ? U
+      : never
+    : never
+
+export type Enums<
+  DefaultSchemaEnumNameOrOptions extends
+    | keyof DefaultSchema["Enums"]
+    | { schema: keyof DatabaseWithoutInternals },
+  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
+    : never = never,
+> = DefaultSchemaEnumNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"][EnumName]
+  : DefaultSchemaEnumNameOrOptions extends keyof DefaultSchema["Enums"]
+    ? DefaultSchema["Enums"][DefaultSchemaEnumNameOrOptions]
+    : never
+
+export type CompositeTypes<
+  PublicCompositeTypeNameOrOptions extends
+    | keyof DefaultSchema["CompositeTypes"]
+    | { schema: keyof DatabaseWithoutInternals },
+  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+    schema: keyof DatabaseWithoutInternals
+  }
+    ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
+    : never = never,
+> = PublicCompositeTypeNameOrOptions extends {
+  schema: keyof DatabaseWithoutInternals
+}
+  ? DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"][CompositeTypeName]
+  : PublicCompositeTypeNameOrOptions extends keyof DefaultSchema["CompositeTypes"]
+    ? DefaultSchema["CompositeTypes"][PublicCompositeTypeNameOrOptions]
+    : never
+
+export const Constants = {
+  public: {
+    Enums: {
+      ad_verdict: ["kill", "watch", "keep"],
+      approval_decision_enum: ["approved", "rejected", "approved_with_caveat"],
+      approval_status_enum: ["pending", "decided", "expired", "cancelled"],
+      brief_status: [
+        "draft",
+        "posted",
+        "approved",
+        "approved_with_changes",
+        "rejected",
+      ],
+      broll_store_backend: ["local", "supabase"],
+      chat_author: ["user", "ekko", "system"],
+      chat_content_type: ["text", "tool_call", "tool_result", "system"],
+      chat_creative_type: ["image", "video"],
+      creative_type: ["image", "video"],
+      hermes_task_status_enum: [
+        "pending",
+        "ready",
+        "claimed",
+        "running",
+        "completed",
+        "failed",
+        "blocked",
+        "cancelled",
+      ],
+      image_creative_status: [
+        "draft",
+        "approved",
+        "rejected",
+        "live",
+        "killed",
+      ],
+      image_iteration_kind: [
+        "generate",
+        "regenerate",
+        "annotate",
+        "comment",
+        "user_edit",
+      ],
+      iteration_author: ["user", "ekko"],
+      pipeline_event_source_enum: [
+        "worker",
+        "hermes-hook",
+        "hermes-task",
+        "manual",
+      ],
+      pipeline_format_enum: ["image", "video", "both"],
+      pipeline_status_enum: [
+        "configuration",
+        "ideation",
+        "review",
+        "generation",
+        "done",
+        "cancelled",
+      ],
+      ratio: ["1x1", "9x16", "16x9"],
+      service_type: ["roofing", "remodeling"],
+      sync_status: ["running", "ok", "error"],
+      video_brief_status: [
+        "draft",
+        "posted",
+        "approved",
+        "approved_with_changes",
+        "rejected",
+      ],
+      video_creative_status: [
+        "draft",
+        "script_ready",
+        "voiceover_ready",
+        "broll_ready",
+        "composed",
+        "captioned",
+        "approved",
+        "rejected",
+      ],
+      video_iteration_kind: [
+        "generate_script",
+        "regenerate_voiceover",
+        "search_broll",
+        "swap_broll",
+        "rerender",
+        "recaption",
+        "comment",
+        "user_edit",
+      ],
+    },
+  },
+} as const

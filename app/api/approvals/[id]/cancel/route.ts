@@ -21,12 +21,9 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   }
 
   const supabase = createAdminClient();
-  // Cast to `any` until Wave 22 regenerates the types.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const supabaseAny: any = supabase;
 
   const decided_at = new Date().toISOString();
-  const { data: updated, error: updateErr } = await supabaseAny
+  const { data: updated, error: updateErr } = await supabase
     .from("approvals")
     .update({ status: "cancelled", decided_at })
     .eq("id", id)
@@ -42,7 +39,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   }
 
   // Either gone or already non-pending — re-read for the response payload.
-  const { data: existing, error: readErr } = await supabaseAny
+  const { data: existing, error: readErr } = await supabase
     .from("approvals")
     .select("*")
     .eq("id", id)

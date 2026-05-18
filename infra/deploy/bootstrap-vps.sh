@@ -19,7 +19,10 @@
 #   9. Print instructions for GHCR login (this script does NOT bake a token).
 #  10. `docker compose pull` (skipped in --dry-run).
 #  11. `docker compose up -d` (skipped in --dry-run).
-#  12. Print final summary + remaining manual steps.
+#  12. Hermes-aware sanity: confirm hermes-agent-ekko exists; verify the
+#      worker container can reach it via /var/run/docker.sock.
+#  13. Print final summary + remaining manual steps (incl. the Hermes-side
+#      overlay — see infra/deploy/README.md "Hermes-side overlay").
 #
 # Flags:
 #   --dry-run         Print steps + skip docker pull/up (good for review).
@@ -107,7 +110,7 @@ require_root() {
 # 1. Sanity: Ubuntu 24.04
 # ---------------------------------------------------------------------------
 step_sanity() {
-  banner "1/12  Sanity: confirming Ubuntu 24.04 LTS"
+  banner "1/13  Sanity: confirming Ubuntu 24.04 LTS"
 
   if ! command -v lsb_release >/dev/null 2>&1; then
     # lsb-release is part of ubuntu-minimal but bail-with-installer is friendlier
@@ -139,7 +142,7 @@ step_sanity() {
 # 2. Base apt packages
 # ---------------------------------------------------------------------------
 step_packages() {
-  banner "2/12  Installing base apt packages"
+  banner "2/13  Installing base apt packages"
 
   local need=()
   local pkg
@@ -163,7 +166,7 @@ step_packages() {
 # 3. Docker CE + Compose plugin (official apt repo)
 # ---------------------------------------------------------------------------
 step_docker() {
-  banner "3/12  Installing Docker (official apt repo)"
+  banner "3/13  Installing Docker (official apt repo)"
 
   if command -v docker >/dev/null 2>&1 && docker --version >/dev/null 2>&1; then
     if docker compose version >/dev/null 2>&1; then
@@ -204,7 +207,7 @@ EOF
 # 4. UFW firewall
 # ---------------------------------------------------------------------------
 step_firewall() {
-  banner "4/12  Configuring UFW firewall"
+  banner "4/13  Configuring UFW firewall"
 
   if [[ "${SKIP_FIREWALL}" -eq 1 ]]; then
     echo "skip: --skip-firewall set"
@@ -234,7 +237,7 @@ step_firewall() {
 # 5. Deploy user (delegates to setup-deploy-user.sh)
 # ---------------------------------------------------------------------------
 step_deploy_user() {
-  banner "5/12  Provisioning deploy user"
+  banner "5/13  Provisioning deploy user"
 
   local helper="${SCRIPT_DIR}/setup-deploy-user.sh"
   if [[ ! -x "${helper}" ]]; then
@@ -257,7 +260,7 @@ step_deploy_user() {
 # 6. Repo clone
 # ---------------------------------------------------------------------------
 step_repo_clone() {
-  banner "6/12  Cloning repo into ${REPO_DIR}"
+  banner "6/13  Cloning repo into ${REPO_DIR}"
 
   if [[ -d "${REPO_DIR}/.git" ]]; then
     echo "ok: repo already cloned at ${REPO_DIR}"
@@ -282,7 +285,7 @@ step_repo_clone() {
 # 7. .env scaffold
 # ---------------------------------------------------------------------------
 step_env_scaffold() {
-  banner "7/12  Scaffolding ${ENV_FILE}"
+  banner "7/13  Scaffolding ${ENV_FILE}"
 
   if [[ -f "${ENV_FILE}" ]]; then
     echo "ok: ${ENV_FILE} already exists — leaving in place"
@@ -342,7 +345,7 @@ BANNER
 # 8. Symlink docker-compose.yml into /opt/voxhorizon
 # ---------------------------------------------------------------------------
 step_compose_symlink() {
-  banner "8/12  Linking docker-compose.yml into ${VOXHORIZON_ROOT}"
+  banner "8/13  Linking docker-compose.yml into ${VOXHORIZON_ROOT}"
 
   local target="${REPO_DIR}/docker-compose.yml"
 
@@ -376,7 +379,7 @@ step_compose_symlink() {
 # 9. GHCR login — manual step (this script never bakes a token)
 # ---------------------------------------------------------------------------
 step_ghcr_login() {
-  banner "9/12  GHCR login (manual)"
+  banner "9/13  GHCR login (manual)"
 
   cat <<EOF
 This script does NOT log into GHCR for you — that would mean baking a Personal
@@ -397,7 +400,7 @@ EOF
 # 10. First pull
 # ---------------------------------------------------------------------------
 step_first_pull() {
-  banner "10/12  docker compose pull"
+  banner "10/13  docker compose pull"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "skip: --dry-run"
@@ -422,7 +425,7 @@ step_first_pull() {
 # 11. First up
 # ---------------------------------------------------------------------------
 step_first_up() {
-  banner "11/12  docker compose up -d"
+  banner "11/13  docker compose up -d"
 
   if [[ "${DRY_RUN}" -eq 1 ]]; then
     echo "skip: --dry-run"
@@ -443,10 +446,98 @@ step_first_up() {
 }
 
 # ---------------------------------------------------------------------------
-# 12. Final summary
+# 12. Hermes-aware sanity check (idempotent)
+# ---------------------------------------------------------------------------
+#
+# Post-Hermes integration the worker bridges to the operator-managed
+# `hermes-agent-ekko` container via the shared Docker socket. None of this is
+# installed by us — Hostinger's HVPS Hermes Agent product provisions Ekko
+# under /docker/hermes-agent-t4k4/ — but we can verify the bridge is wired
+# correctly before the operator starts in on the manual overlay.
+#
+# Three checks, each idempotent + non-fatal:
+#   a. Is `hermes-agent-ekko` running? (If not: print guidance and bail soft.)
+#   b. Can the worker container resolve and reach it via docker.sock?
+#   c. Print the next-step list (Hermes-side overlay) so the operator can't
+#      miss it.
+step_hermes_sanity() {
+  banner "12/13  Hermes-aware sanity check"
+
+  if [[ "${DRY_RUN}" -eq 1 ]]; then
+    echo "skip: --dry-run"
+    return
+  fi
+
+  if [[ ! -s "${ENV_FILE}" ]]; then
+    echo "skip: ${ENV_FILE} is empty — Hermes sanity needs a running stack"
+    return
+  fi
+
+  # 12a. Confirm hermes-agent-ekko exists on the daemon.
+  if ! docker ps --filter "name=hermes-agent-ekko" --format '{{.Names}}' \
+      | grep -qx 'hermes-agent-ekko'; then
+    cat <<'EOF' >&2
+
+  warn: hermes-agent-ekko is NOT running on this host.
+        Our worker bridges into Ekko via /var/run/docker.sock. Without the
+        Hermes container, /work/hermes/* endpoints will fail.
+
+        Action (operator):
+          1. Confirm the Hostinger HVPS Hermes Agent product is provisioned on
+             this VPS. The container should live under /docker/hermes-agent-t4k4/.
+          2. Bring it up:
+               cd /docker/hermes-agent-t4k4 && docker compose up -d
+          3. Re-run this bootstrap (idempotent) once it's running.
+
+EOF
+    return
+  fi
+  echo "ok: hermes-agent-ekko is running"
+
+  # 12b. Confirm the worker container can reach the Hermes container via
+  # the shared Docker socket. We only run this if the worker came up in step 11.
+  if sudo -u "${DEPLOY_USER}" -H sh -c "cd '${VOXHORIZON_ROOT}' && docker compose ps --filter status=running --services" \
+      | grep -qx 'worker'; then
+    local probe
+    probe="$(sudo -u "${DEPLOY_USER}" -H sh -c "cd '${VOXHORIZON_ROOT}' && \
+      docker compose exec -T worker python -c \"\
+import docker, sys
+try:
+    c = docker.from_env().containers.get('hermes-agent-ekko')
+    print(c.status)
+except Exception as e:
+    print('error: ' + str(e), file=sys.stderr); sys.exit(1)\" 2>&1" || true)"
+
+    if [[ "${probe}" == "running" ]]; then
+      echo "ok: worker can reach hermes-agent-ekko via /var/run/docker.sock (status=running)"
+    else
+      cat >&2 <<EOF
+
+  warn: worker container could not reach hermes-agent-ekko via the Docker socket.
+        Probe output:
+          ${probe}
+
+        Common causes:
+          - The worker doesn't have /var/run/docker.sock mounted (check docker-compose.yml)
+          - The worker user is not in the host 'docker' group (check group_add: in compose)
+          - hermes-agent-ekko stopped between checks 12a and 12b
+
+        Action: docker compose logs --tail=50 worker, and confirm the
+        volumes:/group_add: lines in docker-compose.yml are present.
+
+EOF
+    fi
+  else
+    echo "note: worker container is not running — skipping 12b probe."
+    echo "      run 'docker compose up -d worker' once .env is filled in."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 13. Final summary
 # ---------------------------------------------------------------------------
 step_summary() {
-  banner "12/12  Done — next steps"
+  banner "13/13  Done — next steps"
 
   cat <<EOF
 
@@ -454,7 +545,8 @@ step_summary() {
 
     1. Fill in real values in ${ENV_FILE}:
          sudo -u ${DEPLOY_USER} -e nano ${ENV_FILE}
-       (See SECRETS.md > VPS production secrets for every required variable.)
+       (See SECRETS.md > VPS production secrets AND
+        SECRETS.md > Hermes integration secrets for every required variable.)
 
     2. Set VOXHORIZON_DASHBOARD_HOST in ${ENV_FILE} to the public hostname
        (e.g. dashboard.voxhorizon.com). Caddy uses it for TLS issuance.
@@ -477,7 +569,27 @@ step_summary() {
          VPS_HOST, VPS_USER, VPS_SSH_KEY
        (See SECRETS.md > GitHub Actions deploy secrets.)
 
-    7. From a workstation, trigger the first deploy:
+    7. APPLY THE HERMES-SIDE OVERLAY (one-shot, after the stack is up):
+         See infra/deploy/README.md > "Hermes-side overlay" for the full
+         steps. tl;dr — copy three skills + one plugin from the repo into
+         the operator-managed hermes-agent-ekko container, paste the matching
+         bearer tokens into /opt/data/.env on the Hermes side, and restart
+         the Ekko container. None of this can run from this bootstrap
+         because Ekko is operator-managed.
+
+           - Patch /docker/hermes-agent-t4k4/config.yaml using
+             infra/hermes/config.yaml.patch
+           - Copy ekko-skills/{dashboard-publish,dashboard-chat-publish,dashboard-task-result}
+             into /opt/data/skills/
+           - Copy ekko-plugins/voxhorizon_approvals/ into
+             /opt/data/home/.hermes/plugins/
+           - Set SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY /
+             DASHBOARD_WEBHOOK_URL / DASHBOARD_WEBHOOK_TOKEN /
+             VOXHORIZON_APPROVAL_WORKER_URL / VOXHORIZON_APPROVAL_TOKEN
+             in /opt/data/.env (Hermes side)
+           - Restart hermes-agent-ekko
+
+    8. From a workstation, trigger the first deploy:
          gh workflow run deploy-stack.yml --ref main
        Or:  Actions → deploy-stack → Run workflow
 
@@ -503,6 +615,7 @@ main() {
   step_ghcr_login
   step_first_pull
   step_first_up
+  step_hermes_sanity
   step_summary
 }
 

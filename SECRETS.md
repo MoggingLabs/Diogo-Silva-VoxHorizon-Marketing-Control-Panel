@@ -223,9 +223,57 @@ The union of every variable consumed by either container at runtime, grouped by 
 
 #### Agent runtime
 
-| Var                 | Consumed by | Purpose                                           | Rotate at                         |
-| ------------------- | ----------- | ------------------------------------------------- | --------------------------------- |
-| `ANTHROPIC_API_KEY` | worker      | Claude Code runner (server-side agent execution). | console.anthropic.com → API Keys. |
+Claude Code was the v0 agent runtime and was **dropped during the Hermes integration milestone (May 2026)**. `ANTHROPIC_API_KEY` is no longer consumed by the worker; the live agent is `hermes-agent-ekko` on Hostinger's HVPS, and Hermes manages its own provider routing. The variable can be left present in `.env` (harmless) or removed at the next rotation pass.
+
+| Var                          | Consumed by               | Purpose                                                                   | Rotate at                              |
+| ---------------------------- | ------------------------- | ------------------------------------------------------------------------- | -------------------------------------- |
+| `ANTHROPIC_API_KEY` (legacy) | — (unused after May 2026) | Legacy Claude Code runner. Safe to remove; left present to ease rollback. | n/a — drop on next quarterly rotation. |
+
+#### Hermes integration secrets
+
+Post-Hermes integration, the worker is a thin bridge between our dashboard and `hermes-agent-ekko`. Three new bearer tokens authenticate the three distinct surfaces; keeping them disjoint contains blast radius if one leaks. Plus a handful of routing / identity variables.
+
+##### Worker-side (`/opt/voxhorizon/.env`)
+
+| Var                         | Consumed by  | Purpose                                                                                                                                                                                                                     | Rotate at                                                                                                                         |
+| --------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `HERMES_CONTAINER_NAME`     | worker       | Docker container name the worker addresses via `/var/run/docker.sock`. Defaults to `hermes-agent-ekko`. Not secret.                                                                                                         | Edit `/opt/voxhorizon/.env` only if Hostinger renames the container template.                                                     |
+| `DASHBOARD_WEBHOOK_TOKEN`   | worker, Ekko | Bearer the worker requires on inbound `POST /work/hermes/webhook` calls. Ekko's `post_tool_call` / `session_end` shell hooks send it. **Must be identical on both sides.**                                                  | Regenerate locally (`python -c "import secrets; print(secrets.token_hex(48))"`); update both `.env` files; restart worker + Ekko. |
+| `VOXHORIZON_APPROVAL_TOKEN` | worker, Ekko | Bearer the worker requires on inbound `POST /work/hermes/approval` calls from the `voxhorizon-approvals` plugin. **Distinct from `DASHBOARD_WEBHOOK_TOKEN`** so a compromise of one path can't pivot to the other.          | Same procedure as above.                                                                                                          |
+| `INTERNAL_API_TOKEN`        | worker, web  | Bearer the worker carries when calling Next.js `/api/internal/*` (e.g. the high-urgency email render endpoint). The web container compares it with `hmac.compare_digest`.                                                   | Same procedure.                                                                                                                   |
+| `INTERNAL_API_BASE_URL`     | worker       | Base URL the worker uses to reach the web container for internal calls. **Set to `http://web:3000`** on the compose network.                                                                                                | Only change if `web` is renamed in `docker-compose.yml`.                                                                          |
+| `OPERATOR_EMAIL`            | web          | Resend recipient for high-urgency approval emails. Set to the operator's mailbox.                                                                                                                                           | Edit when the operator's email changes.                                                                                           |
+| `VAPID_PUBLIC_KEY`          | worker       | Public half of the VAPID keypair the worker references when fanning out browser push for new approvals. **Same value as `NEXT_PUBLIC_VAPID_PUBLIC_KEY`**, mirrored here so the worker can construct subscription endpoints. | See VAPID note above — **do not rotate on a schedule**.                                                                           |
+| `VAPID_PRIVATE_KEY`         | worker, web  | Server-side VAPID signer. Both containers consume it (web for `/api/push` flows, worker for approval fan-out).                                                                                                              | Same as above.                                                                                                                    |
+
+> **`VAPID_PUBLIC_KEY` vs `NEXT_PUBLIC_VAPID_PUBLIC_KEY`.** They hold the same value. The browser subscribes using the `NEXT_PUBLIC_*` form (inlined at build time); the worker references `VAPID_PUBLIC_KEY` at runtime to identify the subscription origin in its push payloads. Both are derived from one `npx web-push generate-vapid-keys` invocation. Rotating either forces every subscriber to re-permission Web Push — see the VAPID note.
+
+##### Ekko-side (`/opt/data/.env` on the VPS, inside the Hermes container)
+
+These live on the Hermes container's filesystem, not in our `/opt/voxhorizon/.env`. The operator pastes them in during the one-shot Hermes overlay (see [`infra/deploy/README.md`](./infra/deploy/README.md#hermes-side-overlay-one-shot)).
+
+| Var                              | Consumed by                              | Purpose                                                                                                               | Rotate at                                                                                       |
+| -------------------------------- | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| `SUPABASE_URL`                   | Ekko (`dashboard-publish` skill helpers) | Project URL the skills hit when upserting rows.                                                                       | Stable; only changes if the Supabase project is migrated.                                       |
+| `SUPABASE_SERVICE_ROLE_KEY`      | Ekko (`dashboard-publish` skill helpers) | Service-role key the skill helpers use. **Same value as the worker's** — Supabase has one canonical service-role key. | Rotate at Supabase dashboard; update `/opt/voxhorizon/.env` AND `/opt/data/.env`; restart both. |
+| `DASHBOARD_WEBHOOK_URL`          | Ekko (shell hooks)                       | Where shell hooks post — should be `http://worker:8000/work/hermes/webhook` on the shared Docker daemon.              | Only change if the worker is renamed.                                                           |
+| `DASHBOARD_WEBHOOK_TOKEN`        | Ekko (shell hooks)                       | Bearer paired with the worker-side `DASHBOARD_WEBHOOK_TOKEN`.                                                         | Rotate alongside the worker-side value.                                                         |
+| `VOXHORIZON_APPROVAL_WORKER_URL` | Ekko (`voxhorizon-approvals` plugin)     | Where the plugin's HTTP client points — should be `http://worker:8000/work/hermes/approval`.                          | Only change if the worker is renamed.                                                           |
+| `VOXHORIZON_APPROVAL_TOKEN`      | Ekko (`voxhorizon-approvals` plugin)     | Bearer paired with the worker-side `VOXHORIZON_APPROVAL_TOKEN`.                                                       | Rotate alongside the worker-side value.                                                         |
+
+##### Docker socket trade-off
+
+The worker container mounts `/var/run/docker.sock` read-write so it can `docker exec` into `hermes-agent-ekko` for the chat-streaming and kanban bridges. This is **root-equivalent access on the host** — anything that compromises the worker process can manipulate every container on the daemon, mount arbitrary host paths, and pivot off the box.
+
+We accept the trade-off because the alternatives (network-only RPC into Hermes; sidecar shim that mediates Docker calls) sacrifice the <1ms latency that makes the chat experience livable. Mitigations:
+
+- **Only the worker mounts the socket.** Neither `web` nor `caddy` has access.
+- **Strict bearer auth on every worker route.** The worker has no unauthenticated public endpoint; every inbound call carries `WORKER_SHARED_SECRET` (from web) or `DASHBOARD_WEBHOOK_TOKEN` / `VOXHORIZON_APPROVAL_TOKEN` (from Ekko-side hooks/plugin).
+- **No untrusted code paths in the worker.** Every dependency is pinned in `uv.lock`; the worker doesn't execute user-supplied scripts or accept arbitrary file uploads.
+- **Co-located by design.** Worker + Ekko + dashboard live in one operator-controlled environment. The threat model is "compromise of one of our images via a supply-chain attack," not "untrusted code escaping a sandbox."
+- **`docker` group, not root.** The compose file pins the worker into the host's `docker` group via `group_add`, so the `app` user inside the container can use the socket without running as UID 0.
+
+If the threat model widens (multi-tenant, third-party plugins running inside the worker, etc.), the right move is a tightly-scoped Docker proxy (e.g. `tecnativa/docker-socket-proxy`) that exposes only `containers.exec` for one container ID — not the full Docker API. Track that as a v2 hardening step.
 
 #### Reverse proxy
 
@@ -258,7 +306,8 @@ Run the first weekend of each quarter. Tick each box as you go.
 - [ ] **Submagic (`SUBMAGIC_API_KEY`).** Rotate at submagic.co; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **Meta Ads (`META_ADS_API_KEY`).** Generate fresh System User token; update `/opt/voxhorizon/.env`; restart worker.
 - [ ] **GoHighLevel (`GHL_API_KEY`).** Rotate at GHL → Settings → Private Integrations; update `/opt/voxhorizon/.env`; restart worker.
-- [ ] **Anthropic (`ANTHROPIC_API_KEY`).** Rotate at console.anthropic.com; update `/opt/voxhorizon/.env`; restart worker.
+- [ ] **Anthropic (`ANTHROPIC_API_KEY`, legacy).** Hermes/Ekko is the live runtime now; remove `ANTHROPIC_API_KEY` from `/opt/voxhorizon/.env` if confident the rollback to Claude Code is no longer wanted.
+- [ ] **Hermes bearer tokens (`DASHBOARD_WEBHOOK_TOKEN`, `VOXHORIZON_APPROVAL_TOKEN`, `INTERNAL_API_TOKEN`).** Regenerate each (`python -c "import secrets; print(secrets.token_hex(48))"`); update `/opt/voxhorizon/.env` AND (for the two Ekko-facing tokens) `/opt/data/.env` on the Hermes container; restart worker + Ekko. Distinct tokens — rotate together but never share values.
 - [ ] **Resend (`RESEND_API_KEY`).** Rotate at resend.com; update `/opt/voxhorizon/.env`; `docker compose up -d web` (web container consumes it).
 - [ ] **GitHub PAT (Pedro's).** Rotate at github.com/settings/tokens; update `~/.config/github/token` (chmod 600) on the dev box.
 - [ ] **`NEXT_PUBLIC_*` build secrets.** Confirm none need rotating (URL is stable; anon key + VAPID public are "only on leak"). If rotation is required, update the GH Actions repo secret, trigger a `build-web.yml` rebuild, and roll the web container — **not** just `/opt/voxhorizon/.env`.

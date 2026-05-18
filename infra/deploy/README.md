@@ -53,27 +53,94 @@ Useful flags:
 
 The script gets you to a running Docker host with the repo, compose file, and an empty-shaped `.env` in place. The following still have to happen manually before the dashboard will serve traffic:
 
-- **Fill in `/opt/voxhorizon/.env`** with real values for every variable (see [`SECRETS.md`](../../SECRETS.md#vps-production-secrets)). Don't ship with anything that looks like `CHANGE_ME` or `your-...`.
+- **Confirm `hermes-agent-ekko` is running.** The Hostinger HVPS Hermes Agent product provisions this container under `/docker/hermes-agent-t4k4/`. Our worker `exec`s into it via the shared Docker socket. Verify with `docker ps --filter name=hermes-agent-ekko`. If it isn't running, follow Hostinger's docs to bring it up before continuing — the worker's health check will fail without it.
+- **Fill in `/opt/voxhorizon/.env`** with real values for every variable (see [`SECRETS.md`](../../SECRETS.md#vps-production-secrets) and [`SECRETS.md`](../../SECRETS.md#hermes-integration-secrets)). Don't ship with anything that looks like `CHANGE_ME` or `your-...`.
 - **Set `VOXHORIZON_DASHBOARD_HOST`** in `/opt/voxhorizon/.env` to the public hostname (e.g. `dashboard.voxhorizon.com`). Caddy uses it for TLS issuance.
 - **Cloudflare DNS.** Add an A record for `dashboard.voxhorizon.com` pointing at the VPS public IP. Proxy ON (orange cloud). SSL/TLS mode: **Full (Strict)**. See [`SECRETS.md`](../../SECRETS.md#cloudflare-dns-setup-operator).
 - **Log into GHCR** as the deploy user (one time): `sudo -u deploy -i` then `docker login ghcr.io -u <your-github-username>` and paste a classic PAT with `read:packages`.
 - **Append the GitHub Actions deploy public key** to `/home/deploy/.ssh/authorized_keys` (format in [`SECRETS.md`](../../SECRETS.md#github-actions-deploy-secrets)).
 - **Set the GitHub repo secrets** (`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, and the `NEXT_PUBLIC_*` build-time inputs). See [`SECRETS.md`](../../SECRETS.md#github-actions-deploy-secrets).
+- **Apply the Hermes-side overlay** (see [Hermes-side overlay](#hermes-side-overlay-one-shot) below).
 - **Trigger the first deploy** from a workstation: `gh workflow run deploy-stack.yml --ref main`.
 
 ---
 
 ## What gets deployed
 
-v1 production is a single-host Docker Compose stack on one Hostinger VPS. Two application containers, fronted by Caddy:
+v1 production is a single-host Docker Compose stack on one Hostinger VPS. Three application containers (ours), fronted by Caddy. Plus the operator-managed Hermes container that ships with Hostinger's HVPS Hermes Agent product.
 
-| Service  | Image                                       | Public?   | Port (host)      | Purpose                                                         |
-| -------- | ------------------------------------------- | --------- | ---------------- | --------------------------------------------------------------- |
-| `caddy`  | `caddy:2-alpine`                            | yes       | `80/443/443-udp` | TLS termination + reverse proxy to `web` only.                  |
-| `web`    | `ghcr.io/pveloso01/voxhorizon-web:<tag>`    | via Caddy | (none)           | Next.js 15 standalone server, port 3000 on the compose network. |
-| `worker` | `ghcr.io/pveloso01/voxhorizon-worker:<tag>` | no        | (none)           | FastAPI worker, port 8000 on the compose network only.          |
+| Service             | Image                                        | Managed by | Public?   | Port             | Purpose                                                                                            |
+| ------------------- | -------------------------------------------- | ---------- | --------- | ---------------- | -------------------------------------------------------------------------------------------------- |
+| `caddy`             | `caddy:2-alpine`                             | ours       | yes       | `80/443/443-udp` | TLS termination + reverse proxy to `web` only.                                                     |
+| `web`               | `ghcr.io/pveloso01/voxhorizon-web:<tag>`     | ours       | via Caddy | (none)           | Next.js 15 standalone server, port 3000 on the compose network.                                    |
+| `worker`            | `ghcr.io/pveloso01/voxhorizon-worker:<tag>`  | ours       | no        | (none)           | FastAPI Hermes bridge. Mounts `/var/run/docker.sock` rw + `group_add: docker`. Port 8000 internal. |
+| `hermes-agent-ekko` | `ghcr.io/hostinger/hvps-hermes-agent:latest` | operator   | no\*      | (varies)         | Hermes runtime + 42 marketing skills + 3 dashboard-aware skills + `voxhorizon-approvals` plugin.   |
 
-The worker is reachable only at `http://worker:8000` over the Docker network. `WORKER_URL` in `/opt/voxhorizon/.env` is set to that value; the host firewall blocks inbound `:8000`.
+\* `hermes-agent-ekko` exposes `ttyd :4860` on localhost only by default; it has no public hostname. Our worker addresses it via the shared Docker socket using the container name `HERMES_CONTAINER_NAME=hermes-agent-ekko`. The worker is reachable only at `http://worker:8000` over the Docker network; the host firewall blocks inbound `:8000`.
+
+---
+
+## Hermes-side overlay (one-shot)
+
+The dashboard depends on three things living inside `hermes-agent-ekko`: a config-patch that registers hooks + our plugin, three Ekko skills that talk to Supabase, and the approval-routing plugin. None of this is rolled by our CI — the Hermes container belongs to the operator. Apply once, after the compose stack is up:
+
+1. **Patch Ekko's `config.yaml`.** Apply `infra/hermes/config.yaml.patch` to `/docker/hermes-agent-t4k4/config.yaml` on the VPS. Adds the `post_tool_call` / `session_end` shell hooks (which `curl POST` to `http://worker:8000/work/hermes/webhook`) and registers `voxhorizon-approvals` in `plugins.enabled`.
+2. **Install the dashboard-aware skills.** Copy these three from this repo into the Hermes container's skills directory:
+
+   ```bash
+   sudo cp -r /opt/voxhorizon/repo/ekko-skills/dashboard-publish        /opt/data/skills/
+   sudo cp -r /opt/voxhorizon/repo/ekko-skills/dashboard-chat-publish   /opt/data/skills/
+   sudo cp -r /opt/voxhorizon/repo/ekko-skills/dashboard-task-result    /opt/data/skills/
+   ```
+
+3. **Install the approval plugin.** Copy the plugin into the Hermes plugin directory. Hermes reads the canonical plugin name from `plugin.yaml`, so the directory-on-disk may stay as the underscore form `voxhorizon_approvals/`:
+
+   ```bash
+   sudo cp -r /opt/voxhorizon/repo/ekko-plugins/voxhorizon_approvals  /opt/data/home/.hermes/plugins/
+   ```
+
+4. **Set Ekko-side env vars in `/opt/data/.env`** (chmod 600 on the Hermes container's filesystem). Required:
+
+   ```
+   SUPABASE_URL=https://jfzxlsaywztlytnobgej.supabase.co
+   SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+   DASHBOARD_WEBHOOK_URL=http://worker:8000/work/hermes/webhook
+   DASHBOARD_WEBHOOK_TOKEN=<same value as /opt/voxhorizon/.env on our side>
+   VOXHORIZON_APPROVAL_WORKER_URL=http://worker:8000/work/hermes/approval
+   VOXHORIZON_APPROVAL_TOKEN=<same value as /opt/voxhorizon/.env on our side>
+   ```
+
+   The two bearer tokens **must match** what's in `/opt/voxhorizon/.env` on our side. They're disjoint so an Ekko compromise that leaks the webhook token can't pivot to the approval surface.
+
+5. **Restart the Hermes container.**
+
+   ```bash
+   cd /docker/hermes-agent-t4k4 && docker compose restart hermes-agent-ekko
+   ```
+
+### Health checks (Hermes-aware)
+
+Run these from the VPS after the overlay is applied and our stack is up:
+
+```bash
+# Worker bridge is healthy + can reach hermes-agent-ekko:
+curl -fsS -H "Authorization: Bearer $WORKER_SHARED_SECRET" http://worker:8000/work/health
+# Expected: {"ok":true,"hermes_container":"running"}
+
+# Worker can long-poll the approval endpoint (smoke):
+curl -fsS -H "Authorization: Bearer $VOXHORIZON_APPROVAL_TOKEN" http://worker:8000/work/hermes/approval
+# Expected: 200 + an empty / pending shape (no body required)
+
+# Kanban list smoke (proves docker exec into Ekko works):
+docker compose exec worker python -c "
+import docker
+c = docker.from_env().containers.get('hermes-agent-ekko')
+ec, out = c.exec_run('hermes kanban list', demux=True)
+print(out[0].decode()[:500] if out and out[0] else '(no kanban tasks)')
+"
+```
+
+If any of these fail, see the diagnostic table in `infra/deploy/README.md` (this file). The most common cause is a token mismatch between `/opt/voxhorizon/.env` and `/opt/data/.env`.
 
 ---
 

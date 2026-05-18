@@ -19,14 +19,7 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "missing id" }, { status: 400 });
   }
   const supabase = createAdminClient();
-  // Until Wave 22 regenerates the Supabase types, cast the chain to `any`
-  // so unrecognised table/column names still compile.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabase as any)
-    .from("approvals")
-    .select("*")
-    .eq("id", id)
-    .maybeSingle();
+  const { data, error } = await supabase.from("approvals").select("*").eq("id", id).maybeSingle();
 
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
