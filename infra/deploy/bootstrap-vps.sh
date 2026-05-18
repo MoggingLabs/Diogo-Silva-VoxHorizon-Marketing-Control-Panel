@@ -342,36 +342,57 @@ BANNER
 }
 
 # ---------------------------------------------------------------------------
-# 8. Symlink docker-compose.yml into /opt/voxhorizon
+# 8. Symlink docker-compose.yml AND Caddyfile into /opt/voxhorizon
+#
+# docker-compose.yml resolves volume `./Caddyfile` relative to the compose
+# project dir, which is /opt/voxhorizon (where docker compose is run). On a
+# cold deploy without the symlink, Docker auto-creates an empty directory
+# at /opt/voxhorizon/Caddyfile and the caddy container then fails with
+# "not a directory" on the bind mount. Pre-empt that by linking BOTH the
+# compose file and the Caddyfile from the repo dir at bootstrap time.
 # ---------------------------------------------------------------------------
 step_compose_symlink() {
-  banner "8/13  Linking docker-compose.yml into ${VOXHORIZON_ROOT}"
+  banner "8/13  Linking docker-compose.yml + Caddyfile into ${VOXHORIZON_ROOT}"
 
-  local target="${REPO_DIR}/docker-compose.yml"
+  local pairs=(
+    "${REPO_DIR}/docker-compose.yml:${COMPOSE_LINK}"
+    "${REPO_DIR}/Caddyfile:${VOXHORIZON_ROOT}/Caddyfile"
+  )
 
-  if [[ ! -f "${target}" ]]; then
-    echo "error: ${target} not found — repo clone step must have failed" >&2
-    exit 1
-  fi
+  local pair target link current
+  for pair in "${pairs[@]}"; do
+    target="${pair%:*}"
+    link="${pair##*:}"
 
-  if [[ -L "${COMPOSE_LINK}" ]]; then
-    local current
-    current="$(readlink -f "${COMPOSE_LINK}")"
-    if [[ "${current}" == "$(readlink -f "${target}")" ]]; then
-      echo "ok: ${COMPOSE_LINK} already points at ${target}"
-      return
+    if [[ ! -f "${target}" ]]; then
+      echo "error: ${target} not found — repo clone step must have failed" >&2
+      exit 1
     fi
-    rm "${COMPOSE_LINK}"
-  elif [[ -e "${COMPOSE_LINK}" ]]; then
-    echo "error: ${COMPOSE_LINK} exists but is not a symlink — refusing to overwrite" >&2
-    echo "       remove it manually if you want the script to (re)create the link" >&2
-    exit 1
-  fi
 
-  ln -s "${target}" "${COMPOSE_LINK}"
-  # Symlink ownership is metadata-only; chown for tidiness so `ls -l` is clean.
-  chown -h "${DEPLOY_USER}:${DEPLOY_USER}" "${COMPOSE_LINK}"
-  echo "ok: ${COMPOSE_LINK} → ${target}"
+    if [[ -L "${link}" ]]; then
+      current="$(readlink -f "${link}")"
+      if [[ "${current}" == "$(readlink -f "${target}")" ]]; then
+        echo "ok: ${link} already points at ${target}"
+        continue
+      fi
+      rm "${link}"
+    elif [[ -d "${link}" ]]; then
+      # Docker may have pre-created an empty placeholder directory if a
+      # previous deploy ran before this script linked the file. Safe to
+      # drop because nothing else writes here.
+      echo "  ${link} exists as an empty placeholder dir — removing"
+      rmdir "${link}" 2>/dev/null || rm -rf "${link}"
+    elif [[ -e "${link}" ]]; then
+      echo "error: ${link} exists but is not a symlink — refusing to overwrite" >&2
+      echo "       remove it manually if you want the script to (re)create the link" >&2
+      exit 1
+    fi
+
+    ln -s "${target}" "${link}"
+    chown -h "${DEPLOY_USER}:${DEPLOY_USER}" "${link}"
+    echo "ok: ${link} → ${target}"
+  done
+
   echo "    run docker compose from ${VOXHORIZON_ROOT} — env_file: /opt/voxhorizon/.env resolves cleanly there."
 }
 
