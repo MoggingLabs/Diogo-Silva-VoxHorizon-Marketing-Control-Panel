@@ -111,17 +111,15 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp" # HTTP/3
-    environment:
-      # Set by the VPS's /opt/voxhorizon/.env at deploy time. The web
-      # process does not read this — Caddy substitutes it into the
-      # Caddyfile site address at startup.
-      VOXHORIZON_DASHBOARD_HOST: ${VOXHORIZON_DASHBOARD_HOST:-dashboard.voxhorizon.example.com}
-      # HTTP Basic Auth credentials at the edge. Hash lives in the VPS
-      # .env (CADDY_BASIC_AUTH_HASH=$2b$14$…), generated with bcrypt.
-      # An unset hash fails Caddy validation (fail-closed). User name
-      # defaults to 'diogo' if not overridden.
-      CADDY_BASIC_AUTH_USER: ${CADDY_BASIC_AUTH_USER:-diogo}
-      CADDY_BASIC_AUTH_HASH: ${CADDY_BASIC_AUTH_HASH}
+    # Read env from the VPS .env directly. Critical: the bcrypt hash for
+    # the basic-auth gate contains `$` characters; if we passed it
+    # through compose's ${VAR} interpolation, every `$<name>` segment in
+    # the hash (e.g. `$DUz...`) would be mistaken for a variable
+    # reference and substituted to empty, producing a truncated /
+    # invalid hash inside the container. env_file injects values
+    # verbatim, no interpolation pass.
+    env_file:
+      - /opt/voxhorizon/.env
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data # ACME certs
