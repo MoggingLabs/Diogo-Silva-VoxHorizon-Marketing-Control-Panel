@@ -82,12 +82,23 @@ RUN set -eux; \
     npm install -g hyperframes@latest; \
     npm cache clean --force
 
-# Bring the prebuilt virtualenv across. The Playwright base uses Python
-# 3.12; the venv stage 1 produces also targets 3.11 — we mount the venv
-# at /opt/venv and force its interpreter onto PATH via VIRTUAL_ENV +
-# /opt/venv/bin shadowing /usr/bin/python3. The interpreter shim inside
-# the venv is the canonical entrypoint.
+# Bring the prebuilt virtualenv across. The Playwright Noble base uses
+# Python 3.12; stage 1 builds against python:3.12-slim, also 3.12 —
+# different distros, identical minor. Both produce a venv whose
+# bin/python is a SYMLINK to the *builder's* interpreter path
+# (/usr/local/bin/python3.12 in slim). That path does not exist in the
+# Noble runtime (system python is at /usr/bin/python3.12), so every
+# venv script (uvicorn, pytest, etc.) whose shebang reads
+# `#!/opt/venv/bin/python` would fail with "no such file or directory"
+# at startup. Re-point the venv's interpreter symlinks at the Noble
+# python so shebangs resolve.
 COPY --from=deps-builder /opt/venv /opt/venv
+RUN set -eux; \
+    rm -f /opt/venv/bin/python /opt/venv/bin/python3 /opt/venv/bin/python3.12; \
+    ln -s /usr/bin/python3.12 /opt/venv/bin/python; \
+    ln -s /usr/bin/python3.12 /opt/venv/bin/python3; \
+    ln -s /usr/bin/python3.12 /opt/venv/bin/python3.12; \
+    /opt/venv/bin/python --version
 
 WORKDIR /app
 
