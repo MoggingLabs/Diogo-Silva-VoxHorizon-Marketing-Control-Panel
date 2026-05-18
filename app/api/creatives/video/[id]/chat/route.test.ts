@@ -1,10 +1,14 @@
 /**
  * Tests for `app/api/creatives/video/[id]/chat/route.ts`.
  *
- * Same shape as the image-side chat-route test.
+ * Same shape as the image-side chat-route test. The route imports
+ * `@/lib/hermes/client`, which has a `server-only` sentinel — we
+ * neutralise it before pulling the route in.
  */
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
 
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";

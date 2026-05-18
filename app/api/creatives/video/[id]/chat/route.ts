@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
 import { buildChatContext } from "@/lib/chat-context";
-import { cleanEnv } from "@/lib/env";
+import { chatStream } from "@/lib/hermes/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -13,15 +13,12 @@ type RouteContext = { params: Promise<{ id: string }> };
 /**
  * POST /api/creatives/video/:id/chat
  *
- * Server-Sent Events proxy for chat-with-Ekko on a video creative.
- * Mirrors the image-side route (`app/api/creatives/[id]/chat`) but
- * forwards to `/work/chat/video-creative` which exposes the
- * video-pipeline tool set (regenerate_voiceover, swap_broll,
- * rerender_video).
- *
- * Like the image-side route, this proxy hydrates the agent context
- * (brief + creative + iteration tail + chat tail + tool catalog) via
- * `buildChatContext` before forwarding to the worker.
+ * Video-creative twin of `/api/creatives/:id/chat`. Forwards the chat
+ * exchange to the worker's `/work/hermes/chat` bridge endpoint and
+ * streams the SSE response back. The system_prompt carries the video
+ * pipeline's full context (script, voiceover path, broll, composed +
+ * captioned outputs) plus the video-specific tool catalog
+ * (`rewrite_script`, `regenerate_voiceover`, `swap_broll`, ...).
  */
 export async function POST(req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -54,7 +51,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Hydrate the agent context payload before invoking the worker.
+  // Hydrate the agent context payload before invoking the bridge.
   let context;
   try {
     context = await buildChatContext(supabase, {
@@ -65,28 +62,21 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "context_build_failed", detail: String(e) }, { status: 500 });
   }
 
-  const workerBase = cleanEnv("WORKER_URL").replace(/\/$/, "");
-  const secret = cleanEnv("WORKER_SHARED_SECRET");
+  const systemPrompt = composeSystemPrompt(parsed.data.system_prompt, context, {
+    creative_type: "video",
+    creative_id: id,
+  });
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${workerBase}/work/chat/video-creative`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify({
-        creative_id: id,
+    upstream = await chatStream(
+      {
         messages: parsed.data.messages,
-        tools: parsed.data.tools,
-        system_prompt: parsed.data.system_prompt,
-        context,
-      }),
-      cache: "no-store",
-      signal: req.signal,
-    });
+        session_id: id,
+        system_prompt: systemPrompt,
+      },
+      req.signal,
+    );
   } catch (e) {
     return NextResponse.json({ error: "worker_unreachable", detail: String(e) }, { status: 502 });
   }
@@ -108,4 +98,21 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+/**
+ * Mirror of the image-side `composeSystemPrompt` — kept inline here so
+ * the file is self-contained and a future change to one prompt doesn't
+ * accidentally cross-pollute the other.
+ */
+function composeSystemPrompt(
+  override: string | undefined,
+  context: unknown,
+  hint: { creative_type: "image" | "video"; creative_id: string },
+): string {
+  const lead =
+    override?.trim() ||
+    `You are Ekko, the operator's creative-iteration agent for a ${hint.creative_type} creative (${hint.creative_id}). Use the provided context to ground your replies and propose tool calls when an action would materially help.`;
+  const envelope = JSON.stringify(context);
+  return `${lead}\n\n<creative_context>\n${envelope}\n</creative_context>`;
 }

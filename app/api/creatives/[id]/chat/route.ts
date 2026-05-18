@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
 import { buildChatContext } from "@/lib/chat-context";
-import { cleanEnv } from "@/lib/env";
+import { chatStream } from "@/lib/hermes/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -14,17 +14,20 @@ type RouteContext = { params: Promise<{ id: string }> };
  * POST /api/creatives/:id/chat
  *
  * Server-Sent Events proxy: forwards a chat exchange from the browser
- * to the local worker (over Tailscale) and streams the SSE response
- * back. The browser-side `<EkkoChat />` consumes this endpoint.
+ * to the worker's `/work/hermes/chat` bridge endpoint, which runs
+ * `hermes chat -q "..."` inside the sibling `hermes-agent-ekko`
+ * container and streams the response back. The browser-side
+ * `<EkkoChat />` consumes this endpoint via `lib/chat.ts`'s
+ * `readChatStream`.
  *
  * Why a proxy?
  *   - The worker's bearer secret never reaches the browser.
  *   - Authorisation (does this creative belong to a brief?) lives here
  *     rather than on the worker.
- *   - The Next.js side owns retry / heartbeat / error normalization.
- *   - The Next.js side hydrates the agent context (brief + creative +
- *     iteration tail + chat tail + tool catalog) via `buildChatContext`
- *     so the worker doesn't need its own service-role Supabase client.
+ *   - We hydrate the agent context (brief + creative + iteration tail +
+ *     chat tail + tool catalog) via `buildChatContext` and serialise it
+ *     into the `system_prompt` so the Hermes CLI sees the operator's
+ *     world without needing its own service-role Supabase client.
  *
  * Request body shape: see `lib/chat.ts` (`ChatRequest`).
  * Response shape: `text/event-stream` per `lib/chat.ts` doc.
@@ -76,30 +79,25 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "context_build_failed", detail: String(e) }, { status: 500 });
   }
 
-  const workerBase = cleanEnv("WORKER_URL").replace(/\/$/, "");
-  const secret = cleanEnv("WORKER_SHARED_SECRET");
+  // Compose the system_prompt from caller override + serialised context.
+  // The bridge collapses the chat history to "latest user message" so the
+  // worker only sees `-q "..."`; the context envelope rides on the
+  // system prompt where Hermes can read it.
+  const systemPrompt = composeSystemPrompt(parsed.data.system_prompt, context, {
+    creative_type: "image",
+    creative_id: id,
+  });
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${workerBase}/work/chat/creative`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify({
-        creative_id: id,
+    upstream = await chatStream(
+      {
         messages: parsed.data.messages,
-        tools: parsed.data.tools,
-        system_prompt: parsed.data.system_prompt,
-        context,
-      }),
-      // Disable Next.js fetch caching for streamed responses.
-      cache: "no-store",
-      // SSE needs an open connection — let it block indefinitely.
-      signal: req.signal,
-    });
+        session_id: id,
+        system_prompt: systemPrompt,
+      },
+      req.signal,
+    );
   } catch (e) {
     return NextResponse.json({ error: "worker_unreachable", detail: String(e) }, { status: 502 });
   }
@@ -123,4 +121,22 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+/**
+ * Combine the caller's optional `system_prompt` override with the
+ * hydrated `ChatContext` envelope. The result is a single string Hermes
+ * will see as its system prompt; we tag the JSON block so the agent can
+ * find + parse it reliably.
+ */
+function composeSystemPrompt(
+  override: string | undefined,
+  context: unknown,
+  hint: { creative_type: "image" | "video"; creative_id: string },
+): string {
+  const lead =
+    override?.trim() ||
+    `You are Ekko, the operator's creative-iteration agent for a ${hint.creative_type} creative (${hint.creative_id}). Use the provided context to ground your replies and propose tool calls when an action would materially help.`;
+  const envelope = JSON.stringify(context);
+  return `${lead}\n\n<creative_context>\n${envelope}\n</creative_context>`;
 }
