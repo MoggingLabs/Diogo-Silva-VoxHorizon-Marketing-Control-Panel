@@ -12,6 +12,7 @@ Migration sources:
 - `db/migrations/0005_chat_messages.sql` — added in #143 (Wave 5.5-1)
 - `db/migrations/0006_pipelines.sql` — added in #171 (PF-A-1)
 - `db/migrations/0007_pipeline_triggers.sql` — added in #196 / #197 (PF-E-4 / PF-E-5)
+- `db/migrations/0008_hermes_integration.sql` — added in #257 (HI-15)
 
 ---
 
@@ -326,6 +327,111 @@ Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197).
 - Idempotent: the UPDATE is gated on `status = 'generation'`, so a
   late retry or duplicate `task_done` after closure is a no-op.
 
+#### `pipeline_events.source` column
+
+Added in `db/migrations/0008_hermes_integration.sql` (#257). Identifies the
+emitter so the UI can distinguish worker-produced events from Hermes
+integration events.
+
+| Column   | Type                                                   | Notes                                                                                  |
+| -------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| `source` | `pipeline_event_source_enum` NOT NULL default `worker` | `worker` \| `hermes-hook` \| `hermes-task` \| `manual`. Discriminator for the emitter. |
+
+---
+
+## Hermes integration
+
+External Hermes orchestrator integration. Three tables added in
+`db/migrations/0008_hermes_integration.sql` (#257):
+
+- `hermes_tasks` mirrors the Hermes kanban board for dashboard rendering
+  without round-tripping the Hermes service on every poll.
+- `approvals` is the operator decision queue for the Hermes/Ekko
+  pre-tool-call hook (risky tool invocations land here before execution).
+- `approvals_policy_cache` caches "approve and remember" decisions inside
+  the active Ekko session so identical follow-up tool calls skip the
+  prompt.
+
+### `hermes_tasks`
+
+Local mirror of Hermes kanban tasks relevant to the Control Panel.
+
+| Column           | Type                                                 | Notes                                                                                                  |
+| ---------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `id`             | `uuid` PK                                            | `gen_random_uuid()` default.                                                                           |
+| `kanban_task_id` | `text` UNIQUE NOT NULL                               | Hermes-side primary key for the kanban task.                                                           |
+| `pipeline_id`    | `uuid` FK → `pipelines.id` ON DELETE SET NULL        | Owning pipeline; null when the task is not pipeline-scoped.                                            |
+| `status`         | `hermes_task_status_enum` NOT NULL default `pending` | `pending` \| `ready` \| `claimed` \| `running` \| `completed` \| `failed` \| `blocked` \| `cancelled`. |
+| `assignee`       | `text` NOT NULL                                      | Hermes worker / agent that owns the lane.                                                              |
+| `context`        | `jsonb` NOT NULL default `{}`                        | Task input context (free-form per assignee).                                                           |
+| `result`         | `jsonb`                                              | Task output payload once `status = 'completed'` (or partial on `failed`).                              |
+| `created_at`     | `timestamptz` NOT NULL default `now()`               |                                                                                                        |
+| `updated_at`     | `timestamptz` NOT NULL default `now()`               |                                                                                                        |
+
+Indexes:
+
+- `hermes_tasks (status) WHERE status NOT IN ('completed','cancelled')` —
+  partial index for the active-tasks board (most dashboard queries).
+- `hermes_tasks (pipeline_id)` — for the pipeline→tasks reverse lookup.
+
+### `approvals`
+
+Operator decision queue for pre-tool-call approvals from the Hermes/Ekko
+hook.
+
+| Column               | Type                                              | Notes                                                                                                                                   |
+| -------------------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`                 | `uuid` PK                                         | **NOT defaulted** — the Hermes plugin generates it deterministically from `ekko_tool_call_id` so retries idempotently hit the same row. |
+| `ekko_session_id`    | `text` NOT NULL                                   | Active Ekko session.                                                                                                                    |
+| `ekko_tool_call_id`  | `text` NOT NULL                                   | Hermes/Ekko-side tool call id.                                                                                                          |
+| `tool_name`          | `text` NOT NULL                                   | Tool the agent wants to invoke.                                                                                                         |
+| `tool_args`          | `jsonb` NOT NULL                                  | Args the agent will pass.                                                                                                               |
+| `risk_class`         | `text`                                            | Optional risk tier label (`low` / `medium` / `high` etc.).                                                                              |
+| `context`            | `jsonb`                                           | Additional context surfaced to the operator (e.g. why the agent is asking).                                                             |
+| `requested_at`       | `timestamptz` NOT NULL default `now()`            |                                                                                                                                         |
+| `expires_at`         | `timestamptz` NOT NULL                            | Hard deadline — the hook treats `now() > expires_at` as auto-rejected.                                                                  |
+| `status`             | `approval_status_enum` NOT NULL default `pending` | `pending` \| `decided` \| `expired` \| `cancelled`.                                                                                     |
+| `decision`           | `approval_decision_enum`                          | `approved` \| `rejected` \| `approved_with_caveat`. Null while pending.                                                                 |
+| `decided_by`         | `text`                                            | Operator identifier.                                                                                                                    |
+| `decided_at`         | `timestamptz`                                     |                                                                                                                                         |
+| `decision_notes`     | `text`                                            | Optional operator-supplied note.                                                                                                        |
+| `cache_for_session`  | `boolean` default `false`                         | When true, the worker writes an `approvals_policy_cache` row.                                                                           |
+| `cache_for_minutes`  | `int`                                             | Cache TTL when `cache_for_session = true`.                                                                                              |
+| `worker_received_at` | `timestamptz`                                     | Stamped by the worker when it picks up the decision over Realtime.                                                                      |
+
+Indexes:
+
+- `approvals (requested_at DESC) WHERE status = 'pending'` — partial
+  index for the operator queue (newest pending first).
+- `approvals (ekko_session_id, requested_at DESC)` — per-session
+  timeline replay.
+
+### `approvals_policy_cache`
+
+Per-session "approve and remember" cache. When the operator decides on
+an approval with `cache_for_session = true`, the worker writes a row
+here so identical follow-up tool calls (same session, same tool, same
+args hash) skip the prompt.
+
+| Column            | Type                                   | Notes                                                                            |
+| ----------------- | -------------------------------------- | -------------------------------------------------------------------------------- |
+| `id`              | `uuid` PK                              | `gen_random_uuid()` default.                                                     |
+| `ekko_session_id` | `text` NOT NULL                        | Session this cache entry is scoped to.                                           |
+| `tool_name`       | `text` NOT NULL                        |                                                                                  |
+| `tool_args_hash`  | `text` NOT NULL                        | SHA-256 hex digest over the canonicalised args JSON (computed in the app layer). |
+| `decision`        | `approval_decision_enum` NOT NULL      | Cached decision.                                                                 |
+| `cached_at`       | `timestamptz` NOT NULL default `now()` |                                                                                  |
+| `expires_at`      | `timestamptz` NOT NULL                 | App-side TTL — the Hermes plugin filters out expired rows at query time.         |
+
+Indexes:
+
+- `approvals_policy_cache (ekko_session_id, tool_name, tool_args_hash)` —
+  primary lookup probe. (No partial index on `expires_at > now()` because
+  Postgres rejects mutable functions in index predicates; the app layer
+  filters on `expires_at` at query time and a periodic delete sweep
+  trims expired rows.)
+- `approvals_policy_cache (expires_at)` — supports the sweep.
+
 ---
 
 ## Audit
@@ -450,23 +556,27 @@ Both functions are non-strict and safely callable as defaults:
 
 ## Enums reference
 
-| Enum                    | Values                                                                                                                   |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `service_type`          | `roofing`, `remodeling`                                                                                                  |
-| `brief_status`          | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
-| `creative_type`         | `image`, `video`                                                                                                         |
-| `image_creative_status` | `draft`, `approved`, `rejected`, `live`, `killed`                                                                        |
-| `ratio`                 | `1x1`, `9x16`, `16x9`                                                                                                    |
-| `iteration_author`      | `user`, `ekko`                                                                                                           |
-| `image_iteration_kind`  | `generate`, `regenerate`, `annotate`, `comment`, `user_edit`                                                             |
-| `ad_verdict`            | `kill`, `watch`, `keep`                                                                                                  |
-| `sync_status`           | `running`, `ok`, `error`                                                                                                 |
-| `video_brief_status`    | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
-| `video_creative_status` | `draft`, `script_ready`, `voiceover_ready`, `broll_ready`, `composed`, `captioned`, `approved`, `rejected`               |
-| `video_iteration_kind`  | `generate_script`, `regenerate_voiceover`, `search_broll`, `swap_broll`, `rerender`, `recaption`, `comment`, `user_edit` |
-| `broll_store_backend`   | `local`, `supabase`                                                                                                      |
-| `pipeline_status_enum`  | `configuration`, `ideation`, `review`, `generation`, `done`, `cancelled`                                                 |
-| `pipeline_format_enum`  | `image`, `video`, `both`                                                                                                 |
+| Enum                         | Values                                                                                                                   |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `service_type`               | `roofing`, `remodeling`                                                                                                  |
+| `brief_status`               | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
+| `creative_type`              | `image`, `video`                                                                                                         |
+| `image_creative_status`      | `draft`, `approved`, `rejected`, `live`, `killed`                                                                        |
+| `ratio`                      | `1x1`, `9x16`, `16x9`                                                                                                    |
+| `iteration_author`           | `user`, `ekko`                                                                                                           |
+| `image_iteration_kind`       | `generate`, `regenerate`, `annotate`, `comment`, `user_edit`                                                             |
+| `ad_verdict`                 | `kill`, `watch`, `keep`                                                                                                  |
+| `sync_status`                | `running`, `ok`, `error`                                                                                                 |
+| `video_brief_status`         | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
+| `video_creative_status`      | `draft`, `script_ready`, `voiceover_ready`, `broll_ready`, `composed`, `captioned`, `approved`, `rejected`               |
+| `video_iteration_kind`       | `generate_script`, `regenerate_voiceover`, `search_broll`, `swap_broll`, `rerender`, `recaption`, `comment`, `user_edit` |
+| `broll_store_backend`        | `local`, `supabase`                                                                                                      |
+| `pipeline_status_enum`       | `configuration`, `ideation`, `review`, `generation`, `done`, `cancelled`                                                 |
+| `pipeline_format_enum`       | `image`, `video`, `both`                                                                                                 |
+| `pipeline_event_source_enum` | `worker`, `hermes-hook`, `hermes-task`, `manual`                                                                         |
+| `hermes_task_status_enum`    | `pending`, `ready`, `claimed`, `running`, `completed`, `failed`, `blocked`, `cancelled`                                  |
+| `approval_decision_enum`     | `approved`, `rejected`, `approved_with_caveat`                                                                           |
+| `approval_status_enum`       | `pending`, `decided`, `expired`, `cancelled`                                                                             |
 
 ---
 
@@ -479,6 +589,10 @@ Added by `0002_realtime_publication.sql` (#17):
 - `campaign_perf_image`, `campaign_perf_video`
 - `overrides`
 - `pipelines`, `pipeline_events`
+
+Added by `0008_hermes_integration.sql` (#257):
+
+- `hermes_tasks`, `approvals`, `approvals_policy_cache`
 
 Intentionally excluded: `events`, `sync_log` (high-volume / not useful in
 the live operator UI).
