@@ -17,6 +17,9 @@ from .routes import (
     chat_stream,
     creative,
     health,
+    hermes_chat,
+    hermes_kanban,
+    hermes_webhook,
     launch,
     pipeline,
     ping,
@@ -113,6 +116,17 @@ def create_app() -> FastAPI:
     # interview for the Configuration stage (PF-B). Future waves add
     # /work/pipeline/ideation and /work/pipeline/generation.
     app.include_router(pipeline.router, tags=["pipeline"])
+
+    # === wave 18 hermes-bridge routes ===
+    # Three thin surfaces that proxy to the co-located Hermes/Ekko
+    # container via docker.sock exec. /work/hermes/chat streams stdout
+    # from `hermes chat -q` (HI-2); /work/hermes/kanban wraps the kanban
+    # CLI for long-running orchestration (HI-3); /work/hermes/webhook
+    # receives shell-hook callbacks from Hermes and fans out to
+    # Supabase + VAPID (HI-4).
+    app.include_router(hermes_chat.router, tags=["hermes-chat"])
+    app.include_router(hermes_kanban.router, tags=["hermes-kanban"])
+    app.include_router(hermes_webhook.router, tags=["hermes-webhook"])
 
     # Eagerly construct the per-brief queue singleton so the first
     # `/work/creative/*` request doesn't race on lazy init.
