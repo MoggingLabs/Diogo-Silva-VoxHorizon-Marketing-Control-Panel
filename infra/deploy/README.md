@@ -6,6 +6,63 @@ Companion docs: [`ARCHITECTURE.md`](../../ARCHITECTURE.md#deployment-pipeline), 
 
 ---
 
+## First-time VPS bootstrap
+
+The first time Diogo provisions a new Hostinger VPS, [`bootstrap-vps.sh`](./bootstrap-vps.sh) takes a freshly imaged Ubuntu 24.04 LTS box and brings it to the point where `docker compose up -d` can run. The script is idempotent — re-running on a partially-provisioned box only does the steps that haven't been done yet.
+
+### How to run it
+
+Preferred (download, inspect, then run):
+
+```bash
+ssh root@<vps-host>
+curl -fsSL https://raw.githubusercontent.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh \
+  -o /root/bootstrap-vps.sh
+less /root/bootstrap-vps.sh                # read it before executing
+bash /root/bootstrap-vps.sh
+```
+
+One-liner (only if you trust the source and have already inspected the script once):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh | sudo bash
+```
+
+Useful flags:
+
+- `--dry-run` — print every command via `set -x` and skip `docker compose pull` / `up -d`. Safe to run for review.
+- `--skip-firewall` — don't touch UFW (e.g. inside a container or a VPS where the firewall is already managed elsewhere).
+- `--repo-url <url>` — override the repo clone URL (e.g. when bootstrapping from a fork).
+
+### What the script does
+
+1. **Sanity check.** Confirms the OS is Ubuntu 24.04 LTS; refuses to run on anything else.
+2. **Base apt packages.** Installs `ca-certificates`, `curl`, `gnupg`, `ufw` if missing.
+3. **Docker.** Installs `docker-ce`, `docker-ce-cli`, `containerd.io`, `docker-buildx-plugin`, `docker-compose-plugin` from Docker's official apt repo (not the older `docker.io` package). Enables and starts the `docker` service.
+4. **UFW firewall.** Default deny incoming; opens TCP 22 (SSH), 80, 443, and UDP 443 (HTTP/3). `ufw --force enable`.
+5. **Deploy user.** Calls [`setup-deploy-user.sh`](./setup-deploy-user.sh) (sibling script). Creates the `deploy` system user, adds it to the `docker` group, sets up `~deploy/.ssh`, creates `/opt/voxhorizon/` owned by `deploy:deploy` mode 750.
+6. **Repo clone.** Clones the repo into `/opt/voxhorizon/repo` as the deploy user.
+7. **`.env` scaffold.** Creates `/opt/voxhorizon/.env` by concatenating `worker/.env.example` and `web/.env.example` from the repo, with a leading banner noting every value must be filled in. `chmod 600`, `chown deploy:deploy`. **Real values are not filled in — that's a manual step.**
+8. **Compose symlink.** Symlinks `/opt/voxhorizon/docker-compose.yml` → `/opt/voxhorizon/repo/docker-compose.yml` so `docker compose` can be run from `/opt/voxhorizon` directly. The `env_file: /opt/voxhorizon/.env` line in the compose file is an absolute path, so either CWD works — the symlink just makes the convention match the deploy workflow's `cd /opt/voxhorizon`.
+9. **GHCR login.** Prints the manual instructions. The script does NOT bake a token; the operator runs `docker login ghcr.io -u <gh-user>` as the deploy user afterward.
+10. **First pull.** `docker compose pull` (skipped in `--dry-run` or if `.env` is empty).
+11. **First up.** `docker compose up -d` (skipped in `--dry-run` or if `.env` is empty).
+12. **Summary.** Prints what's done and what's left.
+
+### Manual steps still required after the script
+
+The script gets you to a running Docker host with the repo, compose file, and an empty-shaped `.env` in place. The following still have to happen manually before the dashboard will serve traffic:
+
+- **Fill in `/opt/voxhorizon/.env`** with real values for every variable (see [`SECRETS.md`](../../SECRETS.md#vps-production-secrets)). Don't ship with anything that looks like `CHANGE_ME` or `your-...`.
+- **Set `VOXHORIZON_DASHBOARD_HOST`** in `/opt/voxhorizon/.env` to the public hostname (e.g. `dashboard.voxhorizon.com`). Caddy uses it for TLS issuance.
+- **Cloudflare DNS.** Add an A record for `dashboard.voxhorizon.com` pointing at the VPS public IP. Proxy ON (orange cloud). SSL/TLS mode: **Full (Strict)**. See [`SECRETS.md`](../../SECRETS.md#cloudflare-dns-setup-operator).
+- **Log into GHCR** as the deploy user (one time): `sudo -u deploy -i` then `docker login ghcr.io -u <your-github-username>` and paste a classic PAT with `read:packages`.
+- **Append the GitHub Actions deploy public key** to `/home/deploy/.ssh/authorized_keys` (format in [`SECRETS.md`](../../SECRETS.md#github-actions-deploy-secrets)).
+- **Set the GitHub repo secrets** (`VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, and the `NEXT_PUBLIC_*` build-time inputs). See [`SECRETS.md`](../../SECRETS.md#github-actions-deploy-secrets).
+- **Trigger the first deploy** from a workstation: `gh workflow run deploy-stack.yml --ref main`.
+
+---
+
 ## What gets deployed
 
 v1 production is a single-host Docker Compose stack on one Hostinger VPS. Two application containers, fronted by Caddy:
