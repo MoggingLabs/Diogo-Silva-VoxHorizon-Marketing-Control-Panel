@@ -29,10 +29,10 @@ type RouteContext = { params: Promise<{ id: string }> };
  *   - Stamps `approval = { decision, notes, decided_at }`.
  *   - Stamps `advanced_at.generation = now()`.
  *   - Emits `pipeline_events(kind='stage_advanced', stage='generation', payload={decision})`.
- *   - Best-effort POST to the worker's `/work/pipeline/generation` route to
- *     kick off the generation stage. The worker route lands in Agent A's PR;
- *     until then a 404 is expected and swallowed, mirroring the
- *     configuration→ideation handler.
+ *   - Best-effort POST to the worker's `/work/hermes/kanban` bridge to
+ *     create a generation task assigned to `ekko`. Failures (incl. 404
+ *     when the worker isn't reachable) are swallowed so a transient
+ *     outage doesn't block the commit.
  *
  * Side-effects on reject:
  *   - Stamps `approval = { decision, notes, decided_at }`.
@@ -177,9 +177,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
   }
 
-  // Fire-and-forget worker kick. The route ships in Wave 11 (Agent A's PR);
-  // until then a 404 is fine — we log and keep the advance committed.
-  void fireWorkerGeneration(pipeline.id).catch((e) => {
+  // Fire-and-forget worker kick to the hermes-kanban bridge: create a
+  // generation task assigned to `ekko`. Failures are swallowed so a
+  // worker outage doesn't block the commit.
+  void fireWorkerGeneration(pipeline.id, decision).catch((e) => {
     console.warn(
       `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,
     );
@@ -189,26 +190,38 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 }
 
 /**
- * Fire-and-forget POST to the worker's generation endpoint. Mirrors the
- * advance route's `fireWorkerIdeation` so the call shape is consistent: if
- * the worker isn't configured (WORKER_URL / WORKER_SHARED_SECRET unset) we
- * skip, and a 404 is treated as "not yet shipped" rather than a real error.
+ * Fire-and-forget POST to the worker's hermes-kanban bridge to create
+ * a generation task assigned to `ekko`. Mirrors the advance route's
+ * `fireWorkerIdeation` so the call shape is consistent: if the worker
+ * isn't configured (WORKER_URL / WORKER_SHARED_SECRET unset) we skip,
+ * and a 404 is swallowed silently.
  */
-async function fireWorkerGeneration(pipelineId: string): Promise<void> {
+async function fireWorkerGeneration(
+  pipelineId: string,
+  decision: "approved" | "approved_with_changes",
+): Promise<void> {
   const base = process.env.WORKER_URL?.replace(/\/$/, "");
   const secret = process.env.WORKER_SHARED_SECRET;
   if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/generation`, {
+  const res = await fetch(`${base}/work/hermes/kanban`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ pipeline_id: pipelineId }),
+    body: JSON.stringify({
+      title: `Generation for pipeline ${pipelineId}`,
+      assignee: "ekko",
+      context: {
+        kind: "generation",
+        pipeline_id: pipelineId,
+        decision,
+      },
+    }),
     cache: "no-store",
   });
   if (!res.ok && res.status !== 404) {
     const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/generation -> ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`worker /work/hermes/kanban -> ${res.status}: ${text.slice(0, 200)}`);
   }
 }

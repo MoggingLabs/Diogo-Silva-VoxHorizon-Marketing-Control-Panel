@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { HermesError, kanbanCancel } from "@/lib/hermes/client";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
@@ -8,6 +9,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+type SupabaseClient = ReturnType<typeof createAdminClient>;
+
+/**
+ * Pending / running statuses on the `hermes_tasks` mirror. Tasks in any
+ * of these states still have a live presence on the kanban side so the
+ * cancel route fans out a `POST /work/hermes/kanban/{id}/cancel` to
+ * each. Terminal rows (`completed`, `cancelled`, `failed`) are ignored
+ * — the bridge would reject the call with a 409.
+ */
+const ACTIVE_TASK_STATUSES = ["pending", "in_progress", "blocked"] as const;
 
 /**
  * POST /api/pipelines/:id/cancel
@@ -26,12 +38,11 @@ type RouteContext = { params: Promise<{ id: string }> };
  * (`.in('status', [...])`) so a concurrent advance can't race a cancel into a
  * terminal stage.
  *
- * Worker abort: when a pipeline is mid-generation the running worker still
- * needs to notice the cancel and stop polling. For v1 we rely on a simple
- * "DB status flip + worker checks before each substage" pattern — the worker
- * reads `pipelines.status` between substages and exits cleanly when it sees
- * `cancelled`. A dedicated abort-store (mirroring
- * `worker/src/services/chat_abort.py`) is the v2 path; we punt that here.
+ * Worker abort: after the DB flip we fan out a `cancel` to every
+ * pending/running task on the hermes-kanban bridge. Per-task failures
+ * are logged but don't fail the route — the row + event are the
+ * primary artifacts and the operator can retry individual cancels from
+ * the kanban UI if a transient blip eats one.
  */
 export async function POST(_req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -100,5 +111,69 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.cancel] event insert failed: ${evErr.message}`);
   }
 
+  // Fan out kanban cancels for every still-active task on this
+  // pipeline. We don't block the response on this — a single sluggish
+  // worker shouldn't drag the cancel response time up — but we do
+  // await the lookup so the result is deterministic for tests.
+  await cancelActiveKanbanTasks(supabase, pipeline.id);
+
   return NextResponse.json({ pipeline: updated });
+}
+
+/**
+ * Look up every pending/running `hermes_tasks` row for this pipeline
+ * and call `POST /work/hermes/kanban/{task_id}/cancel` for each. The
+ * table isn't in the auto-generated types yet (the migration ships
+ * with HI-15), so we cast through `never` for the query — the schema
+ * exists at runtime and the column shape (`kanban_task_id text`,
+ * `status text`) is fixed by `db/migrations/0008_hermes_integration.sql`.
+ *
+ * Failures are logged and swallowed so a partial outage doesn't fail
+ * the surrounding cancel.
+ */
+async function cancelActiveKanbanTasks(
+  supabase: SupabaseClient,
+  pipelineId: string,
+): Promise<void> {
+  let tasks: Array<{ kanban_task_id: string; status: string }> = [];
+  try {
+    const { data, error } = await supabase
+      // The hermes_tasks table is created by the HI-15 migration; the
+      // typed schema hasn't been regenerated yet, so we deliberately
+      // bypass the generic. Casting through `never` matches the same
+      // escape hatch the advance route uses for the
+      // `gen_video_brief_id_human` RPC.
+      .from("hermes_tasks" as never)
+      .select("kanban_task_id, status")
+      .eq("pipeline_id" as never, pipelineId)
+      .in("status" as never, ACTIVE_TASK_STATUSES as unknown as string[]);
+    if (error) {
+      console.warn(`[pipelines.cancel] hermes_tasks lookup failed: ${error.message}`);
+      return;
+    }
+    tasks = (data ?? []) as unknown as Array<{ kanban_task_id: string; status: string }>;
+  } catch (e) {
+    console.warn(`[pipelines.cancel] hermes_tasks lookup threw: ${String(e)}`);
+    return;
+  }
+
+  if (tasks.length === 0) return;
+
+  await Promise.all(
+    tasks.map(async (t) => {
+      try {
+        await kanbanCancel(t.kanban_task_id);
+      } catch (err) {
+        if (err instanceof HermesError) {
+          console.warn(
+            `[pipelines.cancel] kanban cancel ${t.kanban_task_id} -> ${err.status ?? "no-status"}: ${err.message}`,
+          );
+        } else {
+          console.warn(
+            `[pipelines.cancel] kanban cancel ${t.kanban_task_id} threw: ${String(err)}`,
+          );
+        }
+      }
+    }),
+  );
 }

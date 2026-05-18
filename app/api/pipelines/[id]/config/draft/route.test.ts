@@ -1,8 +1,13 @@
 /**
  * Tests for `app/api/pipelines/[id]/config/draft/route.ts` (SSE proxy).
+ *
+ * The route forwards to `chatStream` from `@/lib/hermes/client`, which
+ * pulls `server-only`. Neutralise it before importing the route.
  */
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
 
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
