@@ -11,20 +11,15 @@ authors = [
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
-    "python-dotenv>=1.0",
     "httpx>=0.27",
     "pydantic>=2.7",
     "pydantic-settings>=2.5",
     "supabase>=2.8",
     "structlog>=24.4",
-    "python-multipart>=0.0.12",
-    "jinja2>=3.1",
-    "pillow>=10.4",
+    # VAPID Web Push for the Hermes-webhook → operator browser fan-out.
+    # Lives under :mod:`services.push_delivery`; consumed by
+    # :mod:`services.hermes_webhook` after Wave 18.
     "pywebpush>=2.3.0",
-    # Anthropic SDK is the streaming path for chat-with-Ekko (M2-9 / V2-13).
-    # The CLI subprocess path remains an option but the SDK is more reliable
-    # for SSE proxying. Reads ANTHROPIC_API_KEY from env at call time.
-    "anthropic>=0.40",
     # Docker SDK powers the Hermes Ekko bridge (HI-1): the worker runs
     # `hermes chat -q ...` inside the colocated `hermes-agent-ekko`
     # container via the Docker socket, streaming stdout back as SSE.
