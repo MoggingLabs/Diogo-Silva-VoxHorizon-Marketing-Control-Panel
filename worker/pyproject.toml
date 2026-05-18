@@ -25,6 +25,12 @@ dependencies = [
     # The CLI subprocess path remains an option but the SDK is more reliable
     # for SSE proxying. Reads ANTHROPIC_API_KEY from env at call time.
     "anthropic>=0.40",
+    # Docker SDK powers the Hermes Ekko bridge (HI-1): the worker runs
+    # `hermes chat -q ...` inside the colocated `hermes-agent-ekko`
+    # container via the Docker socket, streaming stdout back as SSE.
+    # Group/socket access is granted by `group_add: ["${DOCKER_GID}"]`
+    # in docker-compose.yml; no Dockerfile changes are required.
+    "docker>=7.0",
 ]
 
 [project.optional-dependencies]
