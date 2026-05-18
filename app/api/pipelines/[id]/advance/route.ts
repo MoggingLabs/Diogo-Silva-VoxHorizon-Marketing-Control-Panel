@@ -314,10 +314,14 @@ async function advanceFromConfiguration(
     console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
   }
 
-  // 7. Best-effort kick to the worker's ideation route. The route ships in
-  //    Wave 11; until then this throws a 404, which is fine — we log and
-  //    keep the advance committed.
-  void fireWorkerIdeation(pipeline.id).catch((e) => {
+  // 7. Best-effort kick to the worker's hermes-kanban bridge: create an
+  //    ideation task assigned to `ekko`. Failures are swallowed so a
+  //    worker outage doesn't block the advance — the row + event are
+  //    the primary artifacts.
+  void fireWorkerIdeation(pipeline.id, {
+    image_brief_id: imageBriefId,
+    video_brief_id: videoBriefId,
+  }).catch((e) => {
     console.warn(
       `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
     );
@@ -433,29 +437,43 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
 }
 
 /**
- * Fire-and-forget POST to the worker's ideation endpoint. Wrapped in its own
- * function so the call site can `void fireWorkerIdeation(...).catch(...)`
- * cleanly without leaking the promise chain into the response path.
+ * Fire-and-forget POST to the worker's hermes-kanban bridge to create
+ * an ideation task assigned to `ekko`. Wrapped in its own function so
+ * the call site can `void fireWorkerIdeation(...).catch(...)` cleanly
+ * without leaking the promise chain into the response path.
  *
- * If WORKER_URL is unset we just skip — the API route still succeeds. This
- * also makes the unit tests easier: they don't need to stub the worker.
+ * Skip when WORKER_URL or WORKER_SHARED_SECRET are unset — the API
+ * route still succeeds and unit tests don't need to stub the bridge.
+ * 404 from the bridge is treated as "worker not configured" and
+ * swallowed silently; anything else is logged.
  */
-async function fireWorkerIdeation(pipelineId: string): Promise<void> {
+async function fireWorkerIdeation(
+  pipelineId: string,
+  briefs: { image_brief_id: string | null; video_brief_id: string | null },
+): Promise<void> {
   const base = process.env.WORKER_URL?.replace(/\/$/, "");
   const secret = process.env.WORKER_SHARED_SECRET;
   if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/ideation`, {
+  const res = await fetch(`${base}/work/hermes/kanban`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ pipeline_id: pipelineId }),
+    body: JSON.stringify({
+      title: `Ideation for pipeline ${pipelineId}`,
+      assignee: "ekko",
+      context: {
+        kind: "ideation",
+        pipeline_id: pipelineId,
+        image_brief_id: briefs.image_brief_id,
+        video_brief_id: briefs.video_brief_id,
+      },
+    }),
     cache: "no-store",
   });
   if (!res.ok && res.status !== 404) {
-    // 404 is expected pre-Wave-11. Anything else worth logging.
     const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/ideation -> ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`worker /work/hermes/kanban -> ${res.status}: ${text.slice(0, 200)}`);
   }
 }

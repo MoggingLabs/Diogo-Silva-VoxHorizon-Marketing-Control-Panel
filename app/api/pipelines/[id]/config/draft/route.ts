@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
-import { cleanEnv } from "@/lib/env";
+import { chatStream } from "@/lib/hermes/client";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -12,10 +12,12 @@ type RouteContext = { params: Promise<{ id: string }> };
 /**
  * POST /api/pipelines/:id/config/draft
  *
- * Server-Sent Events proxy: forwards a brief-strategist interview from the
- * browser to the local worker's `/work/pipeline/config-draft` endpoint and
+ * Server-Sent Events proxy: forwards a brief-strategist interview from
+ * the browser to the worker's `/work/hermes/chat` bridge endpoint and
  * streams the SSE response back. The browser-side `<EkkoDraftModal />`
- * consumes this endpoint.
+ * consumes this endpoint via `lib/chat.ts`'s `readChatStream`, and
+ * listens for `tool_call_result` events with `tool === 'propose_config'`
+ * to hydrate the configuration form.
  *
  * Why a proxy?
  *   - The worker's bearer secret never reaches the browser.
@@ -23,11 +25,11 @@ type RouteContext = { params: Promise<{ id: string }> };
  *     `configuration`?) lives here rather than on the worker.
  *   - The Next.js side normalizes error shapes for the modal.
  *
- * Request body shape: `lib/chat.ts` (`ChatRequest`) — `messages` are the
- * accumulated transcript.
- * Response shape: `text/event-stream`; events follow the standard StreamChunk
- * union. The modal listens for `tool_call_result` with `tool === 'propose_config'`
- * to hydrate the form.
+ * The bridge picks the latest user message as `-q "..."` and runs it
+ * through the agent's `propose_config` tool, so the system_prompt is
+ * how we communicate "you are drafting a marketing brief for pipeline
+ * <id> in format <format_choice>; emit a propose_config tool call when
+ * you have enough information".
  *
  * Returns:
  *   200 `text/event-stream` on success.
@@ -55,10 +57,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // Confirm the pipeline exists + is still in configuration. The worker
-  // doesn't have a service-role Supabase client of its own for this stage, so
-  // we do the cheap status check here and just send the pipeline_id +
-  // transcript downstream.
+  // Confirm the pipeline exists + is still in configuration.
   const supabase = createAdminClient();
   const { data: pipeline, error: fetchErr } = await supabase
     .from("pipelines")
@@ -78,31 +77,27 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  const workerBase = cleanEnv("WORKER_URL").replace(/\/$/, "");
-  const secret = cleanEnv("WORKER_SHARED_SECRET");
+  // Build the config-drafter system prompt. Callers may pass an
+  // override — for tests + the rare ad-hoc "act as X" experiment — but
+  // by default we describe the agent's job and the format the
+  // pipeline expects (image / video / both).
+  const systemPrompt = composeDraftSystemPrompt(parsed.data.system_prompt, {
+    pipeline_id: pipeline.id,
+    format_choice: pipeline.format_choice,
+  });
 
   let upstream: Response;
   try {
-    upstream = await fetch(`${workerBase}/work/pipeline/config-draft`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${secret}`,
-        "Content-Type": "application/json",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify({
-        pipeline_id: id,
-        format_choice: pipeline.format_choice,
+    upstream = await chatStream(
+      {
         messages: parsed.data.messages,
-        tools: parsed.data.tools,
-        system_prompt: parsed.data.system_prompt,
-      }),
-      cache: "no-store",
-      // The browser may abort mid-stream (Cancel button); propagate so the
-      // worker can shut down its Anthropic call. `req.signal` is the
-      // upstream-fetch's abort signal.
-      signal: req.signal,
-    });
+        // Use the pipeline id as the bridge session id so the abort
+        // surface (when we wire one for draft) can target this exec.
+        session_id: `pipeline-config-${pipeline.id}`,
+        system_prompt: systemPrompt,
+      },
+      req.signal,
+    );
   } catch (e) {
     return NextResponse.json({ error: "worker_unreachable", detail: String(e) }, { status: 502 });
   }
@@ -110,16 +105,11 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!upstream.ok || !upstream.body) {
     const text = await upstream.text().catch(() => "");
     return NextResponse.json(
-      {
-        error: "worker_error",
-        status: upstream.status,
-        body: text.slice(0, 500),
-      },
+      { error: "worker_error", status: upstream.status, body: text.slice(0, 500) },
       { status: 502 },
     );
   }
 
-  // Stream the upstream SSE response straight through.
   return new Response(upstream.body, {
     status: 200,
     headers: {
@@ -129,4 +119,25 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       "X-Accel-Buffering": "no",
     },
   });
+}
+
+/**
+ * Compose the system prompt for the brief-drafting agent. The override
+ * wins when present so we can swap personas in tests without touching
+ * the route. The default copy mirrors how the legacy worker route
+ * described the task — keep this string aligned with whatever the
+ * agent expects to see at the top of its context window.
+ */
+function composeDraftSystemPrompt(
+  override: string | undefined,
+  hint: { pipeline_id: string; format_choice: string | null },
+): string {
+  if (override?.trim()) return override;
+  const format = hint.format_choice ?? "image";
+  return [
+    "You are Ekko, a brief-drafting strategist helping the operator configure a new marketing pipeline.",
+    `Pipeline id: ${hint.pipeline_id}. Target format: ${format}.`,
+    "Ask focused questions (audience, offer, distinctive angle, tone). When you have enough information,",
+    "emit a `propose_config` tool call with the validated payload so the operator can review and accept it.",
+  ].join(" ");
 }

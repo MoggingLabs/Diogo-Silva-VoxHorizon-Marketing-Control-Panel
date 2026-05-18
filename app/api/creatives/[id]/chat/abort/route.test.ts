@@ -1,12 +1,18 @@
 /**
  * Tests for `app/api/creatives/[id]/chat/abort/route.ts`.
+ *
+ * The route forwards to `chatAbort` from `@/lib/hermes/client`, which
+ * pulls `server-only`. Neutralise it for the jsdom run before the
+ * route module is imported.
  */
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("server-only", () => ({}));
+
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
-import { jsonResponse, stubFetchOnce } from "@/tests/unit/helpers/worker-mock";
+import { jsonResponse, stubFetchOnce, stubFetchSequence } from "@/tests/unit/helpers/worker-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
 
@@ -39,7 +45,7 @@ describe("POST /api/creatives/:id/chat/abort", () => {
     currentSupabase = mockClient({
       creatives: { select: { single: { data: { id }, error: null } } },
     });
-    const fetchSpy = stubFetchOnce(jsonResponse({ ok: true }));
+    const fetchSpy = stubFetchOnce(jsonResponse({ aborted: true }));
     const res = await POST(
       req(`http://localhost/api/creatives/${id}/chat/abort`, { method: "POST" }),
       { params },
@@ -47,6 +53,21 @@ describe("POST /api/creatives/:id/chat/abort", () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.aborted).toBe(true);
+    fetchSpy.mockRestore();
+  });
+
+  it("returns 200 {aborted:false} when bridge replied 404 (no live session)", async () => {
+    currentSupabase = mockClient({
+      creatives: { select: { single: { data: { id }, error: null } } },
+    });
+    const fetchSpy = stubFetchOnce(new Response("not found", { status: 404 }));
+    const res = await POST(
+      req(`http://localhost/api/creatives/${id}/chat/abort`, { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.aborted).toBe(false);
     fetchSpy.mockRestore();
   });
 
@@ -72,11 +93,29 @@ describe("POST /api/creatives/:id/chat/abort", () => {
     expect(res.status).toBe(404);
   });
 
-  it("502 when worker returns non-2xx", async () => {
+  it("502 when worker returns non-2xx (after retry exhaustion)", async () => {
     currentSupabase = mockClient({
       creatives: { select: { single: { data: { id }, error: null } } },
     });
-    const fetchSpy = stubFetchOnce(new Response("oops", { status: 500 }));
+    // `chatAbort` goes through `callHermes`, which retries once on 5xx.
+    // Stub two failing responses so the retry path is exercised too.
+    const fetchSpy = stubFetchSequence([
+      new Response("oops", { status: 500 }),
+      new Response("oops again", { status: 500 }),
+    ]);
+    const res = await POST(
+      req(`http://localhost/api/creatives/${id}/chat/abort`, { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(502);
+    fetchSpy.mockRestore();
+  });
+
+  it("502 when worker returns a non-retriable 4xx (e.g., 400)", async () => {
+    currentSupabase = mockClient({
+      creatives: { select: { single: { data: { id }, error: null } } },
+    });
+    const fetchSpy = stubFetchOnce(new Response("bad input", { status: 400 }));
     const res = await POST(
       req(`http://localhost/api/creatives/${id}/chat/abort`, { method: "POST" }),
       { params },

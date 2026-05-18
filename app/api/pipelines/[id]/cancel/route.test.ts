@@ -1,17 +1,44 @@
 /**
  * Tests for `app/api/pipelines/[id]/cancel/route.ts`.
+ *
+ * The route forwards to `kanbanCancel` from `@/lib/hermes/client` for
+ * each pending/running task on the pipeline. `lib/hermes/client.ts`
+ * pulls `server-only`, which we neutralise before importing the route.
  */
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
 
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
+const kanbanCancelMock = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
+vi.mock("@/lib/hermes/client", () => {
+  class HermesError extends Error {
+    status?: number;
+    constructor(message: string, status?: number) {
+      super(message);
+      this.name = "HermesError";
+      this.status = status;
+    }
+  }
+  return {
+    HermesError,
+    kanbanCancel: (...args: unknown[]) => kanbanCancelMock(...args),
+    chatStream: vi.fn(),
+    chatAbort: vi.fn(),
+    kanbanCreate: vi.fn(),
+    kanbanGet: vi.fn(),
+    kanbanRetry: vi.fn(),
+    kanbanEvents: vi.fn(),
+  };
+});
 
 import { POST } from "./route";
 
@@ -25,6 +52,7 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 describe("POST /api/pipelines/:id/cancel", () => {
   beforeEach(() => {
     currentSupabase = mockClient();
+    kanbanCancelMock.mockReset();
   });
 
   it("cancels from configuration (200)", async () => {
@@ -148,5 +176,171 @@ describe("POST /api/pipelines/:id/cancel", () => {
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
     warn.mockRestore();
+  });
+
+  // ----------------------------------------------------------------------
+  // Kanban fan-out
+  // ----------------------------------------------------------------------
+
+  it("fans out kanban cancels for every active task (200)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "generation", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      hermes_tasks: {
+        select: {
+          data: [
+            { kanban_task_id: "kt-1", status: "in_progress" },
+            { kanban_task_id: "kt-2", status: "blocked" },
+          ],
+          error: null,
+        },
+      },
+    });
+    kanbanCancelMock.mockResolvedValue({ task_id: "x", action: "cancel", ok: true });
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(kanbanCancelMock).toHaveBeenCalledTimes(2);
+    expect(kanbanCancelMock).toHaveBeenCalledWith("kt-1");
+    expect(kanbanCancelMock).toHaveBeenCalledWith("kt-2");
+  });
+
+  it("warns + 200 when hermes_tasks lookup errors (no fan-out)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "generation", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      hermes_tasks: { select: { data: null, error: { message: "tasks down" } } },
+    });
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("tasks down"));
+    expect(kanbanCancelMock).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("warns + 200 when hermes_tasks lookup throws (no fan-out)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "generation", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    // Make the hermes_tasks chain throw at terminal resolution.
+    const broken = currentSupabase as unknown as { from: (t: string) => unknown };
+    const origFrom = broken.from;
+    broken.from = vi.fn((table: string) => {
+      if (table === "hermes_tasks") {
+        const chain: Record<string, unknown> = {};
+        const pass = vi.fn(() => chain);
+        for (const m of ["select", "eq", "in"]) chain[m] = pass;
+        chain.then = (onF: (v: unknown) => unknown, onR: (e: unknown) => unknown) =>
+          Promise.reject(new Error("net down")).then(onF, onR);
+        return chain;
+      }
+      return (origFrom as (t: string) => unknown)(table);
+    }) as unknown as typeof origFrom;
+
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("net down"));
+    warn.mockRestore();
+  });
+
+  it("warns + still returns 200 when one kanban cancel fails with HermesError", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "generation", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      hermes_tasks: {
+        select: {
+          data: [
+            { kanban_task_id: "kt-1", status: "in_progress" },
+            { kanban_task_id: "kt-2", status: "pending" },
+          ],
+          error: null,
+        },
+      },
+    });
+    const { HermesError } = (await import("@/lib/hermes/client")) as unknown as {
+      HermesError: new (msg: string, status?: number) => Error;
+    };
+    kanbanCancelMock
+      .mockRejectedValueOnce(new HermesError("upstream", 503))
+      .mockResolvedValueOnce({ task_id: "kt-2", action: "cancel", ok: true });
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("kt-1"));
+    warn.mockRestore();
+  });
+
+  it("warns when a kanban cancel throws a non-HermesError (still 200)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "generation", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      hermes_tasks: {
+        select: {
+          data: [{ kanban_task_id: "kt-1", status: "in_progress" }],
+          error: null,
+        },
+      },
+    });
+    kanbanCancelMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("ECONNREFUSED"));
+    warn.mockRestore();
+  });
+
+  it("skips fan-out when no active tasks are present (200, no kanban call)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "configuration", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      hermes_tasks: { select: { data: [], error: null } },
+    });
+    const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    expect(kanbanCancelMock).not.toHaveBeenCalled();
   });
 });

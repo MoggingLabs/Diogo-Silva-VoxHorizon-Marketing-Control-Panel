@@ -1,36 +1,49 @@
 /**
  * Tests for `app/api/pipelines/[id]/tasks/[task_event_id]/retry/route.ts`.
  *
- * The route is a heavy orchestrator: lookup -> queue event -> kick the
- * worker (image or video) in the background -> emit running/done/error
- * follow-up events. We verify every validation gate and every dispatcher
- * branch.
+ * After the HI-7 rewrite this route is a thin wrapper:
+ *   - validate the source event (kind=task_error, stage=generation),
+ *   - resolve the kanban_task_id (payload-inline or hermes_tasks fallback),
+ *   - emit a `task_queued` row,
+ *   - POST `/work/hermes/kanban/{id}/retry` via `@/lib/hermes/client`.
+ *
+ * We mock `@/lib/hermes/client` so the spec doesn't pull `server-only`
+ * (which errors under jsdom) and so we can drive every retry / error
+ * branch deterministically.
  */
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+vi.mock("server-only", () => ({}));
 
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
-const callWorkerMock = vi.fn();
+const kanbanRetryMock = vi.fn();
 
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
-vi.mock("@/lib/worker", () => {
-  class WorkerError extends Error {
+vi.mock("@/lib/hermes/client", () => {
+  class HermesError extends Error {
     status?: number;
     constructor(message: string, status?: number) {
       super(message);
-      this.name = "WorkerError";
+      this.name = "HermesError";
       this.status = status;
     }
   }
   return {
-    callWorker: (...args: unknown[]) => callWorkerMock(...args),
-    WorkerError,
-    worker: { health: () => Promise.resolve({ ok: true }) },
+    HermesError,
+    kanbanRetry: (...args: unknown[]) => kanbanRetryMock(...args),
+    // Stub the rest so accidental imports don't blow up.
+    chatStream: vi.fn(),
+    chatAbort: vi.fn(),
+    kanbanCreate: vi.fn(),
+    kanbanGet: vi.fn(),
+    kanbanCancel: vi.fn(),
+    kanbanEvents: vi.fn(),
   };
 });
 
@@ -46,11 +59,15 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 beforeEach(() => {
   currentSupabase = mockClient();
-  callWorkerMock.mockReset();
+  kanbanRetryMock.mockReset();
 });
 afterEach(() => {
   vi.restoreAllMocks();
 });
+
+// ---------------------------------------------------------------------------
+// Validation guards
+// ---------------------------------------------------------------------------
 
 describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => {
   it("500 on read error", async () => {
@@ -64,7 +81,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
     expect(res.status).toBe(500);
   });
 
-  it("404 missing task", async () => {
+  it("404 missing task event", async () => {
     currentSupabase = mockClient({
       pipeline_events: { select: { single: { data: null, error: null } } },
     });
@@ -105,7 +122,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
     expect(res.status).toBe(422);
   });
 
-  it("422 unknown task kind", async () => {
+  it("422 when kanban_task_id cannot be resolved (no payload, no mirror row)", async () => {
     currentSupabase = mockClient({
       pipeline_events: {
         select: {
@@ -120,15 +137,20 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
           },
         },
       },
+      // The fallback table lookup returns nothing.
+      hermes_tasks: { select: { single: { data: null, error: null } } },
     });
     const res = await POST(
       req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
       { params },
     );
     expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.error).toBe("validation_failed");
   });
 
-  it("422 image task missing parent_creative_id", async () => {
+  it("warns + 422 when hermes_tasks fallback errors", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     currentSupabase = mockClient({
       pipeline_events: {
         select: {
@@ -137,87 +159,21 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
               id: taskId,
               kind: "task_error",
               stage: "generation",
-              payload: { kind: "image", ratio: "1x1" },
+              payload: {},
             },
             error: null,
           },
         },
       },
+      hermes_tasks: { select: { single: { data: null, error: { message: "boom" } } } },
     });
     const res = await POST(
       req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
       { params },
     );
     expect(res.status).toBe(422);
-  });
-
-  it("422 image task unsupported ratio", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", ratio: "weird" },
-            },
-            error: null,
-          },
-        },
-      },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(422);
-  });
-
-  it("422 video task missing creative_id", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", substage: "voiceover" },
-            },
-            error: null,
-          },
-        },
-      },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(422);
-  });
-
-  it("422 video task missing substage", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "c1" },
-            },
-            error: null,
-          },
-        },
-      },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(422);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("boom"));
+    warn.mockRestore();
   });
 
   it("500 when queued insert fails", async () => {
@@ -229,7 +185,7 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
               id: taskId,
               kind: "task_error",
               stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", concept: "x", ratio: "1x1" },
+              payload: { task_id: "kt-1" },
             },
             error: null,
           },
@@ -245,7 +201,144 @@ describe("POST /api/pipelines/:id/tasks/:task_event_id/retry — guards", () => 
   });
 });
 
-describe("POST retry — image happy path + worker behaviour", () => {
+// ---------------------------------------------------------------------------
+// kanban_task_id resolution paths
+// ---------------------------------------------------------------------------
+
+describe("POST retry — kanban_task_id resolution", () => {
+  it("uses payload.task_id when present (202)", async () => {
+    currentSupabase = mockClient({
+      pipeline_events: {
+        select: {
+          single: {
+            data: {
+              id: taskId,
+              kind: "task_error",
+              stage: "generation",
+              payload: { task_id: "kt-1" },
+            },
+            error: null,
+          },
+        },
+        insert: { single: { data: { id: "queued1" }, error: null } },
+      },
+    });
+    kanbanRetryMock.mockResolvedValueOnce({ task_id: "kt-1", action: "retry", ok: true });
+    const res = await POST(
+      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.retry_task_id).toBe("queued1");
+    expect(body.kanban_task_id).toBe("kt-1");
+    expect(kanbanRetryMock).toHaveBeenCalledWith("kt-1");
+  });
+
+  it("uses payload.kanban_task_id when task_id absent", async () => {
+    currentSupabase = mockClient({
+      pipeline_events: {
+        select: {
+          single: {
+            data: {
+              id: taskId,
+              kind: "task_error",
+              stage: "generation",
+              payload: { kanban_task_id: "kt-2" },
+            },
+            error: null,
+          },
+        },
+        insert: { single: { data: { id: "queued1" }, error: null } },
+      },
+    });
+    kanbanRetryMock.mockResolvedValueOnce({ task_id: "kt-2", action: "retry", ok: true });
+    const res = await POST(
+      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(202);
+    const body = await res.json();
+    expect(body.kanban_task_id).toBe("kt-2");
+    expect(kanbanRetryMock).toHaveBeenCalledWith("kt-2");
+  });
+
+  it("falls back to hermes_tasks lookup when payload has no id", async () => {
+    currentSupabase = mockClient({
+      pipeline_events: {
+        select: {
+          single: {
+            data: {
+              id: taskId,
+              kind: "task_error",
+              stage: "generation",
+              payload: {},
+            },
+            error: null,
+          },
+        },
+        insert: { single: { data: { id: "queued1" }, error: null } },
+      },
+      hermes_tasks: {
+        select: { single: { data: { kanban_task_id: "kt-fallback" }, error: null } },
+      },
+    });
+    kanbanRetryMock.mockResolvedValueOnce({ task_id: "kt-fallback", action: "retry", ok: true });
+    const res = await POST(
+      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(202);
+    expect(kanbanRetryMock).toHaveBeenCalledWith("kt-fallback");
+  });
+
+  it("warns + 422 when fallback lookup throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipeline_events: {
+        select: {
+          single: {
+            data: {
+              id: taskId,
+              kind: "task_error",
+              stage: "generation",
+              payload: {},
+            },
+            error: null,
+          },
+        },
+      },
+    });
+    // Make the hermes_tasks chain throw at the terminal `maybeSingle()` call.
+    const broken = currentSupabase as unknown as {
+      from: (table: string) => unknown;
+    };
+    const origFrom = broken.from;
+    broken.from = vi.fn((table: string) => {
+      if (table === "hermes_tasks") {
+        const chain: Record<string, unknown> = {};
+        const pass = vi.fn(() => chain);
+        for (const m of ["select", "eq", "in", "order", "limit"]) chain[m] = pass;
+        chain.maybeSingle = vi.fn(() => Promise.reject(new Error("net down")));
+        return chain;
+      }
+      return (origFrom as (t: string) => unknown)(table);
+    }) as unknown as typeof origFrom;
+    const res = await POST(
+      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
+      { params },
+    );
+    expect(res.status).toBe(422);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("net down"));
+    warn.mockRestore();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// kanbanRetry happy & error paths
+// ---------------------------------------------------------------------------
+
+describe("POST retry — worker dispatch", () => {
   beforeEach(() => {
     currentSupabase = mockClient({
       pipeline_events: {
@@ -255,379 +348,53 @@ describe("POST retry — image happy path + worker behaviour", () => {
               id: taskId,
               kind: "task_error",
               stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", concept: "x", ratio: "1x1" },
+              payload: { task_id: "kt-1" },
             },
             error: null,
           },
         },
         insert: { single: { data: { id: "queued1" }, error: null } },
       },
-      creatives: {
-        select: {
-          single: {
-            data: {
-              id: "p1",
-              brief_id: "b1",
-              concept: "x",
-              ratio: "1x1",
-              prompt_used: { prompt: "old prompt" },
-            },
-            error: null,
-          },
-        },
-      },
     });
   });
 
-  it("202 with retry_task_id", async () => {
-    callWorkerMock.mockResolvedValueOnce({
-      creatives: [
-        {
-          creative_id: "c2",
-          concept: "x",
-          ratio: "1x1",
-          version: "v1.0",
-          file_path_supabase: "s/c2",
-          task_id: "t1",
-          source_url: null,
-        },
-      ],
-      brief_id: "b1",
-      creatives_created: 1,
-      errors: [],
-    });
+  it("202 on happy path", async () => {
+    kanbanRetryMock.mockResolvedValueOnce({ task_id: "kt-1", action: "retry", ok: true });
     const res = await POST(
       req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
       { params },
     );
     expect(res.status).toBe(202);
     const body = await res.json();
-    expect(body.retry_task_id).toBe("queued1");
-    // Allow background runner to settle.
-    await new Promise((r) => setTimeout(r, 5));
+    expect(body.source_task_id).toBe(taskId);
   });
 
-  it("handles worker returning no creatives", async () => {
-    callWorkerMock.mockResolvedValueOnce({
-      creatives: [],
-      brief_id: "b1",
-      creatives_created: 0,
-      errors: ["nothing"],
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 5));
-  });
-
-  it("handles parent creative read error in background", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", concept: "x", ratio: "1x1" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-      creatives: { select: { single: { data: null, error: { message: "down" } } } },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
-  });
-
-  it("handles missing parent creative in background", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", concept: "x", ratio: "1x1" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-      creatives: { select: { single: { data: { id: "p1", brief_id: null }, error: null } } },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
-  });
-
-  it("uses fallback prompt when prompt_used has no prompt", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "image", parent_creative_id: "p1", ratio: "1x1" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-      creatives: {
-        select: {
-          single: {
-            data: { id: "p1", brief_id: "b1", concept: null, ratio: "1x1", prompt_used: null },
-            error: null,
-          },
-        },
-      },
-    });
-    callWorkerMock.mockResolvedValueOnce({
-      creatives: [
-        {
-          creative_id: "c3",
-          concept: "concept",
-          ratio: "1x1",
-          version: "v1.0",
-          file_path_supabase: "s/c3",
-          task_id: null,
-          source_url: null,
-        },
-      ],
-      brief_id: "b1",
-      creatives_created: 1,
-      errors: [],
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 5));
-  });
-});
-
-describe("POST retry — video dispatchers", () => {
-  for (const substage of ["voiceover", "broll_search", "compose", "caption"]) {
-    it(`dispatches video substage=${substage} (202)`, async () => {
-      currentSupabase = mockClient({
-        pipeline_events: {
-          select: {
-            single: {
-              data: {
-                id: taskId,
-                kind: "task_error",
-                stage: "generation",
-                payload: { kind: "video", creative_id: "vc1", substage },
-              },
-              error: null,
-            },
-          },
-          insert: { single: { data: { id: "queued1" }, error: null } },
-        },
-      });
-      const reply: Record<string, unknown> = {
-        creative_id: "vc1",
-        voiceover_path: "v/x.mp3",
-        composed_path: "c/x.mp4",
-        captioned_path: "ca/x.srt",
-      };
-      if (substage === "broll_search") reply.candidates = [1, 2, 3];
-      callWorkerMock.mockResolvedValueOnce(reply);
-      const res = await POST(
-        req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-        { params },
-      );
-      expect(res.status).toBe(202);
-      await new Promise((r) => setTimeout(r, 5));
-    });
-  }
-
-  it("dispatches video substage=broll_pick with resolved array", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "broll_pick" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-    });
-    callWorkerMock.mockResolvedValueOnce({ resolved: ["a", "b"] });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 5));
-  });
-
-  it("dispatches video substage=script — reads brief_id from creative", async () => {
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "script" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-      video_creatives: { select: { single: { data: { brief_id: "vb1" }, error: null } } },
-    });
-    callWorkerMock.mockResolvedValueOnce({ script_path: "s/x" });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 5));
-  });
-
-  it("handles video script lookup error in background", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "script" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-      video_creatives: { select: { single: { data: null, error: { message: "down" } } } },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
-  });
-
-  it("unknown substage throws (background, logged)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "exotic" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-    });
-    const res = await POST(
-      req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
-      { params },
-    );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
-  });
-
-  it("translates WorkerError in dispatchVideoRetry", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const { WorkerError } = (await import("@/lib/worker")) as unknown as {
-      WorkerError: new (msg: string, status?: number) => Error;
+  it("502 + HermesError shape when bridge fails with a known status", async () => {
+    const { HermesError } = (await import("@/lib/hermes/client")) as unknown as {
+      HermesError: new (msg: string, status?: number) => Error;
     };
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "voiceover" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-    });
-    callWorkerMock.mockRejectedValueOnce(new WorkerError("nope", 503));
+    kanbanRetryMock.mockRejectedValueOnce(new HermesError("upstream sad", 503));
     const res = await POST(
       req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
       { params },
     );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("worker_error");
+    expect(body.status).toBe(503);
+    expect(body.retry_task_id).toBe("queued1");
+    expect(body.kanban_task_id).toBe("kt-1");
   });
 
-  it("rethrows non-WorkerError from video worker call", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipeline_events: {
-        select: {
-          single: {
-            data: {
-              id: taskId,
-              kind: "task_error",
-              stage: "generation",
-              payload: { kind: "video", creative_id: "vc1", substage: "voiceover" },
-            },
-            error: null,
-          },
-        },
-        insert: { single: { data: { id: "queued1" }, error: null } },
-      },
-    });
-    callWorkerMock.mockRejectedValueOnce(new Error("rando"));
+  it("502 + worker_unreachable when bridge throws a non-HermesError", async () => {
+    kanbanRetryMock.mockRejectedValueOnce(new Error("ECONNREFUSED"));
     const res = await POST(
       req("http://localhost/api/pipelines/p/tasks/t/retry", { method: "POST" }),
       { params },
     );
-    expect(res.status).toBe(202);
-    await new Promise((r) => setTimeout(r, 10));
-    warn.mockRestore();
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe("worker_unreachable");
+    expect(body.retry_task_id).toBe("queued1");
   });
 });
