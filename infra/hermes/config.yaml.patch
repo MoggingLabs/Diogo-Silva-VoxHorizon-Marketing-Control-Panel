@@ -1,0 +1,24 @@
+# Append this block under the top-level `hooks:` key in /opt/data/config.yaml.
+# These are SHELL hooks (subprocess on each event) — non-blocking observers
+# that fire-and-forget POST to the worker webhook. They DO NOT gate tool
+# execution (that's the voxhorizon-approvals plugin, HI-13).
+hooks:
+  post_tool_call:
+    - matcher: "kie_generate|elevenlabs_tts|submagic_caption|drive_upload|send_email"
+      command: |
+        curl -sS -X POST "$DASHBOARD_WEBHOOK_URL" \
+          -H "Authorization: Bearer $DASHBOARD_WEBHOOK_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data @-
+      timeout: 5
+  on_session_end:
+    - command: |
+        curl -sS -X POST "$DASHBOARD_WEBHOOK_URL/session-end" \
+          -H "Authorization: Bearer $DASHBOARD_WEBHOOK_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data @-
+      timeout: 5
+
+# Required env vars in /docker/hermes-agent-t4k4/.env:
+#   DASHBOARD_WEBHOOK_URL=http://<worker-host>:8000/work/hermes/webhook
+#   DASHBOARD_WEBHOOK_TOKEN=<random 64-hex; same value as the worker's env>
