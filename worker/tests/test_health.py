@@ -1,15 +1,38 @@
-"""Tests for /work/health auth + JSON shape."""
+"""Tests for /work/health auth + JSON shape.
+
+Post-Wave-19: the legacy per-brief queue is gone, so the response no
+longer carries ``queue_depth``. The Hermes bridge status snapshot takes
+its place — keyed under ``hermes`` so the dashboard can render a
+"agent reachable?" indicator without a separate round-trip.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 
 SHARED_SECRET = "test-secret-for-health-tests"
+
+
+class _FakeBridge:
+    """Stand-in for HermesBridge used in tests.
+
+    We don't want the test process to actually open a Docker socket — it
+    isn't available in CI and adding a real mock for every endpoint
+    burns time. Instead we monkeypatch :func:`_get_bridge` to return one
+    of these fakes with a canned ``healthcheck`` response.
+    """
+
+    def __init__(self, status: dict[str, Any] | None = None) -> None:
+        self._status = status or {"container": "running", "name": "hermes-agent-ekko"}
+
+    def healthcheck(self) -> dict[str, Any]:
+        return dict(self._status)
 
 
 @pytest.fixture(autouse=True)
@@ -22,15 +45,17 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("BROLL_LOCAL_ROOT", str(tmp_path))
     monkeypatch.setenv("TAILSCALE_HOSTNAME", "voxhorizon-worker-test")
 
-    # Reset the cached settings + app so env changes are picked up.
     from src.config import get_settings
-    from src.services.queue import reset_queue
+    from src.routes import health as health_mod
 
     get_settings.cache_clear()
-    reset_queue()
+    health_mod._reset_bridge()
+    # Pre-seed a fake bridge so module-level singleton init doesn't hit
+    # docker.from_env() when create_app() runs.
+    monkeypatch.setattr(health_mod, "_get_bridge", lambda: _FakeBridge())
     yield
     get_settings.cache_clear()
-    reset_queue()
+    health_mod._reset_bridge()
 
 
 @pytest.fixture
@@ -66,13 +91,52 @@ def test_health_with_valid_token_returns_expected_shape(client: TestClient) -> N
     assert body["tailscale_hostname"] == "voxhorizon-worker-test"
     assert isinstance(body["claude_code_available"], bool)
     assert body["skills_loaded"] == []
-    qd = body["queue_depth"]
-    assert qd["image"] == 0
-    assert qd["video"] == 0
-    assert qd["broll"] == 0
-    # New per-brief queue infra (M2-12): idle worker has no contention.
-    assert qd["briefs"] == {}
-    assert qd["total"] == 0
+    # Wave 19: hermes bridge status replaces queue_depth.
+    assert body["hermes"] == {"container": "running", "name": "hermes-agent-ekko"}
+    assert "queue_depth" not in body
+
+
+def test_health_surfaces_hermes_not_found(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the Hermes container isn't running the route returns 200
+    but the ``hermes`` block reflects the missing container."""
+    from src.routes import health as health_mod
+
+    fake = _FakeBridge(
+        status={"container": "not_found", "name": "hermes-agent-ekko"}
+    )
+    monkeypatch.setattr(health_mod, "_get_bridge", lambda: fake)
+
+    resp = client.get(
+        "/work/health",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["hermes"]["container"] == "not_found"
+
+
+def test_health_surfaces_hermes_error_when_bridge_raises(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The route never propagates a bridge exception — it wraps it as a
+    plain dict so /health stays available even with a broken docker socket."""
+    from src.routes import health as health_mod
+
+    class _ExplodingBridge:
+        def healthcheck(self) -> dict[str, Any]:
+            raise RuntimeError("docker socket missing")
+
+    monkeypatch.setattr(health_mod, "_get_bridge", lambda: _ExplodingBridge())
+
+    resp = client.get(
+        "/work/health",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+    )
+    assert resp.status_code == 200
+    hermes = resp.json()["hermes"]
+    assert hermes["container"] == "error"
+    assert "docker socket missing" in hermes["error"]
 
 
 def test_git_sha_falls_back_to_env_when_git_unavailable(
