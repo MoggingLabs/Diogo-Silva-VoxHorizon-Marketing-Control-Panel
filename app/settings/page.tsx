@@ -4,6 +4,8 @@ import { Bell } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { worker, WorkerError, type WorkerHealth } from "@/lib/worker";
 
+import { ApprovalModeSection } from "./ApprovalModeSection";
+
 export const dynamic = "force-dynamic";
 
 export const metadata = {
@@ -86,6 +88,14 @@ export default async function SettingsPage() {
           Operational status and configuration. Read-only in v1.
         </p>
       </header>
+
+      {/*
+       * Approval mode toggle (Wave 24) — operator-controlled ASK / AUTO_APPROVE /
+       * HALT switch that the voxhorizon-approvals plugin reads on every
+       * pre_tool_call. Rendered as a client component because it owns its own
+       * subscription + form state.
+       */}
+      <ApprovalModeSection />
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Worker connection</h2>

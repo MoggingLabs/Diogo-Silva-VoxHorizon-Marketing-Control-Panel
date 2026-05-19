@@ -27,6 +27,10 @@ vi.mock("./ApprovalsTable", () => ({
   ),
 }));
 
+vi.mock("@/components/approvals/ApprovalModeBanner", () => ({
+  ApprovalModeBanner: () => <div data-testid="approval-mode-banner-stub" />,
+}));
+
 import ApprovalsAuditPage from "./page";
 
 function makeSearchParams(params: Record<string, string | undefined>) {

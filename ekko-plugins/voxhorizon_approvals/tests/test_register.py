@@ -386,3 +386,237 @@ def test_register_handler_is_a_coroutine_function(env: None) -> None:
     ctx = FakeCtx()
     register(ctx)
     assert asyncio.iscoroutinefunction(ctx.hooks["pre_tool_call"])
+
+
+# ---------------------------------------------------------------------------
+# Mode branches — AUTO_APPROVE / HALT short-circuit; ASK falls through
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_mode_cache() -> None:
+    """Drop the mode cache between tests so each test starts cold."""
+    from voxhorizon_approvals import mode as mode_module
+
+    mode_module.clear_cache()
+    yield
+    mode_module.clear_cache()
+
+
+@pytest.mark.asyncio
+async def test_mode_auto_approve_short_circuits_to_allow(
+    env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When mode == AUTO_APPROVE the hook allows without round-tripping."""
+    from datetime import datetime, timedelta, timezone
+
+    from voxhorizon_approvals import mode as mode_module
+
+    long_poll_calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Best-effort write_auto_decision also POSTs to the long-poll
+        # path. We allow it — but the operator prompt round-trip
+        # (timeout=10) must NOT happen.
+        long_poll_calls["count"] += 1
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": None}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    deadline = (
+        datetime.now(timezone.utc) + timedelta(hours=4)
+    ).isoformat()
+
+    async def _fake_fetch_mode(**_kwargs):
+        return mode_module.ModeState(
+            mode="AUTO_APPROVE",
+            expires_at=deadline,
+            set_by="dashboard",
+            set_at="x",
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+    result = await hook(
+        "send_email",
+        {"to": "x"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is None  # allowed
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    # Hook audit row says approved with auto_mode reason.
+    assert any(
+        r["decision"] == "approved"
+        and "auto_mode:AUTO_APPROVE" in r["reason"]
+        for r in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_mode_halt_short_circuits_to_block(
+    env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When mode == HALT the hook blocks without round-tripping."""
+    from voxhorizon_approvals import mode as mode_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # write_auto_decision POSTs here too; we tolerate the call but
+        # the test asserts on the hook's return.
+        return httpx.Response(
+            200, json={"decision": "rejected", "notes": None}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    async def _fake_fetch_mode(**_kwargs):
+        return mode_module.ModeState(
+            mode="HALT",
+            expires_at=None,
+            set_by="dashboard",
+            set_at="x",
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+    result = await hook(
+        "send_email",
+        {"to": "x"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is not None
+    assert result["action"] == "block"
+    assert "halted" in result["message"].lower()
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        r["decision"] == "blocked"
+        and "auto_mode:HALT" in r["reason"]
+        for r in rows
+    )
+
+
+@pytest.mark.asyncio
+async def test_mode_ask_falls_through_to_operator_round_trip(
+    env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With mode == ASK the existing long-poll path is exercised."""
+    from voxhorizon_approvals import mode as mode_module
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": "go"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    async def _fake_fetch_mode(**_kwargs):
+        return mode_module.ModeState(
+            mode="ASK",
+            expires_at=None,
+            set_by=None,
+            set_at="x",
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+    result = await hook(
+        "send_email",
+        {"to": "x"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mode_fetch_error_falls_back_to_ask(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """If fetch_mode raises, hook degrades to ASK (operator round-trip)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": None}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    async def _fake_fetch_mode(**_kwargs):
+        raise RuntimeError("fetch broke")
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+    result = await hook(
+        "send_email",
+        {"to": "x"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    # Long-poll succeeded → None.
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_mode_allowlisted_tool_skips_mode_check(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Allowlisted tools must not even read the mode (cheap path stays cheap)."""
+
+    calls = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": None}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    async def _fake_fetch_mode(**_kwargs):
+        calls["count"] += 1
+        from voxhorizon_approvals import mode as mode_module
+
+        return mode_module.ModeState(
+            mode="HALT",
+            expires_at=None,
+            set_by=None,
+            set_at="x",
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+    result = await hook(
+        "read_file", {"path": "/x"}, "task-1", session_id="sess-1"
+    )
+    # Even though mode=HALT, the allowlisted tool is allowed without
+    # consulting the mode.
+    assert result is None
+    assert calls["count"] == 0

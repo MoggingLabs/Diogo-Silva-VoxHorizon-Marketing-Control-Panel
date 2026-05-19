@@ -13,6 +13,7 @@ from .config import get_settings
 from .routes import (
     health,
     hermes_approval,
+    hermes_approval_mode,
     hermes_chat,
     hermes_kanban,
     hermes_webhook,
@@ -97,6 +98,16 @@ def create_app() -> FastAPI:
     # Bearer-authed with VOXHORIZON_APPROVAL_TOKEN (separate from
     # WORKER_SHARED_SECRET — the plugin doesn't share the dashboard's key).
     app.include_router(hermes_approval.router, tags=["hermes-approval"])
+
+    # === wave 24 approval-mode toggle ===
+    # /work/hermes/approval-mode lets the dashboard flip the plugin between
+    # ASK / AUTO_APPROVE (TTL-bounded) / HALT. Same bearer
+    # (VOXHORIZON_APPROVAL_TOKEN) as the long-poll route — the plugin reads
+    # this on every pre_tool_call (5s in-process cache) and short-circuits
+    # the dashboard prompt for AUTO_APPROVE/HALT.
+    app.include_router(
+        hermes_approval_mode.router, tags=["hermes-approval-mode"]
+    )
 
     structlog.get_logger(__name__).info(
         "worker_started",
