@@ -29,6 +29,10 @@ vi.mock("@/components/approvals/ApprovalQueue", () => ({
   ApprovalQueue: () => <div data-testid="approval-queue-stub" />,
 }));
 
+vi.mock("@/components/approvals/ApprovalModeBadge", () => ({
+  ApprovalModeBadge: () => <div data-testid="approval-mode-badge-stub" />,
+}));
+
 import { AppShell } from "./AppShell";
 
 beforeEach(() => {

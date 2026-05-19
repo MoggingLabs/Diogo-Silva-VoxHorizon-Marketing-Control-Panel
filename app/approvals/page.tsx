@@ -1,6 +1,7 @@
 import type { Route } from "next";
 import Link from "next/link";
 
+import { ApprovalModeBanner } from "@/components/approvals/ApprovalModeBanner";
 import {
   ApprovalStatusEnum,
   ApprovalDecisionEnum,
@@ -65,6 +66,7 @@ export default async function ApprovalsAuditPage({ searchParams }: { searchParam
 
   return (
     <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:gap-8 sm:px-6 sm:py-8">
+      <ApprovalModeBanner />
       <header className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-col gap-1">
           <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Approvals</h1>

@@ -25,6 +25,10 @@ vi.mock("next/headers", () => ({
   headers: async () => (globalThis as unknown as { __headers__: () => unknown }).__headers__(),
 }));
 
+vi.mock("./ApprovalModeSection", () => ({
+  ApprovalModeSection: () => <div data-testid="approval-mode-section-stub" />,
+}));
+
 const workerHealth = vi.fn();
 const headers = vi.fn();
 (globalThis as Record<string, unknown>).__workerHealth__ = workerHealth;

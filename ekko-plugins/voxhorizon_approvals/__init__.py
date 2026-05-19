@@ -2,15 +2,23 @@
 
 Wires a single ``pre_tool_call`` hook that gates every tool dispatch:
 
-1. Pure-function policy check (see :mod:`.policy`). Hot path: <50us.
-2. If "allow" → return ``None`` (let Hermes proceed) + audit.
-3. If "ask_operator" → check the in-process session cache (see
-   :mod:`.client._SessionCache`). Cache hit: <1us, returns immediately.
-4. Cache miss → HTTP POST to the worker; await the operator's decision
+1. Mode probe (see :mod:`.mode`). 5s in-process cache, fail-to-ASK on
+   any error. Short-circuits the dashboard prompt when the operator
+   has flipped the mode to AUTO_APPROVE or HALT — runs at the TOP of
+   the hook, BEFORE allowlist / cache lookups, so the cheap allow path
+   is unaffected.
+2. Pure-function policy check (see :mod:`.policy`). Hot path: <50us.
+3. If "allow" → return ``None`` (let Hermes proceed) + audit.
+4. If "ask_operator" AND mode is AUTO_APPROVE → audit + allow.
+5. If "ask_operator" AND mode is HALT → audit + block.
+6. If "ask_operator" AND mode is ASK → check the in-process session
+   cache (see :mod:`.client._SessionCache`). Cache hit: <1us, returns
+   immediately.
+7. Cache miss → HTTP POST to the worker; await the operator's decision
    (long poll, ~3-30s typical, configurable timeout).
-5. Operator approves → audit + return ``None``.
-6. Operator rejects → audit + return ``{"action": "block", "message": ...}``.
-7. ANY exception → fail-closed: audit + return ``{"action": "block", ...}``.
+8. Operator approves → audit + return ``None``.
+9. Operator rejects → audit + return ``{"action": "block", "message": ...}``.
+10. ANY exception → fail-closed: audit + return ``{"action": "block", ...}``.
 
 The hook signature matches Hermes' plugin contract:
 
@@ -34,6 +42,7 @@ from typing import Any
 
 from .audit import log_decision
 from .client import ApprovalClient, ApprovalVerdict
+from .mode import ModeState, fetch_mode
 from .policy import Decision, args_hash, evaluate
 
 
@@ -98,7 +107,78 @@ def register(ctx: Any) -> None:
                 )
                 return None
 
-            # ask_operator path — check the in-process cache first.
+            # ask_operator path — first check the operator-controlled
+            # mode. AUTO_APPROVE short-circuits to allow; HALT
+            # short-circuits to block. ASK falls through to the
+            # existing cache + long-poll flow.
+            #
+            # fetch_mode caches the result for 5s in-process and
+            # fails-to-ASK on any error, so the worst case is a 5s
+            # delay before a dashboard mode flip propagates.
+            try:
+                mode_state: ModeState = await fetch_mode()
+                effective_mode = mode_state.effective_mode
+            except Exception:  # noqa: BLE001 — fail-to-ASK for any error
+                effective_mode = "ASK"
+
+            if effective_mode == "AUTO_APPROVE":
+                _audit(
+                    tool_name,
+                    args,
+                    "approved",
+                    reason=(
+                        f"auto_mode:AUTO_APPROVE expires "
+                        f"{mode_state.expires_at or '?'}"
+                    ),
+                    t0=t0,
+                )
+                # Also write an approvals-table row via the worker so
+                # the dashboard's audit page reflects the auto-approve
+                # decision. Fire-and-forget — a failed audit write
+                # MUST NOT block the agent's tool call.
+                await client.write_auto_decision(
+                    tool_name=tool_name,
+                    args=args,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    risk_class=decision.risk_class,
+                    decision="approved",
+                    decided_by="auto_mode:AUTO_APPROVE",
+                    notes=(
+                        f"Auto-approved by operator mode. "
+                        f"Mode TTL expires "
+                        f"{mode_state.expires_at or 'unknown'}."
+                    ),
+                )
+                return None
+
+            if effective_mode == "HALT":
+                _audit(
+                    tool_name,
+                    args,
+                    "blocked",
+                    reason="auto_mode:HALT",
+                    t0=t0,
+                )
+                await client.write_auto_decision(
+                    tool_name=tool_name,
+                    args=args,
+                    session_id=session_id,
+                    tool_call_id=tool_call_id,
+                    risk_class=decision.risk_class,
+                    decision="rejected",
+                    decided_by="auto_mode:HALT",
+                    notes=(
+                        "Approvals halted by operator. "
+                        "Re-enable in the dashboard."
+                    ),
+                )
+                return _block(
+                    "Approvals halted by operator. "
+                    "Re-enable in the dashboard."
+                )
+
+            # mode == ASK — check the in-process cache first.
             cached: ApprovalVerdict | None = client.cache_get(
                 session_id, tool_name, args
             )
@@ -182,8 +262,10 @@ __all__ = [
     "ApprovalClient",
     "ApprovalVerdict",
     "Decision",
+    "ModeState",
     "args_hash",
     "evaluate",
+    "fetch_mode",
     "log_decision",
     "register",
 ]

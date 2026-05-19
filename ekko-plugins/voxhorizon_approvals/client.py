@@ -235,6 +235,102 @@ class ApprovalClient:
             self._http_client = None
 
     # ------------------------------------------------------------------
+    # Auto-decision writer (AUTO_APPROVE / HALT mode short-circuits)
+    # ------------------------------------------------------------------
+
+    async def write_auto_decision(
+        self,
+        *,
+        tool_name: str,
+        args: dict,
+        session_id: str,
+        tool_call_id: str,
+        risk_class: str | None,
+        decision: str,
+        decided_by: str,
+        notes: str,
+    ) -> None:
+        """Record a non-operator decision (AUTO_APPROVE / HALT mode).
+
+        Fire-and-forget — any failure is swallowed so an audit-write
+        glitch can't block the agent's tool call. The operator's
+        canonical trail is the JSONL audit log (already written by
+        the hook) + Supabase ``approvals`` table; this method tries
+        to land a row in the latter so the existing dashboard audit
+        page reflects auto-decisions alongside operator decisions.
+
+        We POST to the same long-poll endpoint but with a deterministic
+        ``approval_id`` derived from the tool-call id; the worker's
+        UPSERT idempotency means a second auto-decision for the same
+        call doesn't duplicate the row. We then PATCH-update the row
+        with the decision via a separate dashboard-facing endpoint;
+        because that endpoint isn't exposed yet, this method currently
+        only writes the ``pending`` row + lets the worker's audit
+        page render the synthesized notes. A follow-up wave wires
+        the decided-by/decided-notes write.
+
+        Args:
+            tool_name: Hermes tool identifier.
+            args: Tool args (rendered into the approvals.tool_args
+                column for the dashboard audit page).
+            session_id: Hermes/Ekko session id.
+            tool_call_id: Tool-call id inside that session.
+            risk_class: Same risk taxonomy the operator UI uses.
+            decision: ``"approved"`` / ``"rejected"`` /
+                ``"approved_with_caveat"``.
+            decided_by: ``"auto_mode:AUTO_APPROVE"`` /
+                ``"auto_mode:HALT"``.
+            notes: Human-readable trace ("Mode TTL expires ...").
+        """
+        # Best-effort — never raise. The plugin's primary record is the
+        # local JSONL audit log written by the hook BEFORE this call,
+        # so a transport failure here just means the dashboard audit
+        # page doesn't show the auto-decision; it's not a correctness
+        # issue.
+        try:
+            url, token = self._resolve_target()
+        except ApprovalClientError:
+            # Env not set — no worker to talk to. Silently drop.
+            return
+
+        # Re-use the long-poll endpoint just to INSERT the pending
+        # row; the worker's UPSERT idempotency keeps repeats safe.
+        # We pass ``timeout_s=1`` so the worker doesn't actually wait
+        # for a decision — we want the row written and we're going
+        # to return immediately. The worker treats this as "operator
+        # has 1 second to decide", which will time out and write
+        # status='expired'. That's fine; the JSONL log captures the
+        # real decision, and a future wave will land a direct INSERT
+        # endpoint that doesn't long-poll.
+        body = {
+            "approval_id": _approval_id_from_tool_call(tool_call_id),
+            "ekko_session_id": session_id,
+            "ekko_tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "tool_args": args or {},
+            "risk_class": risk_class,
+            "context": {
+                "auto_decision": decision,
+                "decided_by": decided_by,
+                "decided_notes": notes,
+            },
+            "timeout_s": 1,
+        }
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        # Use a one-shot client with a tight timeout — we MUST NOT
+        # delay the agent's tool dispatch on this best-effort write.
+        try:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=1.0, read=2.0, write=1.0, pool=1.0)
+            ) as scratch:
+                await scratch.post(url, json=body, headers=headers)
+        except Exception:  # noqa: BLE001 — never raise on best-effort
+            return
+
+    # ------------------------------------------------------------------
     # Request
     # ------------------------------------------------------------------
 

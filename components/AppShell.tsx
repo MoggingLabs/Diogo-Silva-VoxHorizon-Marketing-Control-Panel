@@ -15,6 +15,7 @@ import {
   Settings,
 } from "lucide-react";
 
+import { ApprovalModeBadge } from "@/components/approvals/ApprovalModeBadge";
 import { ApprovalQueue } from "@/components/approvals/ApprovalQueue";
 import { WorkerStatus } from "@/components/WorkerStatus";
 import {
@@ -175,6 +176,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </div>
         <div className="flex items-center gap-2">
           <ApprovalQueue />
+          <ApprovalModeBadge />
           <WorkerStatus />
         </div>
       </header>

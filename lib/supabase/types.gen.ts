@@ -18,6 +18,63 @@ export type Database = {
   }
   public: {
     Tables: {
+      approval_mode: {
+        Row: {
+          expires_at: string | null
+          id: string
+          mode: string
+          note: string | null
+          set_at: string
+          set_by: string | null
+        }
+        Insert: {
+          expires_at?: string | null
+          id?: string
+          mode?: string
+          note?: string | null
+          set_at?: string
+          set_by?: string | null
+        }
+        Update: {
+          expires_at?: string | null
+          id?: string
+          mode?: string
+          note?: string | null
+          set_at?: string
+          set_by?: string | null
+        }
+        Relationships: []
+      }
+      approval_mode_audit: {
+        Row: {
+          changed_at: string
+          changed_by: string
+          from_mode: string
+          id: string
+          note: string | null
+          to_mode: string
+          ttl_seconds: number | null
+        }
+        Insert: {
+          changed_at?: string
+          changed_by: string
+          from_mode: string
+          id?: string
+          note?: string | null
+          to_mode: string
+          ttl_seconds?: number | null
+        }
+        Update: {
+          changed_at?: string
+          changed_by?: string
+          from_mode?: string
+          id?: string
+          note?: string | null
+          to_mode?: string
+          ttl_seconds?: number | null
+        }
+        Relationships: []
+      }
       approvals: {
         Row: {
           cache_for_minutes: number | null
