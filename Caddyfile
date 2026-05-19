@@ -1,14 +1,17 @@
 {$VOXHORIZON_DASHBOARD_HOST:dashboard.voxhorizon.example.com} {
 	encode zstd gzip
 
-	# Security headers, applied to every response (including the 401 the
-	# basic_auth gate returns). HSTS is preload-ready but you still have
-	# to submit to hstspreload.org for the browser preload list. CSP
-	# allows Next.js hydration (unsafe-inline scripts/styles) and the
-	# webpack runtime (unsafe-eval); tighten with nonces via Next.js
-	# middleware in a later hardening pass. connect-src has the Supabase
-	# project URL hard-wired so Realtime (wss) works end-to-end.
+	# Security headers applied to every response, INCLUDING the 401 the
+	# basic_auth gate returns. The `defer` keyword wraps the response
+	# writer so headers are added even when downstream handlers
+	# short-circuit. HSTS is preload-ready (still requires submission to
+	# hstspreload.org). CSP allows Next.js hydration (unsafe-inline
+	# scripts/styles) and the webpack runtime (unsafe-eval); tighten
+	# with nonces via Next.js middleware in a later hardening pass.
+	# connect-src hard-codes the Supabase project URL so Realtime (wss)
+	# works end-to-end.
 	header {
+		defer
 		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 		X-Frame-Options "DENY"
 		X-Content-Type-Options "nosniff"
@@ -19,33 +22,32 @@
 		-Server
 	}
 
-	# Single-operator HTTP Basic Auth gate at the edge.
-	#
-	# v1 is one user (Diogo). The bcrypt hash lives in
-	# /opt/voxhorizon/.env on the VPS — never in the repo. Caddy reads
-	# it as $CADDY_BASIC_AUTH_HASH at startup; substituting an unset
-	# value fails Caddy validation (deliberate fail-closed). Browsers
-	# cache the Authorization header for the session, so assets, /api
-	# routes, and SSE streams all carry the credential without extra
-	# round trips.
-	#
-	# Future: replace with Cloudflare Access (NS migration to CF +
-	# email-PIN or Google SSO) when we want SSO + audit logs.
-	basic_auth {
-		{$CADDY_BASIC_AUTH_USER:diogo} {$CADDY_BASIC_AUTH_HASH}
-	}
+	# Explicit route ordering ensures the header response handler wraps
+	# the basic_auth + reverse_proxy chain so security headers land on
+	# the 401 response too (not just the 200 path). Without this, the
+	# implicit Caddyfile ordering put `header` before `basic_auth` in
+	# the request phase and basic_auth's short-circuit 401 bypassed the
+	# response writer wrap.
+	route {
+		# Single-operator HTTP Basic Auth gate. The bcrypt hash lives in
+		# /opt/voxhorizon/.env on the VPS — never in the repo. Caddy
+		# reads it as $CADDY_BASIC_AUTH_HASH at startup; an unset value
+		# fails Caddy validation (deliberate fail-closed). Future:
+		# Cloudflare Access SSO replaces this once we migrate NS to CF.
+		basic_auth {
+			{$CADDY_BASIC_AUTH_USER:diogo} {$CADDY_BASIC_AUTH_HASH}
+		}
 
-	reverse_proxy web:3000 {
-		header_up Host {host}
-		header_up X-Real-IP {remote_host}
-		header_up X-Forwarded-For {remote_host}
-		header_up X-Forwarded-Proto {scheme}
+		reverse_proxy web:3000 {
+			header_up Host {host}
+			header_up X-Real-IP {remote_host}
 
-		# SSE: disable Caddy's response buffering so chat-stream tokens
-		# arrive at the client in real time, not at the end of the agent
-		# turn. -1 means "flush after every write" — required for the
-		# chat-with-Ekko SSE endpoint to feel interactive.
-		flush_interval -1
+			# SSE: disable Caddy's response buffering so chat-stream tokens
+			# arrive at the client in real time, not at the end of the agent
+			# turn. -1 means "flush after every write" — required for the
+			# chat-with-Ekko SSE endpoint to feel interactive.
+			flush_interval -1
+		}
 	}
 
 	log {
