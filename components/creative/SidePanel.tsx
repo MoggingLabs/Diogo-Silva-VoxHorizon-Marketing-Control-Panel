@@ -15,7 +15,7 @@ import { EkkoChat } from "@/components/chat/EkkoChat";
 import { ThreadSearch, useThreadSearchShortcut } from "@/components/chat/ThreadSearch";
 import { UnreadDivider } from "@/components/chat/UnreadDivider";
 import { countUnread, getLastSeen, markRead } from "@/lib/chat-read-status";
-import { createClient } from "@/lib/supabase/browser";
+import { fetchCreativeIterations } from "@/lib/realtime/client-data";
 import { STATUS_LABEL, STATUS_PILL, type Creative, type CreativeIteration } from "@/lib/creatives";
 import { cn } from "@/lib/utils";
 
@@ -77,21 +77,16 @@ export function SidePanel({ creative, signedUrl, open, onOpenChange }: SidePanel
     let cancelled = false;
     setLoadingIterations(true);
     setIterationsError(null);
-    const supabase = createClient();
-    void supabase
-      .from("creative_iterations")
-      .select("*")
-      .eq("creative_id", creative.id)
-      .order("created_at", { ascending: true })
-      .limit(500)
-      .then(({ data, error }) => {
+    void fetchCreativeIterations<CreativeIteration>(creative.id)
+      .then((data) => {
         if (cancelled) return;
-        if (error) {
-          setIterationsError(error.message);
-          setIterations([]);
-        } else {
-          setIterations((data ?? []) as CreativeIteration[]);
-        }
+        setIterations(data);
+        setLoadingIterations(false);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setIterationsError(e instanceof Error ? e.message : "Failed to load iterations");
+        setIterations([]);
         setLoadingIterations(false);
       });
     return () => {

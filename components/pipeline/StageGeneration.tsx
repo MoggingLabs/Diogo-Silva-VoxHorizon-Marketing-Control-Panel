@@ -24,7 +24,7 @@ import {
   type GenerationTaskStatus,
 } from "@/lib/pipeline/generation-tasks";
 import type { Pipeline, PipelineEvent } from "@/lib/pipeline/types";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { signStoragePath } from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
 const POLL_COST_REFRESH_MS = 4_000;
@@ -260,17 +260,10 @@ function ThumbnailOrIcon({ task }: { task: GenerationTask }) {
       return;
     }
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
-      const { data, error } = await supabase.storage
-        .from(CREATIVES_BUCKET)
-        .createSignedUrl(filePath, 3600);
+      const signedUrl = await signStoragePath(CREATIVES_BUCKET, filePath, 3600);
       if (cancelled) return;
-      if (error || !data?.signedUrl) {
-        setThumb(null);
-        return;
-      }
-      setThumb(data.signedUrl);
+      setThumb(signedUrl);
     })();
     return () => {
       cancelled = true;
@@ -336,13 +329,12 @@ function pickVideoArtifactPath(payload: Record<string, unknown>): string | null 
 }
 
 async function openSignedUrl(path: string): Promise<void> {
-  const supabase = createBrowserClient();
-  const { data, error } = await supabase.storage.from(CREATIVES_BUCKET).createSignedUrl(path, 3600);
-  if (error || !data?.signedUrl) {
-    console.warn(`[StageGeneration] could not sign artifact url for ${path}: ${error?.message}`);
+  const signedUrl = await signStoragePath(CREATIVES_BUCKET, path, 3600);
+  if (!signedUrl) {
+    console.warn(`[StageGeneration] could not sign artifact url for ${path}`);
     return;
   }
-  window.open(data.signedUrl, "_blank", "noopener,noreferrer");
+  window.open(signedUrl, "_blank", "noopener,noreferrer");
 }
 
 // ---------------------------------------------------------------------------

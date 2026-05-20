@@ -12,21 +12,22 @@
  *   - Realtime callback invokes router.refresh().
  *   - Invalid `created_at` values fall through formatDate's catch.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { EventRow } from "@/lib/briefs";
 
 const refresh = vi.fn();
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh, push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentSupabase,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 import { BriefTimeline } from "./BriefTimeline";
@@ -46,7 +47,7 @@ function ev(over: Partial<EventRow>): EventRow {
 
 beforeEach(() => {
   refresh.mockReset();
-  currentSupabase = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -151,23 +152,21 @@ describe("BriefTimeline", () => {
     expect(screen.getByText("Decision recorded")).toBeInTheDocument();
   });
 
-  it("opens a realtime channel and unsubscribes on unmount", () => {
+  it("subscribes to a filtered briefs UPDATE on the relay", () => {
     const { unmount } = render(<BriefTimeline briefId="b1" initialEvents={[]} />);
 
-    expect(currentSupabase._spies.channel).toHaveBeenCalledWith("brief:b1");
-    unmount();
-    expect(currentSupabase._spies.removeChannel).toHaveBeenCalled();
+    const listener = realtime.listeners.find((l) => l.table === "briefs");
+    expect(listener).toBeDefined();
+    expect(listener?.event).toBe("UPDATE");
+    expect(listener?.filter).toBe("id=eq.b1");
+    expect(() => unmount()).not.toThrow();
   });
 
   it("calls router.refresh() when the realtime callback fires", () => {
     render(<BriefTimeline briefId="b1" initialEvents={[]} />);
-
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    expect(channel.on).toHaveBeenCalled();
-    const handler = channel.on.mock.calls[0]![2] as () => void;
-    handler();
+    act(() => {
+      realtime.emit("briefs", "UPDATE", { new: { id: "b1" } });
+    });
     expect(refresh).toHaveBeenCalled();
   });
 

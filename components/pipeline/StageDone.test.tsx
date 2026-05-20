@@ -13,7 +13,6 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import type { Pipeline } from "@/lib/pipeline/types";
 
 const routerPush = vi.fn();
@@ -21,9 +20,18 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ push: routerPush, refresh: vi.fn(), replace: vi.fn() }),
 }));
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+// Finals are fetched via the service-role API routes (client-data helpers).
+// Mock them per-test; rejections drive the "Failed to load" branch.
+type Row = Record<string, unknown>;
+const fetchCreativesByBrief = vi.fn<() => Promise<Row[]>>(async () => []);
+const fetchVideoCreativesByBrief = vi.fn<() => Promise<Row[]>>(async () => []);
+const signStoragePaths = vi.fn<(b: string, p: string[]) => Promise<Record<string, string | null>>>(
+  async (_b, paths) => Object.fromEntries(paths.map((p) => [p, `https://x.example/${p}`])),
+);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchCreativesByBrief: () => fetchCreativesByBrief(),
+  fetchVideoCreativesByBrief: () => fetchVideoCreativesByBrief(),
+  signStoragePaths: (b: string, p: string[]) => signStoragePaths(b, p),
 }));
 
 import { StageDone } from "./StageDone";
@@ -51,7 +59,14 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 
 beforeEach(() => {
   routerPush.mockReset();
-  currentClient = mockSupabaseClient();
+  fetchCreativesByBrief.mockReset();
+  fetchCreativesByBrief.mockResolvedValue([]);
+  fetchVideoCreativesByBrief.mockReset();
+  fetchVideoCreativesByBrief.mockResolvedValue([]);
+  signStoragePaths.mockClear();
+  signStoragePaths.mockImplementation(async (_b, paths) =>
+    Object.fromEntries(paths.map((p) => [p, `https://x.example/${p}`])),
+  );
 });
 
 afterEach(() => {
@@ -134,45 +149,29 @@ describe("StageDone", () => {
   });
 
   it("fetches + groups image finals by concept", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "i1",
-              concept: "Concept A",
-              ratio: "1x1",
-              version: "v1.0",
-              file_path_supabase: "a-1x1.png",
-            },
-            {
-              id: "i2",
-              concept: "Concept A",
-              ratio: "9x16",
-              version: "v1.0",
-              file_path_supabase: "a-9x16.png",
-            },
-            {
-              id: "i3",
-              concept: "Concept B",
-              ratio: "1x1",
-              version: "v1.0",
-              file_path_supabase: "b-1x1.png",
-            },
-          ],
-        },
+    fetchCreativesByBrief.mockResolvedValue([
+      {
+        id: "i1",
+        concept: "Concept A",
+        ratio: "1x1",
+        version: "v1.0",
+        file_path_supabase: "a-1x1.png",
       },
-    });
-    // storage.from(...).createSignedUrl — provide via the spy-friendly shape.
-    const createSignedUrl = vi.fn(async () => ({
-      data: { signedUrl: "https://x.example/signed.png" },
-      error: null,
-    }));
-    currentClient = {
-      ...currentClient,
-      storage: { from: () => ({ createSignedUrl }) },
-    } as SupabaseClientMock;
+      {
+        id: "i2",
+        concept: "Concept A",
+        ratio: "9x16",
+        version: "v1.0",
+        file_path_supabase: "a-9x16.png",
+      },
+      {
+        id: "i3",
+        concept: "Concept B",
+        ratio: "1x1",
+        version: "v1.0",
+        file_path_supabase: "b-1x1.png",
+      },
+    ]);
     render(<StageDone pipeline={makePipeline()} imageBriefId="b1" />);
     expect(await screen.findByText("Concept A")).toBeInTheDocument();
     expect(screen.getByText("Concept B")).toBeInTheDocument();
@@ -181,32 +180,15 @@ describe("StageDone", () => {
   });
 
   it("surfaces fetch error in the image gallery", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: {
-        select: { data: null, error: { message: "rls denied" } },
-      },
-    });
+    fetchCreativesByBrief.mockRejectedValue(new Error("rls denied"));
     render(<StageDone pipeline={makePipeline()} imageBriefId="b1" />);
     expect(await screen.findByText(/Failed to load: rls denied/)).toBeInTheDocument();
   });
 
   it("renders a No-render placeholder for image rows with no signed URL", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "i1",
-              concept: "Concept",
-              ratio: "1x1",
-              version: "v1.0",
-              file_path_supabase: null,
-            },
-          ],
-        },
-      },
-    });
+    fetchCreativesByBrief.mockResolvedValue([
+      { id: "i1", concept: "Concept", ratio: "1x1", version: "v1.0", file_path_supabase: null },
+    ]);
     render(<StageDone pipeline={makePipeline()} imageBriefId="b1" />);
     expect(await screen.findByText("Concept")).toBeInTheDocument();
     expect(screen.getByText("No render")).toBeInTheDocument();
@@ -218,30 +200,16 @@ describe("StageDone", () => {
   });
 
   it("fetches + renders video finals + play-on-click", async () => {
-    const createSignedUrl = vi.fn(async () => ({
-      data: { signedUrl: "https://x.example/v.mp4" },
-      error: null,
-    }));
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "captioned",
-              composed_path: null,
-              captioned_path: "v.mp4",
-              duration_actual_s: 30,
-            },
-          ],
-        },
+    signStoragePaths.mockResolvedValue({ "v.mp4": "https://x.example/v.mp4" });
+    fetchVideoCreativesByBrief.mockResolvedValue([
+      {
+        id: "v1",
+        status: "captioned",
+        composed_path: null,
+        captioned_path: "v.mp4",
+        duration_actual_s: 30,
       },
-    });
-    currentClient = {
-      ...currentClient,
-      storage: { from: () => ({ createSignedUrl }) },
-    } as SupabaseClientMock;
+    ]);
     const user = userEvent.setup();
     render(<StageDone pipeline={makePipeline({ format_choice: "video" })} videoBriefId="b1" />);
     await waitFor(() => expect(screen.getByText("captioned")).toBeInTheDocument());
@@ -252,91 +220,49 @@ describe("StageDone", () => {
   });
 
   it("surfaces video fetch error", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: { data: null, error: { message: "denied" } },
-      },
-    });
+    fetchVideoCreativesByBrief.mockRejectedValue(new Error("denied"));
     render(<StageDone pipeline={makePipeline({ format_choice: "video" })} videoBriefId="b1" />);
     expect(await screen.findByText(/Failed to load: denied/)).toBeInTheDocument();
   });
 
   it("renders 'duration TBD' when duration_actual_s is null", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "captioned",
-              composed_path: null,
-              captioned_path: null,
-              duration_actual_s: null,
-            },
-          ],
-        },
+    fetchVideoCreativesByBrief.mockResolvedValue([
+      {
+        id: "v1",
+        status: "captioned",
+        composed_path: null,
+        captioned_path: null,
+        duration_actual_s: null,
       },
-    });
+    ]);
     render(<StageDone pipeline={makePipeline({ format_choice: "video" })} videoBriefId="b1" />);
     expect(await screen.findByText(/duration TBD/)).toBeInTheDocument();
   });
 
   it("handles thrown errors in the image gallery", async () => {
-    currentClient = {
-      ...mockSupabaseClient(),
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            neq: () => Promise.reject(new Error("synchronous throw")),
-          }),
-        }),
-      }),
-    } as unknown as SupabaseClientMock;
+    fetchCreativesByBrief.mockRejectedValue(new Error("synchronous throw"));
     render(<StageDone pipeline={makePipeline()} imageBriefId="b1" />);
     expect(await screen.findByText(/Failed to load: synchronous throw/)).toBeInTheDocument();
   });
 
   it("handles thrown errors in the video gallery", async () => {
-    currentClient = {
-      ...mockSupabaseClient(),
-      from: () => ({
-        select: () => ({
-          eq: () => ({
-            in: () => Promise.reject(new Error("video oh no")),
-          }),
-        }),
-      }),
-    } as unknown as SupabaseClientMock;
+    fetchVideoCreativesByBrief.mockRejectedValue(new Error("video oh no"));
     render(<StageDone pipeline={makePipeline({ format_choice: "video" })} videoBriefId="b1" />);
     expect(await screen.findByText(/Failed to load: video oh no/)).toBeInTheDocument();
   });
 
   it("renders the 'No render' placeholder when video URL signing fails", async () => {
-    const createSignedUrl = vi.fn(async () => ({
-      data: null,
-      error: { message: "boom" },
-    }));
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "captioned",
-              composed_path: "x.mp4",
-              captioned_path: null,
-              duration_actual_s: 10,
-            },
-          ],
-        },
+    // Signing returns null for the requested path → placeholder shows.
+    signStoragePaths.mockResolvedValue({ "x.mp4": null });
+    fetchVideoCreativesByBrief.mockResolvedValue([
+      {
+        id: "v1",
+        status: "captioned",
+        composed_path: "x.mp4",
+        captioned_path: null,
+        duration_actual_s: 10,
       },
-    });
-    currentClient = {
-      ...currentClient,
-      storage: { from: () => ({ createSignedUrl }) },
-    } as SupabaseClientMock;
+    ]);
     render(<StageDone pipeline={makePipeline({ format_choice: "video" })} videoBriefId="b1" />);
     expect(await screen.findByText(/No render/)).toBeInTheDocument();
   });

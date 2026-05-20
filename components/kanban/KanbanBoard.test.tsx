@@ -15,30 +15,32 @@
  *   - Forwards pipelineId from the map to each KanbanCard.
  *   - Unsubscribes on unmount.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { DashboardImageBrief, DashboardVideoBrief } from "@/lib/dashboard-types";
 
 const refresh = vi.fn();
 const queueSpy = vi.fn();
 const disposeSpy = vi.fn();
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh, push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
   useSearchParams: () => ({ toString: () => "" }),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentSupabase,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 vi.mock("@/lib/realtime-queue", () => ({
   createRealtimeQueue: () => ({
     queue: queueSpy,
     dispose: disposeSpy,
+    flushNow: vi.fn(),
   }),
 }));
 
@@ -74,7 +76,7 @@ beforeEach(() => {
   refresh.mockReset();
   queueSpy.mockReset();
   disposeSpy.mockReset();
-  currentSupabase = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -164,40 +166,26 @@ describe("KanbanBoard", () => {
     );
   });
 
-  it("sets up a realtime channel and calls dispose on unmount", () => {
+  it("sets up the realtime relay and calls dispose on unmount", () => {
     const { unmount } = render(<KanbanBoard format="both" imageBriefs={[]} videoBriefs={[]} />);
 
-    expect(currentSupabase._spies.channel).toHaveBeenCalled();
+    expect(realtime.spy).toHaveBeenCalled();
     expect(disposeSpy).not.toHaveBeenCalled();
     unmount();
     expect(disposeSpy).toHaveBeenCalled();
-    expect(currentSupabase._spies.removeChannel).toHaveBeenCalled();
   });
 
   it("queues briefs and video_briefs handlers to drive router.refresh()", () => {
     render(<KanbanBoard format="both" imageBriefs={[]} videoBriefs={[]} />);
 
-    // Inspect the channel handlers configured against the mock.
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    expect(channel.on).toHaveBeenCalledWith(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "briefs" },
-      expect.any(Function),
-    );
-    expect(channel.on).toHaveBeenCalledWith(
-      "postgres_changes",
-      { event: "*", schema: "public", table: "video_briefs" },
-      expect.any(Function),
-    );
+    // The hook registers a `*` listener for both briefs and video_briefs.
+    const tables = realtime.listeners.map((l) => `${l.table}:${l.event}`);
+    expect(tables).toEqual(expect.arrayContaining(["briefs:*", "video_briefs:*"]));
 
-    // Invoke the briefs handler — it should call queue with the labelled topic.
-    const briefsCall = channel.on.mock.calls.find(
-      (call) => (call[1] as { table: string }).table === "briefs",
-    )!;
-    const handler = briefsCall[2] as () => void;
-    handler();
+    // Firing a briefs change calls queue with the labelled topic.
+    act(() => {
+      realtime.emit("briefs", "UPDATE", { new: { id: "b1" } });
+    });
     expect(queueSpy).toHaveBeenCalledWith("briefs", expect.any(Function));
 
     // The provided callback should trigger router.refresh() when invoked.

@@ -7,7 +7,7 @@ import { Factory } from "lucide-react";
 
 import { EmptyState } from "@/components/EmptyState";
 import { Button } from "@/components/ui/button";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import {
   PIPELINE_FORMAT_BADGE,
   PIPELINE_FORMAT_LABEL,
@@ -86,21 +86,20 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
     setPipelines(initialPipelines);
   }, [initialPipelines]);
 
-  useEffect(() => {
-    const supabase = createBrowserClient();
-    const channel = supabase
-      .channel("pipelines:index")
-      .on("postgres_changes", { event: "*", schema: "public", table: "pipelines" }, () => {
-        // Easiest correct path: let the server re-query. Keeps client
-        // joins to clients table accurate without re-deriving here.
-        router.refresh();
-      })
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [router]);
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "pipelines",
+          event: "*" as const,
+          // Easiest correct path: let the server re-query. Keeps client
+          // joins to the clients table accurate without re-deriving here.
+          callback: () => router.refresh(),
+        },
+      ],
+      [router],
+    ),
+  );
 
   const filtered = useMemo(() => {
     return pipelines.filter((p) => {

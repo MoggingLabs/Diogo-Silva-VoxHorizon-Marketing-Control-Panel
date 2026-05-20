@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 interface EventRow {
   id: string;
@@ -28,30 +28,23 @@ export interface VideoBriefTimelineProps {
 export function VideoBriefTimeline({ videoBriefId, initialEvents }: VideoBriefTimelineProps) {
   const [events, setEvents] = React.useState<EventRow[]>(initialEvents);
 
-  React.useEffect(() => {
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`video-brief-events-${videoBriefId}`)
-      .on(
-        "postgres_changes",
+  useRealtimeStream(
+    React.useMemo(
+      () => [
         {
-          event: "INSERT",
-          schema: "public",
           table: "events",
+          event: "INSERT" as const,
           filter: `ref_id=eq.${videoBriefId}`,
+          callback: (payload) => {
+            const next = payload.new as unknown as EventRow;
+            if (next.id == null) return;
+            setEvents((prev) => (prev.some((e) => e.id === next.id) ? prev : [next, ...prev]));
+          },
         },
-        (payload) => {
-          const next = payload.new as EventRow;
-          if (next.id == null) return;
-          setEvents((prev) => (prev.some((e) => e.id === next.id) ? prev : [next, ...prev]));
-        },
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [videoBriefId]);
+      ],
+      [videoBriefId],
+    ),
+  );
 
   if (events.length === 0) {
     return <p className="text-sm text-muted-foreground">No events yet.</p>;

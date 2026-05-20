@@ -1,30 +1,26 @@
 /**
  * Tests for the live approval-mode hook.
  *
- * The hook owns a Supabase Realtime channel, a debounced re-fetch queue,
- * and a 30s "force render" tick for the TTL countdown. We mock the
- * Supabase browser client + ``fetch`` so the hook runs end-to-end without
- * a real Postgres connection.
+ * The hook subscribes via the server-side Realtime SSE relay, owns a
+ * debounced re-fetch queue, and a 30s "force render" tick for the TTL
+ * countdown. We mock the relay hook + the queue + ``fetch`` so the hook runs
+ * end-to-end without a real Postgres connection.
  */
 import { renderHook, waitFor, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const channelMock = {
-  on: vi.fn(),
-  subscribe: vi.fn(),
-};
-const supabaseMock = {
-  channel: vi.fn(() => channelMock),
-  removeChannel: vi.fn(async () => undefined),
-};
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => supabaseMock,
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 const realtimeQueueMock = {
   queue: vi.fn(),
   dispose: vi.fn(),
+  flushNow: vi.fn(),
 };
 vi.mock("@/lib/realtime-queue", () => ({
   createRealtimeQueue: () => realtimeQueueMock,
@@ -32,16 +28,11 @@ vi.mock("@/lib/realtime-queue", () => ({
 
 import { useApprovalMode } from "./useApprovalMode";
 
-function chainable() {
-  channelMock.on.mockImplementation(() => channelMock);
-  channelMock.subscribe.mockImplementation(() => channelMock);
-}
-
 describe("useApprovalMode", () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(() => {
-    chainable();
+    realtime.reset();
     globalThis.fetch = vi.fn(
       async () =>
         new Response(
@@ -69,16 +60,12 @@ describe("useApprovalMode", () => {
     expect(result.current.error).toBeNull();
   });
 
-  it("subscribes to the approval_mode realtime channel", async () => {
+  it("subscribes to the approval_mode realtime relay", async () => {
     renderHook(() => useApprovalMode());
-    await waitFor(() => expect(supabaseMock.channel).toHaveBeenCalled());
-    expect(supabaseMock.channel).toHaveBeenCalledWith("approval-mode-singleton");
-    expect(channelMock.on).toHaveBeenCalledWith(
-      "postgres_changes",
-      expect.objectContaining({ event: "*", table: "approval_mode" }),
-      expect.any(Function),
-    );
-    expect(channelMock.subscribe).toHaveBeenCalled();
+    await waitFor(() => expect(realtime.spy).toHaveBeenCalled());
+    const modeListener = realtime.listeners.find((l) => l.table === "approval_mode");
+    expect(modeListener).toBeDefined();
+    expect(modeListener?.event).toBe("*");
   });
 
   it("surfaces a fetch error", async () => {
@@ -100,25 +87,20 @@ describe("useApprovalMode", () => {
   });
 
   it("calls the realtime callback through the queue on change", async () => {
-    let captured: ((p: unknown) => void) | undefined;
-    channelMock.on.mockImplementation((_event: string, _filter: unknown, cb: unknown) => {
-      captured = cb as (p: unknown) => void;
-      return channelMock;
-    });
     renderHook(() => useApprovalMode());
-    await waitFor(() => expect(channelMock.subscribe).toHaveBeenCalled());
+    await waitFor(() => expect(realtime.spy).toHaveBeenCalled());
 
-    expect(captured).toBeDefined();
-    captured!({ eventType: "UPDATE" });
+    act(() => {
+      realtime.emit("approval_mode", "UPDATE", { new: { mode: "HALT" } });
+    });
     expect(realtimeQueueMock.queue).toHaveBeenCalledWith("refresh", expect.any(Function));
   });
 
-  it("disposes the queue + removes the channel on unmount", async () => {
+  it("disposes the queue on unmount", async () => {
     const { unmount } = renderHook(() => useApprovalMode());
-    await waitFor(() => expect(channelMock.subscribe).toHaveBeenCalled());
+    await waitFor(() => expect(realtime.spy).toHaveBeenCalled());
     unmount();
     expect(realtimeQueueMock.dispose).toHaveBeenCalled();
-    expect(supabaseMock.removeChannel).toHaveBeenCalled();
   });
 
   it("re-fetches when refresh() is called", async () => {

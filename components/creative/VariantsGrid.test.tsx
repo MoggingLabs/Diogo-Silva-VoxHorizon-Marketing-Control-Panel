@@ -11,6 +11,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { Creative } from "@/lib/creatives";
 
 const routerReplace = vi.fn();
@@ -28,45 +29,16 @@ vi.mock("@/lib/realtime-queue", () => ({
   }),
 }));
 
-// Capture handlers per channel event for replay.
-const channelHandlers: Record<
-  string,
-  Array<(p: { new?: Creative; old?: Partial<Creative> }) => void>
-> = {
-  INSERT: [],
-  UPDATE: [],
-  DELETE: [],
-};
-
-const removeChannelSpy = vi.fn();
-const channelSpy = vi.fn(() => {
-  const ch: Record<string, unknown> = {};
-  ch.on = vi.fn(
-    (
-      _evt: string,
-      spec: { event: string },
-      cb: (p: { new?: Creative; old?: Partial<Creative> }) => void,
-    ) => {
-      if (spec.event in channelHandlers) channelHandlers[spec.event]!.push(cb);
-      return ch;
-    },
-  );
-  ch.subscribe = vi.fn(() => ch);
-  ch.unsubscribe = vi.fn();
-  return ch;
-});
-
-const createSignedUrl = vi.fn(async () => ({
-  data: { signedUrl: "https://x.example/signed" },
-  error: null,
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => ({
-    channel: channelSpy,
-    removeChannel: removeChannelSpy,
-    storage: { from: () => ({ createSignedUrl }) },
-  }),
+// Signed URLs are minted server-side now; mock the client-data helper.
+const signStoragePath = vi.fn(async () => "https://x.example/signed");
+vi.mock("@/lib/realtime/client-data", () => ({
+  signStoragePath: () => signStoragePath(),
 }));
 
 vi.mock("./SidePanel", () => ({
@@ -112,12 +84,8 @@ function makeCreative(over: Partial<Creative> = {}): Creative {
 
 beforeEach(() => {
   routerReplace.mockReset();
-  removeChannelSpy.mockReset();
-  channelSpy.mockClear();
-  channelHandlers.INSERT = [];
-  channelHandlers.UPDATE = [];
-  channelHandlers.DELETE = [];
-  createSignedUrl.mockClear();
+  realtime.reset();
+  signStoragePath.mockClear();
 });
 
 afterEach(() => {
@@ -198,21 +166,20 @@ describe("VariantsGrid", () => {
     );
   });
 
-  it("registers INSERT/UPDATE/DELETE realtime handlers", () => {
+  it("registers INSERT/UPDATE/DELETE realtime listeners on creatives", () => {
     render(
       <VariantsGrid briefId="b1" initialCreatives={[]} initialSignedUrls={{}} selectedId={null} />,
     );
-    expect((channelHandlers.INSERT ?? []).length).toBeGreaterThan(0);
-    expect((channelHandlers.UPDATE ?? []).length).toBeGreaterThan(0);
-    expect((channelHandlers.DELETE ?? []).length).toBeGreaterThan(0);
+    const events = realtime.listeners.filter((l) => l.table === "creatives").map((l) => l.event);
+    expect(events).toEqual(expect.arrayContaining(["INSERT", "UPDATE", "DELETE"]));
   });
 
-  it("removes the channel on unmount", () => {
+  it("registers the relay (which owns its own teardown)", () => {
     const { unmount } = render(
       <VariantsGrid briefId="b1" initialCreatives={[]} initialSignedUrls={{}} selectedId={null} />,
     );
-    unmount();
-    expect(removeChannelSpy).toHaveBeenCalled();
+    expect(realtime.spy).toHaveBeenCalled();
+    expect(() => unmount()).not.toThrow();
   });
 
   it("INSERT event appends a new creative + fetches signed URL", async () => {
@@ -220,12 +187,12 @@ describe("VariantsGrid", () => {
       <VariantsGrid briefId="b1" initialCreatives={[]} initialSignedUrls={{}} selectedId={null} />,
     );
     await act(async () => {
-      channelHandlers.INSERT?.[0]?.({
+      realtime.emit("creatives", "INSERT", {
         new: makeCreative({ id: "c-new", concept: "Streamed in" }),
       });
     });
     expect(screen.getByText("Streamed in")).toBeInTheDocument();
-    expect(createSignedUrl).toHaveBeenCalled();
+    expect(signStoragePath).toHaveBeenCalled();
   });
 
   it("INSERT dedupes by id", async () => {
@@ -239,7 +206,7 @@ describe("VariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.INSERT?.[0]?.({ new: existing });
+      realtime.emit("creatives", "INSERT", { new: existing });
     });
     expect(screen.getAllByText("Duped").length).toBe(1);
   });
@@ -255,7 +222,7 @@ describe("VariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.UPDATE?.[0]?.({ new: { ...c, concept: "After" } });
+      realtime.emit("creatives", "UPDATE", { new: { ...c, concept: "After" } });
     });
     expect(screen.getByText("After")).toBeInTheDocument();
   });
@@ -272,7 +239,7 @@ describe("VariantsGrid", () => {
     );
     expect(screen.getByText("Gone")).toBeInTheDocument();
     await act(async () => {
-      channelHandlers.DELETE?.[0]?.({ old: { id: "c1" } });
+      realtime.emit("creatives", "DELETE", { old: { id: "c1" } });
     });
     expect(screen.queryByText("Gone")).not.toBeInTheDocument();
   });
@@ -283,7 +250,7 @@ describe("VariantsGrid", () => {
       <VariantsGrid briefId="b1" initialCreatives={[c]} initialSignedUrls={{}} selectedId={null} />,
     );
     await act(async () => {
-      channelHandlers.DELETE?.[0]?.({ old: {} });
+      realtime.emit("creatives", "DELETE", { old: {} });
     });
     expect(screen.getByText("Stays")).toBeInTheDocument();
   });

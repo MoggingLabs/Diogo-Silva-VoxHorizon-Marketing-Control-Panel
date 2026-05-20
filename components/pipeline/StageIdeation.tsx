@@ -16,7 +16,12 @@ import {
 } from "@/lib/video-creatives";
 import type { Creative } from "@/lib/creatives";
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
+import {
+  fetchCreativesByBrief,
+  fetchVideoCreativesByBrief,
+  signStoragePath,
+} from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
 const IMAGE_BUCKET = "creatives";
@@ -225,17 +230,16 @@ function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProp
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const pendingSignedUrlsRef = useRef(new Set<string>());
+  const signedUrlsRef = useRef(signedUrls);
+  signedUrlsRef.current = signedUrls;
 
   const fetchSignedUrl = useCallback(async (creativeId: string, filePath: string) => {
     if (pendingSignedUrlsRef.current.has(creativeId)) return;
     pendingSignedUrlsRef.current.add(creativeId);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase.storage
-        .from(IMAGE_BUCKET)
-        .createSignedUrl(filePath, IMAGE_SIGNED_URL_TTL_S);
-      if (!error && data?.signedUrl) {
-        setSignedUrls((prev) => ({ ...prev, [creativeId]: data.signedUrl }));
+      const signedUrl = await signStoragePath(IMAGE_BUCKET, filePath, IMAGE_SIGNED_URL_TTL_S);
+      if (signedUrl) {
+        setSignedUrls((prev) => ({ ...prev, [creativeId]: signedUrl }));
       }
     } catch {
       // Fail closed: leave the placeholder tile in place.
@@ -256,26 +260,14 @@ function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProp
     let cancelled = false;
     setLoading(true);
     setFetchError(null);
-    const supabase = createClient();
     void (async () => {
       try {
-        const { data, error } = await supabase
-          .from("creatives")
-          .select("*")
-          .eq("brief_id", briefId)
-          .order("created_at", { ascending: true });
+        const data = await fetchCreativesByBrief<Creative>(briefId);
         if (cancelled) return;
-        if (error) {
-          setFetchError(error.message);
-          setLoading(false);
-          return;
-        }
-        if (data) {
-          setCreatives(data);
-          for (const c of data) {
-            if (c.file_path_supabase) {
-              void fetchSignedUrl(c.id, c.file_path_supabase);
-            }
+        setCreatives(data);
+        for (const c of data) {
+          if (c.file_path_supabase) {
+            void fetchSignedUrl(c.id, c.file_path_supabase);
           }
         }
       } catch (e) {
@@ -290,80 +282,72 @@ function ImageTrackColumn({ briefId, picks, onTogglePick }: ImageTrackColumnProp
     };
   }, [briefId, fetchSignedUrl]);
 
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    if (!briefId) return;
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`ideation-creatives:${briefId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as Creative;
-          queue.queue(`insert:${next.id}`, () => {
-            setCreatives((prev) => {
-              if (prev.some((c) => c.id === next.id)) return prev;
-              return [...prev, next];
-            });
-            if (next.file_path_supabase) {
-              void fetchSignedUrl(next.id, next.file_path_supabase);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as Creative;
-          queue.queue(`update:${next.id}`, () => {
-            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-            if (next.file_path_supabase && !signedUrls[next.id]) {
-              void fetchSignedUrl(next.id, next.file_path_supabase);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const old = payload.old as Partial<Creative>;
-          if (!old?.id) return;
-          queue.queue(`delete:${old.id}`, () => {
-            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-            setSignedUrls((prev) => {
-              if (!(old.id! in prev)) return prev;
-              const next = { ...prev };
-              delete next[old.id!];
-              return next;
-            });
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [briefId, fetchSignedUrl, signedUrls]);
+  const imageFilter = briefId ? `brief_id=eq.${briefId}` : "";
+  useRealtimeStream(
+    useMemo(
+      () =>
+        briefId
+          ? [
+              {
+                table: "creatives",
+                event: "INSERT" as const,
+                filter: imageFilter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as Creative;
+                  queueRef.current.queue(`insert:${next.id}`, () => {
+                    setCreatives((prev) => {
+                      if (prev.some((c) => c.id === next.id)) return prev;
+                      return [...prev, next];
+                    });
+                    if (next.file_path_supabase) {
+                      void fetchSignedUrl(next.id, next.file_path_supabase);
+                    }
+                  });
+                },
+              },
+              {
+                table: "creatives",
+                event: "UPDATE" as const,
+                filter: imageFilter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as Creative;
+                  queueRef.current.queue(`update:${next.id}`, () => {
+                    setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+                    if (next.file_path_supabase && !signedUrlsRef.current[next.id]) {
+                      void fetchSignedUrl(next.id, next.file_path_supabase);
+                    }
+                  });
+                },
+              },
+              {
+                table: "creatives",
+                event: "DELETE" as const,
+                filter: imageFilter,
+                callback: (payload) => {
+                  const old = payload.old as Partial<Creative>;
+                  if (!old?.id) return;
+                  queueRef.current.queue(`delete:${old.id}`, () => {
+                    setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+                    setSignedUrls((prev) => {
+                      if (!(old.id! in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[old.id!];
+                      return next;
+                    });
+                  });
+                },
+              },
+            ]
+          : [],
+      [briefId, imageFilter, fetchSignedUrl],
+    ),
+  );
 
   const sorted = useMemo(
     () =>
@@ -471,17 +455,20 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const pendingScriptsRef = useRef(new Set<string>());
+  const scriptExcerptsRef = useRef(scriptExcerpts);
+  scriptExcerptsRef.current = scriptExcerpts;
 
   const fetchScriptExcerpt = useCallback(async (creativeId: string, scriptPath: string) => {
     if (pendingScriptsRef.current.has(creativeId)) return;
     pendingScriptsRef.current.add(creativeId);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase.storage
-        .from(VIDEO_CREATIVES_BUCKET)
-        .createSignedUrl(scriptPath, VIDEO_SIGNED_URL_TTL_S);
-      if (!error && data?.signedUrl) {
-        const res = await fetch(data.signedUrl, { cache: "no-store" });
+      const signedUrl = await signStoragePath(
+        VIDEO_CREATIVES_BUCKET,
+        scriptPath,
+        VIDEO_SIGNED_URL_TTL_S,
+      );
+      if (signedUrl) {
+        const res = await fetch(signedUrl, { cache: "no-store" });
         if (res.ok) {
           const text = await res.text();
           // Trim to ~240 chars for the card preview; the side panel /
@@ -505,26 +492,14 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
     let cancelled = false;
     setLoading(true);
     setFetchError(null);
-    const supabase = createClient();
     void (async () => {
       try {
-        const { data, error } = await supabase
-          .from("video_creatives")
-          .select("*")
-          .eq("brief_id", briefId)
-          .order("created_at", { ascending: true });
+        const data = await fetchVideoCreativesByBrief<VideoCreative>(briefId);
         if (cancelled) return;
-        if (error) {
-          setFetchError(error.message);
-          setLoading(false);
-          return;
-        }
-        if (data) {
-          setCreatives(data);
-          for (const c of data) {
-            if (c.script_path) {
-              void fetchScriptExcerpt(c.id, c.script_path);
-            }
+        setCreatives(data);
+        for (const c of data) {
+          if (c.script_path) {
+            void fetchScriptExcerpt(c.id, c.script_path);
           }
         }
       } catch (e) {
@@ -539,80 +514,72 @@ function VideoTrackColumn({ briefId, picks, onTogglePick }: VideoTrackColumnProp
     };
   }, [briefId, fetchScriptExcerpt]);
 
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    if (!briefId) return;
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`ideation-video-creatives:${briefId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoCreative;
-          queue.queue(`insert:${next.id}`, () => {
-            setCreatives((prev) => {
-              if (prev.some((c) => c.id === next.id)) return prev;
-              return [...prev, next];
-            });
-            if (next.script_path) {
-              void fetchScriptExcerpt(next.id, next.script_path);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoCreative;
-          queue.queue(`update:${next.id}`, () => {
-            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-            if (next.script_path && !scriptExcerpts[next.id]) {
-              void fetchScriptExcerpt(next.id, next.script_path);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const old = payload.old as Partial<VideoCreative>;
-          if (!old?.id) return;
-          queue.queue(`delete:${old.id}`, () => {
-            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-            setScriptExcerpts((prev) => {
-              if (!(old.id! in prev)) return prev;
-              const next = { ...prev };
-              delete next[old.id!];
-              return next;
-            });
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [briefId, fetchScriptExcerpt, scriptExcerpts]);
+  const videoFilter = briefId ? `brief_id=eq.${briefId}` : "";
+  useRealtimeStream(
+    useMemo(
+      () =>
+        briefId
+          ? [
+              {
+                table: "video_creatives",
+                event: "INSERT" as const,
+                filter: videoFilter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as VideoCreative;
+                  queueRef.current.queue(`insert:${next.id}`, () => {
+                    setCreatives((prev) => {
+                      if (prev.some((c) => c.id === next.id)) return prev;
+                      return [...prev, next];
+                    });
+                    if (next.script_path) {
+                      void fetchScriptExcerpt(next.id, next.script_path);
+                    }
+                  });
+                },
+              },
+              {
+                table: "video_creatives",
+                event: "UPDATE" as const,
+                filter: videoFilter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as VideoCreative;
+                  queueRef.current.queue(`update:${next.id}`, () => {
+                    setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+                    if (next.script_path && !scriptExcerptsRef.current[next.id]) {
+                      void fetchScriptExcerpt(next.id, next.script_path);
+                    }
+                  });
+                },
+              },
+              {
+                table: "video_creatives",
+                event: "DELETE" as const,
+                filter: videoFilter,
+                callback: (payload) => {
+                  const old = payload.old as Partial<VideoCreative>;
+                  if (!old?.id) return;
+                  queueRef.current.queue(`delete:${old.id}`, () => {
+                    setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+                    setScriptExcerpts((prev) => {
+                      if (!(old.id! in prev)) return prev;
+                      const next = { ...prev };
+                      delete next[old.id!];
+                      return next;
+                    });
+                  });
+                },
+              },
+            ]
+          : [],
+      [briefId, videoFilter, fetchScriptExcerpt],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

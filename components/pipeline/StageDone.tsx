@@ -15,7 +15,11 @@ import {
 } from "@/lib/video-creatives";
 import { activeTracks } from "@/lib/pipeline/tracks";
 import type { Pipeline } from "@/lib/pipeline/types";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import {
+  fetchCreativesByBrief,
+  fetchVideoCreativesByBrief,
+  signStoragePaths,
+} from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
 const IMAGE_SIGNED_URL_TTL_S = 3600;
@@ -182,46 +186,41 @@ function ImageGallerySection({ briefId }: { briefId: string | null }) {
       return;
     }
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
       try {
         // Only the v1.x finals. The ideation stage stamps `v0.ideation` on
-        // its cheap drafts; production stage writes `v1.0`, `v1.1`, …  The
-        // `not.eq` keeps things readable; if we ever introduce another
-        // stage prefix, broaden via a `like 'v1.%'` filter.
-        const { data, error: fetchErr } = await supabase
-          .from("creatives")
-          .select("id, concept, ratio, version, file_path_supabase")
-          .eq("brief_id", briefId)
-          .neq("version", "v0.ideation");
+        // its cheap drafts; production stage writes `v1.0`, `v1.1`, …  We
+        // fetch the brief's creatives via the service-role API and drop the
+        // ideation drafts client-side.
+        const all = await fetchCreativesByBrief<ImageFinalRow>(briefId);
         if (cancelled) return;
-        if (fetchErr) {
-          setError(fetchErr.message);
-          setBuckets([]);
-          return;
-        }
-        const rows = (data ?? []) as ImageFinalRow[];
+        const rows = all.filter((r) => r.version !== "v0.ideation");
         const grouped = groupByConcept(rows);
         setBuckets(grouped);
 
-        // Resolve signed URLs for every row that has a stored file. Done in
-        // parallel; failures leave the row's URL as `null` so the
-        // placeholder tile renders.
+        // Resolve signed URLs for every row that has a stored file in one
+        // batched server round-trip; failures leave the row's URL as `null`.
         const flatRows = grouped.flatMap((b) => b.rows);
-        await Promise.all(
-          flatRows.map(async (row) => {
-            if (!row.file_path_supabase) return;
-            const { data: signed, error: signedErr } = await supabase.storage
-              .from(IMAGE_CREATIVES_BUCKET)
-              .createSignedUrl(row.file_path_supabase, IMAGE_SIGNED_URL_TTL_S);
-            if (cancelled) return;
-            if (signedErr || !signed?.signedUrl) {
-              setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
-              return;
+        const paths = flatRows
+          .map((r) => r.file_path_supabase)
+          .filter((p): p is string => typeof p === "string" && p.length > 0);
+        if (paths.length > 0) {
+          const urls = await signStoragePaths(
+            IMAGE_CREATIVES_BUCKET,
+            paths,
+            IMAGE_SIGNED_URL_TTL_S,
+          );
+          if (cancelled) return;
+          setSignedUrls((prev) => {
+            const next = { ...prev };
+            for (const row of flatRows) {
+              if (row.file_path_supabase) {
+                next[row.id] = urls[row.file_path_supabase] ?? null;
+              }
             }
-            setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
-          }),
-        );
+            return next;
+          });
+        }
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));
@@ -342,47 +341,45 @@ function VideoGallerySection({ briefId }: { briefId: string | null }) {
       return;
     }
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
       try {
         // Compose-complete + caption-complete creatives are the ones we
-        // show. The state machine guarantees that a row reaches
-        // `captioned` only after `composed`, and `approved` only after
-        // `captioned` — including all three keeps the gallery resilient
-        // to the operator manually re-approving a creative.
-        const { data, error: fetchErr } = await supabase
-          .from("video_creatives")
-          .select("id, status, composed_path, captioned_path, duration_actual_s")
-          .eq("brief_id", briefId)
-          .in("status", ["composed", "captioned", "approved"]);
+        // show. The state machine guarantees that a row reaches `captioned`
+        // only after `composed`, and `approved` only after `captioned` —
+        // including all three keeps the gallery resilient to the operator
+        // manually re-approving a creative. We fetch the brief's video
+        // creatives via the service-role API and filter status client-side.
+        const all = await fetchVideoCreativesByBrief<VideoFinalRow>(briefId);
         if (cancelled) return;
-        if (fetchErr) {
-          setError(fetchErr.message);
-          setRows([]);
-          return;
-        }
-        const fetched = (data ?? []) as VideoFinalRow[];
+        const fetched = all.filter(
+          (r) => r.status === "composed" || r.status === "captioned" || r.status === "approved",
+        );
         setRows(fetched);
 
-        await Promise.all(
-          fetched.map(async (row) => {
-            // Prefer the captioned MP4 when present — the captioning step is
-            // the final transform. Falling back to composed gives operators
-            // a preview even before captioning finishes (shouldn't normally
-            // happen in `done`, but defensive doesn't hurt).
-            const path = row.captioned_path ?? row.composed_path;
-            if (!path) return;
-            const { data: signed, error: signedErr } = await supabase.storage
-              .from(VIDEO_CREATIVES_BUCKET)
-              .createSignedUrl(path, VIDEO_SIGNED_URL_TTL_S);
-            if (cancelled) return;
-            if (signedErr || !signed?.signedUrl) {
-              setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
-              return;
+        // Prefer the captioned MP4 when present — the captioning step is the
+        // final transform. Falling back to composed gives operators a preview
+        // even before captioning finishes. One batched server round-trip.
+        const pathByRow = new Map<string, string>();
+        for (const row of fetched) {
+          const path = row.captioned_path ?? row.composed_path;
+          if (path) pathByRow.set(row.id, path);
+        }
+        const paths = Array.from(new Set(pathByRow.values()));
+        if (paths.length > 0) {
+          const urls = await signStoragePaths(
+            VIDEO_CREATIVES_BUCKET,
+            paths,
+            VIDEO_SIGNED_URL_TTL_S,
+          );
+          if (cancelled) return;
+          setSignedUrls((prev) => {
+            const next = { ...prev };
+            for (const [rowId, path] of pathByRow) {
+              next[rowId] = urls[path] ?? null;
             }
-            setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
-          }),
-        );
+            return next;
+          });
+        }
       } catch (e) {
         if (cancelled) return;
         setError(e instanceof Error ? e.message : String(e));

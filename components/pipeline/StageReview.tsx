@@ -14,7 +14,11 @@ import { activeTracks, type PipelineTrack } from "@/lib/pipeline/tracks";
 import type { Pipeline } from "@/lib/pipeline/types";
 import { estimatePipelineCost } from "@/lib/cost-estimator";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import {
+  fetchCreativesByIds,
+  fetchVideoCreativesByIdsWithOutline,
+  signStoragePaths,
+} from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
 type DecisionT = "approved" | "approved_with_changes" | "rejected";
@@ -193,40 +197,39 @@ function ImagePicksGrid({ pickIds, emptyMessage }: { pickIds: string[]; emptyMes
       return;
     }
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
-      const { data, error: fetchErr } = await supabase
-        .from("creatives")
-        .select("id, concept, ratio, file_path_supabase")
-        .in("id", pickIds);
-      if (cancelled) return;
-      if (fetchErr) {
-        setError(fetchErr.message);
-        setRows([]);
-        return;
-      }
-      const fetched = (data ?? []) as ImagePickRow[];
-      // Preserve the operator's pick order from `pipeline.picks.image[]`.
-      const byId = new Map(fetched.map((r) => [r.id, r]));
-      const ordered = pickIds.map((id) => byId.get(id)).filter((r): r is ImagePickRow => !!r);
-      setRows(ordered);
+      try {
+        const fetched = await fetchCreativesByIds<ImagePickRow>(pickIds);
+        if (cancelled) return;
+        // Preserve the operator's pick order from `pipeline.picks.image[]`.
+        const byId = new Map(fetched.map((r) => [r.id, r]));
+        const ordered = pickIds.map((id) => byId.get(id)).filter((r): r is ImagePickRow => !!r);
+        setRows(ordered);
 
-      // Resolve thumbnails for any row that has a stored file. Failures
-      // leave the entry as `null` so the placeholder tile renders.
-      await Promise.all(
-        ordered.map(async (row) => {
-          if (!row.file_path_supabase) return;
-          const { data: signed, error: signedErr } = await supabase.storage
-            .from(CREATIVES_BUCKET)
-            .createSignedUrl(row.file_path_supabase, 3600);
+        // Resolve thumbnails for any row that has a stored file. One batched
+        // server round-trip; failures leave the entry as `null` so the
+        // placeholder tile renders.
+        const paths = ordered
+          .map((r) => r.file_path_supabase)
+          .filter((p): p is string => typeof p === "string" && p.length > 0);
+        if (paths.length > 0) {
+          const urls = await signStoragePaths(CREATIVES_BUCKET, paths, 3600);
           if (cancelled) return;
-          if (signedErr || !signed?.signedUrl) {
-            setSignedUrls((prev) => ({ ...prev, [row.id]: null }));
-            return;
-          }
-          setSignedUrls((prev) => ({ ...prev, [row.id]: signed.signedUrl }));
-        }),
-      );
+          setSignedUrls((prev) => {
+            const next = { ...prev };
+            for (const row of ordered) {
+              if (row.file_path_supabase) {
+                next[row.id] = urls[row.file_path_supabase] ?? null;
+              }
+            }
+            return next;
+          });
+        }
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed to load image picks");
+        setRows([]);
+      }
     })();
     return () => {
       cancelled = true;
@@ -299,61 +302,43 @@ function VideoPicksGrid({ pickIds, emptyMessage }: { pickIds: string[]; emptyMes
       return;
     }
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
-      // Pull the picked video creatives plus their associated brief's
-      // `script_outline` so we can render the hook excerpt. Done in two
-      // hops so we can preserve the operator's pick order.
-      const { data: creatives, error: fetchErr } = await supabase
-        .from("video_creatives")
-        .select("id, status, duration_actual_s, broll_clips, brief_id")
-        .in("id", pickIds);
-      if (cancelled) return;
-      if (fetchErr) {
-        setError(fetchErr.message);
-        setRows([]);
-        return;
-      }
-
-      const briefIds = Array.from(
-        new Set(
-          (creatives ?? [])
-            .map((c) => c.brief_id)
-            .filter((id): id is string => typeof id === "string"),
-        ),
-      );
-      let outlinesByBrief = new Map<string, unknown>();
-      if (briefIds.length > 0) {
-        const { data: briefs } = await supabase
-          .from("video_briefs")
-          .select("id, script_outline")
-          .in("id", briefIds);
+      try {
+        // Pull the picked video creatives plus their associated brief's
+        // `script_outline` (via the service-role API) so we can render the
+        // hook excerpt while preserving the operator's pick order.
+        const { creatives, outlines } = await fetchVideoCreativesByIdsWithOutline<{
+          id: string;
+          status?: string | null;
+          duration_actual_s?: number | null;
+          broll_clips?: unknown;
+          brief_id?: string;
+        }>(pickIds);
         if (cancelled) return;
-        outlinesByBrief = new Map(
-          (briefs ?? []).map((b) => [b.id, (b as { script_outline?: unknown }).script_outline]),
-        );
-      }
 
-      const byId = new Map<string, VideoPickRow>(
-        (creatives ?? []).map((c) => {
-          const row: VideoPickRow = {
-            id: c.id,
-            status: typeof c.status === "string" ? c.status : null,
-            duration_actual_s:
-              (c as { duration_actual_s?: number | null }).duration_actual_s ?? null,
-            broll_clips: (c as { broll_clips?: unknown }).broll_clips ?? null,
-            script_outline:
-              outlinesByBrief.get((c as { brief_id?: string }).brief_id ?? "") ?? null,
-          };
-          return [c.id, row];
-        }),
-      );
-      const ordered: VideoPickRow[] = [];
-      for (const id of pickIds) {
-        const row = byId.get(id);
-        if (row) ordered.push(row);
+        const byId = new Map<string, VideoPickRow>(
+          creatives.map((c) => {
+            const row: VideoPickRow = {
+              id: c.id,
+              status: typeof c.status === "string" ? c.status : null,
+              duration_actual_s: c.duration_actual_s ?? null,
+              broll_clips: c.broll_clips ?? null,
+              script_outline: outlines[c.brief_id ?? ""] ?? null,
+            };
+            return [c.id, row];
+          }),
+        );
+        const ordered: VideoPickRow[] = [];
+        for (const id of pickIds) {
+          const row = byId.get(id);
+          if (row) ordered.push(row);
+        }
+        setRows(ordered);
+      } catch (e) {
+        if (cancelled) return;
+        setError(e instanceof Error ? e.message : "Failed to load video picks");
+        setRows([]);
       }
-      setRows(ordered);
     })();
     return () => {
       cancelled = true;

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { ClipboardList, Film } from "lucide-react";
 
@@ -15,7 +15,7 @@ import {
   type FunnelStage,
 } from "@/lib/dashboard-types";
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 import { KanbanCard } from "./KanbanCard";
 import { KanbanColumn } from "./KanbanColumn";
@@ -64,27 +64,34 @@ export function KanbanBoard({
 }: KanbanBoardProps) {
   const router = useRouter();
 
+  // Debounce realtime invalidations into a single 200ms batch. The Kanban
+  // server component is expensive (it runs the dashboard aggregation query),
+  // so a burst of brief writes from the worker shouldn't cascade into
+  // multiple `router.refresh()` calls. The queue is owned by the component
+  // and disposed on unmount.
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    // Debounce realtime invalidations into a single 200ms batch.
-    // The Kanban server component is expensive (it runs the dashboard
-    // aggregation query), so a burst of brief writes from the worker
-    // shouldn't cascade into multiple `router.refresh()` calls.
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel("dashboard-kanban")
-      .on("postgres_changes", { event: "*", schema: "public", table: "briefs" }, () =>
-        queue.queue("briefs", () => router.refresh()),
-      )
-      .on("postgres_changes", { event: "*", schema: "public", table: "video_briefs" }, () =>
-        queue.queue("video_briefs", () => router.refresh()),
-      )
-      .subscribe();
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [router]);
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
+
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "briefs",
+          event: "*" as const,
+          callback: () => queueRef.current.queue("briefs", () => router.refresh()),
+        },
+        {
+          table: "video_briefs",
+          event: "*" as const,
+          callback: () => queueRef.current.queue("video_briefs", () => router.refresh()),
+        },
+      ],
+      [router],
+    ),
+  );
 
   const renderImageTrack = format === "image" || format === "both";
   const renderVideoTrack = format === "video" || format === "both";

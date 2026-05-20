@@ -11,6 +11,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { jsonResponse, spyOnFetch } from "@/tests/unit/helpers/worker-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { Pipeline } from "@/lib/pipeline/types";
 
 const routerRefresh = vi.fn();
@@ -31,12 +32,14 @@ vi.mock("@/lib/realtime-queue", () => ({
   }),
 }));
 
-const fakeChannels: Array<{
-  topic?: string;
-  handlers: Record<string, Array<(p: { new?: unknown; old?: unknown }) => void>>;
-}> = [];
-const removeChannelSpy = vi.fn();
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
+}));
 
+// Initial fetches + signing go through the service-role API routes
+// (client-data helpers). Drive them per-test. `throws` simulates a rejection.
 const supabaseFromMock: {
   creatives: { data: unknown[]; error: { message: string } | null; throws?: Error };
   video_creatives: { data: unknown[]; error: { message: string } | null; throws?: Error };
@@ -45,53 +48,18 @@ const supabaseFromMock: {
   video_creatives: { data: [], error: null as { message: string } | null },
 };
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => ({
-    channel: (topic: string) => {
-      const ch: {
-        topic: string;
-        handlers: Record<string, Array<(p: { new?: unknown; old?: unknown }) => void>>;
-        on: (
-          _evt: string,
-          spec: { event: string; table: string },
-          cb: (p: { new?: unknown; old?: unknown }) => void,
-        ) => unknown;
-        subscribe: () => unknown;
-      } = {
-        topic,
-        handlers: { INSERT: [], UPDATE: [], DELETE: [] },
-        on(_evt, spec, cb) {
-          if (spec.event in this.handlers) this.handlers[spec.event]!.push(cb);
-          return this;
-        },
-        subscribe() {
-          return this;
-        },
-      };
-      fakeChannels.push(ch);
-      return ch;
-    },
-    removeChannel: removeChannelSpy,
-    from: (table: "creatives" | "video_creatives") => ({
-      select: () => ({
-        eq: () => ({
-          order: () => {
-            const cfg = supabaseFromMock[table];
-            if (cfg.throws) return Promise.reject(cfg.throws);
-            return Promise.resolve({ data: cfg.data, error: cfg.error });
-          },
-        }),
-      }),
-    }),
-    storage: {
-      from: () => ({
-        createSignedUrl: vi.fn(async () => ({
-          data: { signedUrl: "https://x.example/x" },
-          error: null,
-        })),
-      }),
-    },
-  }),
+function resolveFetch(table: "creatives" | "video_creatives"): Promise<unknown[]> {
+  const cfg = supabaseFromMock[table];
+  if (cfg.throws) return Promise.reject(cfg.throws);
+  // The API helpers throw on error; mirror that so the component's catch runs.
+  if (cfg.error) return Promise.reject(new Error(cfg.error.message));
+  return Promise.resolve(cfg.data);
+}
+
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchCreativesByBrief: () => resolveFetch("creatives"),
+  fetchVideoCreativesByBrief: () => resolveFetch("video_creatives"),
+  signStoragePath: vi.fn(async () => "https://x.example/x"),
 }));
 
 import { StageIdeation } from "./StageIdeation";
@@ -120,13 +88,25 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 beforeEach(() => {
   routerRefresh.mockReset();
   updatePicks.mockReset();
-  removeChannelSpy.mockReset();
-  fakeChannels.length = 0;
+  realtime.reset();
   supabaseFromMock.creatives = { data: [], error: null };
   supabaseFromMock.video_creatives = { data: [], error: null };
   delete supabaseFromMock.creatives.throws;
   delete supabaseFromMock.video_creatives.throws;
 });
+
+/**
+ * Emit a realtime change into the registered listeners. Each ideation column
+ * registers listeners on its own table (`creatives` or `video_creatives`),
+ * so single-track tests dispatch to the right column automatically.
+ */
+function emitChange(
+  table: "creatives" | "video_creatives",
+  eventType: "INSERT" | "UPDATE" | "DELETE",
+  payload: { new?: unknown; old?: unknown },
+) {
+  realtime.emit(table, eventType, payload as { new?: unknown; old?: unknown });
+}
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -328,10 +308,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: { id: "v1" } });
     });
@@ -369,10 +347,8 @@ describe("StageIdeation", () => {
     };
     render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
     await screen.findByText("Already there");
-    const insertHandler = (fakeChannels[0]?.handlers["INSERT"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const insertHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("creatives", "INSERT", p);
     await act(async () => {
       insertHandler({
         new: {
@@ -420,10 +396,8 @@ describe("StageIdeation", () => {
     };
     render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
     await screen.findByText("Old");
-    const updateHandler = (fakeChannels[0]?.handlers["UPDATE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const updateHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("creatives", "UPDATE", p);
     await act(async () => {
       updateHandler({
         new: {
@@ -471,10 +445,8 @@ describe("StageIdeation", () => {
     };
     render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
     expect(await screen.findByText("Will be removed")).toBeInTheDocument();
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: { id: "c1" } });
     });
@@ -483,10 +455,8 @@ describe("StageIdeation", () => {
 
   it("realtime DELETE without id is a no-op", async () => {
     render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: {} });
     });
@@ -494,10 +464,10 @@ describe("StageIdeation", () => {
     expect(screen.getByText(/Image concepts/)).toBeInTheDocument();
   });
 
-  it("removes channels on unmount", () => {
+  it("registers the realtime relay (which owns its own teardown)", () => {
     const { unmount } = render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
-    unmount();
-    expect(removeChannelSpy).toHaveBeenCalled();
+    expect(realtime.spy).toHaveBeenCalled();
+    expect(() => unmount()).not.toThrow();
   });
 
   it("renders the video empty state with sketch animation", async () => {
@@ -680,10 +650,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const insertHandler = (fakeChannels[0]?.handlers["INSERT"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const insertHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "INSERT", p);
     await act(async () => {
       insertHandler({
         new: {
@@ -733,10 +701,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const updateHandler = (fakeChannels[0]?.handlers["UPDATE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const updateHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "UPDATE", p);
     await act(async () => {
       updateHandler({
         new: {
@@ -786,10 +752,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const insertHandler = (fakeChannels[0]?.handlers["INSERT"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const insertHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "INSERT", p);
     await act(async () => {
       insertHandler({
         new: {
@@ -867,10 +831,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: { id: "v1" } });
     });
@@ -903,10 +865,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: {} });
     });
@@ -940,10 +900,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const insertHandler = (fakeChannels[0]?.handlers["INSERT"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const insertHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "INSERT", p);
     await act(async () => {
       insertHandler({
         new: {
@@ -994,10 +952,8 @@ describe("StageIdeation", () => {
       <StageIdeation pipeline={makePipeline({ format_choice: "video" })} videoBriefId="bv1" />,
     );
     await screen.findByText(/Concept v1/);
-    const deleteHandler = (fakeChannels[0]?.handlers["DELETE"]?.[0] ?? (() => {})) as (p: {
-      new?: unknown;
-      old?: unknown;
-    }) => void;
+    const deleteHandler = (p: { new?: unknown; old?: unknown }) =>
+      emitChange("video_creatives", "DELETE", p);
     await act(async () => {
       deleteHandler({ old: { id: "v1" } });
     });
