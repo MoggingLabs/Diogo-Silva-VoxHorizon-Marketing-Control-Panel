@@ -37,6 +37,8 @@ ekko-skills/
       test_helper.py
   dashboard-chat-publish/    ← publish chat messages → Supabase (HI-10, J)
   dashboard-task-result/     ← publish Hermes task results → Supabase (HI-11, K)
+  image-ad-authoring/        ← author briefs + concepts + photoreal prompts
+  pipeline-operator/         ← operator playbook + worker-tool client (render is spend-gated)
 ```
 
 Each skill's `README.md` is the canonical install + verify procedure for

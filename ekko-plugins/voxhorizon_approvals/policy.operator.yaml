@@ -1,0 +1,32 @@
+# Operator policy profile for voxhorizon-approvals.
+#
+# This is the policy.yaml the DEDICATED OPERATOR agent (hermes-agent-operator)
+# runs with. Deployment drops this file in as the operator container's
+# `policy.yaml`; it does NOT replace Ekko's own policy.yaml (Ekko keeps the
+# shipped empty overlay, so Ekko's behavior is unchanged).
+#
+# It maps one-for-one to the pipeline-operator skill's worker tools
+# (ekko-skills/pipeline-operator/helper.py). The approval plugin gates by
+# tool name, so these keys reference the helper's exact entrypoint names.
+#
+# Merge semantics (see policy_overlay.py / the plugin README): in-code
+# defaults always win over a softening override; gating wins over allowing.
+
+# pipeline_operator_render is THE spend tool — every call renders paid Kie
+# images. Gating it here makes the manager approve the spend in the dashboard
+# (long-poll) before the worker runs. This is the operator's spend gate.
+extra_requires_approval:
+  - pipeline_operator_render
+
+# The read tool is a pure GET of pipeline state (no spend, no side effects),
+# and the brief tool is a free Supabase write the manager reviews via the
+# dashboard STAGE gate (not the spend gate). Allowlisting both keeps the
+# operator's read-state-then-author loop running without pestering the manager
+# for non-spend actions.
+allowlist:
+  - pipeline_operator_read
+  - pipeline_operator_brief
+
+# No hard blocks for the operator profile. (A blocklisted tool is rejected
+# outright with no operator prompt — reserved for known-bad tools.)
+blocklist: []
