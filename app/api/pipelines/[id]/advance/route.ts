@@ -314,14 +314,16 @@ async function advanceFromConfiguration(
     console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
   }
 
-  // 7. Best-effort kick to the worker's hermes-kanban bridge: create an
-  //    ideation task assigned to `ekko`. Failures are swallowed so a
-  //    worker outage doesn't block the advance — the row + event are
-  //    the primary artifacts.
-  void fireWorkerIdeation(pipeline.id, {
-    image_brief_id: imageBriefId,
-    video_brief_id: videoBriefId,
-  }).catch((e) => {
+  // 7. Best-effort kick to the worker's image-generation pipeline:
+  //    POST /work/pipeline/ideation kicks off the deterministic
+  //    concept-preview producer (restored in feat/restore-image-generation —
+  //    Ekko's image-ad-prompting skill is an interactive prompt-writer, not
+  //    an automated dashboard executor). The worker emits the
+  //    task_queued/running/done/error pipeline_events the StageGeneration UI
+  //    + the Supabase auto-advance trigger read. Failures are swallowed so a
+  //    worker outage doesn't block the advance — the row + event are the
+  //    primary artifacts.
+  void fireWorkerIdeation(pipeline.id).catch((e) => {
     console.warn(
       `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
     );
@@ -437,43 +439,33 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
 }
 
 /**
- * Fire-and-forget POST to the worker's hermes-kanban bridge to create
- * an ideation task assigned to `ekko`. Wrapped in its own function so
- * the call site can `void fireWorkerIdeation(...).catch(...)` cleanly
- * without leaking the promise chain into the response path.
+ * Fire-and-forget POST to the worker's image-generation ideation endpoint
+ * (`/work/pipeline/ideation`). Wrapped in its own function so the call site
+ * can `void fireWorkerIdeation(...).catch(...)` cleanly without leaking the
+ * promise chain into the response path.
  *
- * Skip when WORKER_URL or WORKER_SHARED_SECRET are unset — the API
- * route still succeeds and unit tests don't need to stub the bridge.
- * 404 from the bridge is treated as "worker not configured" and
- * swallowed silently; anything else is logged.
+ * The worker reads everything it needs (briefs, picks, format) from the
+ * pipeline row keyed by `pipeline_id`, so the body is just the id. Skip when
+ * WORKER_URL or WORKER_SHARED_SECRET are unset — the API route still
+ * succeeds and unit tests don't need to stub the worker. A 404 is treated
+ * as "worker not configured / route not deployed" and swallowed silently;
+ * anything else is logged.
  */
-async function fireWorkerIdeation(
-  pipelineId: string,
-  briefs: { image_brief_id: string | null; video_brief_id: string | null },
-): Promise<void> {
+async function fireWorkerIdeation(pipelineId: string): Promise<void> {
   const base = process.env.WORKER_URL?.replace(/\/$/, "");
   const secret = process.env.WORKER_SHARED_SECRET;
   if (!base || !secret) return;
-  const res = await fetch(`${base}/work/hermes/kanban`, {
+  const res = await fetch(`${base}/work/pipeline/ideation`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      title: `Ideation for pipeline ${pipelineId}`,
-      assignee: "ekko",
-      context: {
-        kind: "ideation",
-        pipeline_id: pipelineId,
-        image_brief_id: briefs.image_brief_id,
-        video_brief_id: briefs.video_brief_id,
-      },
-    }),
+    body: JSON.stringify({ pipeline_id: pipelineId }),
     cache: "no-store",
   });
   if (!res.ok && res.status !== 404) {
     const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/hermes/kanban -> ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`worker /work/pipeline/ideation -> ${res.status}: ${text.slice(0, 200)}`);
   }
 }
