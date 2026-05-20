@@ -19,6 +19,7 @@ from .routes import (
     hermes_kanban,
     hermes_webhook,
     pipeline,
+    pipeline_tools,
     ping,
 )
 
@@ -87,6 +88,15 @@ def create_app() -> FastAPI:
     # config-draft route is also restored for completeness, but the dashboard
     # keeps its brief-draft interview on /work/hermes/chat (Ekko owns chat).
     app.include_router(pipeline.router, tags=["pipeline"])
+
+    # === Wave A operator-tool endpoints ===
+    # The dedicated Hermes "operator" agent drives the image-ad pipeline
+    # above by calling these tool routes: GET state, author the brief,
+    # render operator-authored prompts (the spend tool the approval plugin
+    # gates), and a server-side dispatch the dashboard uses to kick the
+    # operator after a stage-gate action. They EXTEND the pipeline (reuse
+    # its services / event kinds / tables / triggers), never duplicate it.
+    app.include_router(pipeline_tools.router, tags=["pipeline-tools"])
 
     # /work/creative/generate + /work/creative/composite — the per-brief
     # image generation + compositor surface used by the pipeline producers
