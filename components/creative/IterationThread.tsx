@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Edit3, MapPin, MessageSquare, RotateCw, Sparkles } from "lucide-react";
 
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import type { CreativeIteration, IterationAuthorT, IterationKindT } from "@/lib/creatives";
 import { cn } from "@/lib/utils";
 
@@ -105,56 +105,50 @@ export function IterationThread({ creativeId, initialIterations }: IterationThre
     setIterations(initialIterations);
   }, [initialIterations]);
 
+  // Iterations are chat-shaped — operators expect new lines to land instantly.
+  // We still use `createRealtimeQueue` so the structure matches sibling
+  // components, but every event goes through `flushNow` (no debounce) per the
+  // forge "chat events bypass batch" rule. Realtime now flows through the
+  // server-side SSE relay.
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    // Iterations are chat-shaped — operators expect new lines to land
-    // instantly. We still use `createRealtimeQueue` so the structure
-    // matches sibling components, but every event goes through
-    // `flushNow` (no debounce) per the forge "chat events bypass batch"
-    // rule.
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`creative-iterations:${creativeId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "creative_iterations",
-          filter: `creative_id=eq.${creativeId}`,
-        },
-        (payload) => {
-          const next = payload.new as CreativeIteration;
-          queue.flushNow(`insert:${next.id}`, () => {
-            setIterations((prev) => {
-              if (prev.some((it) => it.id === next.id)) return prev;
-              return [...prev, next];
-            });
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "creative_iterations",
-          filter: `creative_id=eq.${creativeId}`,
-        },
-        (payload) => {
-          const next = payload.new as CreativeIteration;
-          queue.flushNow(`update:${next.id}`, () => {
-            setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [creativeId]);
+  const filter = `creative_id=eq.${creativeId}`;
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "creative_iterations",
+          event: "INSERT" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as CreativeIteration;
+            queueRef.current.flushNow(`insert:${next.id}`, () => {
+              setIterations((prev) => {
+                if (prev.some((it) => it.id === next.id)) return prev;
+                return [...prev, next];
+              });
+            });
+          },
+        },
+        {
+          table: "creative_iterations",
+          event: "UPDATE" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as CreativeIteration;
+            queueRef.current.flushNow(`update:${next.id}`, () => {
+              setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+            });
+          },
+        },
+      ],
+      [filter],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

@@ -15,8 +15,8 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import { spyOnFetch, jsonResponse } from "@/tests/unit/helpers/worker-mock";
+import type { ClientOption } from "@/lib/realtime/client-data";
 
 // Radix Select uses ResizeObserver, which jsdom doesn't provide. Polyfill it
 // here so the component can mount cleanly in tests.
@@ -41,31 +41,26 @@ if (!HTMLElement.prototype.scrollIntoView) {
 }
 
 const push = vi.fn();
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ push, refresh: vi.fn(), replace: vi.fn(), back: vi.fn() }),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentSupabase,
+// Clients are fetched via the service-role API route (client-data helper).
+const fetchClients = vi.fn<() => Promise<ClientOption[]>>(async () => []);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchClients: () => fetchClients(),
 }));
 
 import { BriefForm } from "./BriefForm";
 
 beforeEach(() => {
   push.mockReset();
-  currentSupabase = mockSupabaseClient({
-    clients: {
-      select: {
-        data: [
-          { id: "c1", name: "Acme Roofing", slug: "acme", service_type: "roofing" },
-          { id: "c2", name: "Beta Remodel", slug: "beta", service_type: "remodeling" },
-        ],
-        error: null,
-      },
-    },
-  });
+  fetchClients.mockReset();
+  fetchClients.mockResolvedValue([
+    { id: "c1", name: "Acme Roofing", slug: "acme", service_type: "roofing" },
+    { id: "c2", name: "Beta Remodel", slug: "beta", service_type: "remodeling" },
+  ]);
 });
 
 afterEach(() => {
@@ -190,12 +185,8 @@ describe("BriefForm", () => {
     expect(await screen.findByText(/Request failed \(503\)/)).toBeInTheDocument();
   });
 
-  it("propagates a supabase client load error into a banner", async () => {
-    currentSupabase = mockSupabaseClient({
-      clients: {
-        select: { data: null, error: { message: "boom from supabase" } },
-      },
-    });
+  it("propagates a client load error into a banner", async () => {
+    fetchClients.mockRejectedValue(new Error("boom from supabase"));
 
     render(<BriefForm />);
     expect(await screen.findByText(/boom from supabase/)).toBeInTheDocument();
@@ -223,9 +214,7 @@ describe("BriefForm", () => {
   });
 
   it("renders 'No active clients found' when the clients list comes back empty", async () => {
-    currentSupabase = mockSupabaseClient({
-      clients: { select: { data: [], error: null } },
-    });
+    fetchClients.mockResolvedValue([]);
 
     render(<BriefForm />);
 

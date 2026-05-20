@@ -5,7 +5,8 @@ import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import type { Route } from "next";
 
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
+import { signStoragePaths } from "@/lib/realtime/client-data";
 import {
   CREATIVES_BUCKET,
   DEFAULT_SIGNED_URL_TTL_S,
@@ -68,6 +69,10 @@ export function VideoVariantsGrid({
   const [creatives, setCreatives] = useState<VideoCreative[]>(initialCreatives);
   const [signedUrls, setSignedUrls] = useState<Record<string, UrlBundle>>(initialSignedUrls);
   const pendingRef = useRef(new Set<string>());
+  // Mirror signedUrls so the realtime callbacks read the latest map without
+  // re-subscribing the SSE connection on every URL change.
+  const signedUrlsRef = useRef(signedUrls);
+  signedUrlsRef.current = signedUrls;
 
   // Keep state in sync when the server re-renders (e.g. after router.refresh()).
   useEffect(() => {
@@ -82,130 +87,108 @@ export function VideoVariantsGrid({
    * we don't already have a URL for — keeps the call count bounded
    * even on chatty pipelines.
    */
-  const fetchMissingUrls = useCallback(
-    async (creative: VideoCreative) => {
-      const id = creative.id;
-      // Track in-flight calls so concurrent updates don't double-fetch.
-      const key = id;
-      if (pendingRef.current.has(key)) return;
+  const fetchMissingUrls = useCallback(async (creative: VideoCreative) => {
+    const id = creative.id;
+    // Track in-flight calls so concurrent updates don't double-fetch.
+    const key = id;
+    if (pendingRef.current.has(key)) return;
 
-      const current = signedUrls[id] ?? EMPTY_BUNDLE;
-      const needsCaptioned = !current.captioned && creative.captioned_path;
-      const needsComposed = !current.composed && creative.composed_path;
-      const needsVoiceover = !current.voiceover && creative.voiceover_path;
-      if (!needsCaptioned && !needsComposed && !needsVoiceover) return;
+    const current = signedUrlsRef.current[id] ?? EMPTY_BUNDLE;
+    const wanted: { slot: keyof UrlBundle; path: string }[] = [];
+    if (!current.captioned && creative.captioned_path)
+      wanted.push({ slot: "captioned", path: creative.captioned_path });
+    if (!current.composed && creative.composed_path)
+      wanted.push({ slot: "composed", path: creative.composed_path });
+    if (!current.voiceover && creative.voiceover_path)
+      wanted.push({ slot: "voiceover", path: creative.voiceover_path });
+    if (wanted.length === 0) return;
 
-      pendingRef.current.add(key);
-      try {
-        const supabase = createClient();
-        const results = await Promise.all([
-          needsCaptioned && creative.captioned_path
-            ? supabase.storage
-                .from(CREATIVES_BUCKET)
-                .createSignedUrl(creative.captioned_path, DEFAULT_SIGNED_URL_TTL_S)
-            : Promise.resolve({ data: null, error: null }),
-          needsComposed && creative.composed_path
-            ? supabase.storage
-                .from(CREATIVES_BUCKET)
-                .createSignedUrl(creative.composed_path, DEFAULT_SIGNED_URL_TTL_S)
-            : Promise.resolve({ data: null, error: null }),
-          needsVoiceover && creative.voiceover_path
-            ? supabase.storage
-                .from(CREATIVES_BUCKET)
-                .createSignedUrl(creative.voiceover_path, DEFAULT_SIGNED_URL_TTL_S)
-            : Promise.resolve({ data: null, error: null }),
-        ]);
-        const [captionedRes, composedRes, voiceoverRes] = results;
-        setSignedUrls((prev) => {
-          const existing = prev[id] ?? EMPTY_BUNDLE;
-          const next: UrlBundle = {
-            captioned: captionedRes.data?.signedUrl ?? existing.captioned,
-            composed: composedRes.data?.signedUrl ?? existing.composed,
-            voiceover: voiceoverRes.data?.signedUrl ?? existing.voiceover,
-          };
-          return { ...prev, [id]: next };
-        });
-      } catch {
-        // Fail closed; the placeholder tile remains in place.
-      } finally {
-        pendingRef.current.delete(key);
-      }
-    },
-    [signedUrls],
-  );
+    pendingRef.current.add(key);
+    try {
+      // One server round-trip signs all missing paths (service-role).
+      const urls = await signStoragePaths(
+        CREATIVES_BUCKET,
+        wanted.map((w) => w.path),
+        DEFAULT_SIGNED_URL_TTL_S,
+      );
+      setSignedUrls((prev) => {
+        const existing = prev[id] ?? EMPTY_BUNDLE;
+        const next: UrlBundle = { ...existing };
+        for (const w of wanted) {
+          next[w.slot] = urls[w.path] ?? existing[w.slot];
+        }
+        return { ...prev, [id]: next };
+      });
+    } catch {
+      // Fail closed; the placeholder tile remains in place.
+    } finally {
+      pendingRef.current.delete(key);
+    }
+  }, []);
 
+  // Video pipeline writes a chatty stream of `video_creatives` updates
+  // (script → voiceover → broll → composed → captioned). Debounce them so each
+  // pipeline transition is one render. Realtime now flows through the
+  // server-side SSE relay.
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    // Video pipeline writes a chatty stream of `video_creatives`
-    // updates (script → voiceover → broll → composed → captioned).
-    // Debounce them so each pipeline transition is one render.
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`video-creatives:${brief.id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${brief.id}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoCreative;
-          queue.queue(`insert:${next.id}`, () => {
-            setCreatives((prev) => {
-              if (prev.some((c) => c.id === next.id)) return prev;
-              return [...prev, next];
-            });
-            void fetchMissingUrls(next);
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${brief.id}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoCreative;
-          queue.queue(`update:${next.id}`, () => {
-            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-            void fetchMissingUrls(next);
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "video_creatives",
-          filter: `brief_id=eq.${brief.id}`,
-        },
-        (payload) => {
-          const old = payload.old as Partial<VideoCreative>;
-          if (!old?.id) return;
-          queue.queue(`delete:${old.id}`, () => {
-            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-            setSignedUrls((prev) => {
-              if (!(old.id! in prev)) return prev;
-              const next = { ...prev };
-              delete next[old.id!];
-              return next;
-            });
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [brief.id, fetchMissingUrls]);
+  const filter = `brief_id=eq.${brief.id}`;
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "video_creatives",
+          event: "INSERT" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as VideoCreative;
+            queueRef.current.queue(`insert:${next.id}`, () => {
+              setCreatives((prev) => {
+                if (prev.some((c) => c.id === next.id)) return prev;
+                return [...prev, next];
+              });
+              void fetchMissingUrls(next);
+            });
+          },
+        },
+        {
+          table: "video_creatives",
+          event: "UPDATE" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as VideoCreative;
+            queueRef.current.queue(`update:${next.id}`, () => {
+              setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+              void fetchMissingUrls(next);
+            });
+          },
+        },
+        {
+          table: "video_creatives",
+          event: "DELETE" as const,
+          filter,
+          callback: (payload) => {
+            const old = payload.old as Partial<VideoCreative>;
+            if (!old?.id) return;
+            queueRef.current.queue(`delete:${old.id}`, () => {
+              setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+              setSignedUrls((prev) => {
+                if (!(old.id! in prev)) return prev;
+                const next = { ...prev };
+                delete next[old.id!];
+                return next;
+              });
+            });
+          },
+        },
+      ],
+      [filter, fetchMissingUrls],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

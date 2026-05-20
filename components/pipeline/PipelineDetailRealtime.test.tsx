@@ -1,28 +1,30 @@
 /**
- * PipelineDetailRealtime is renderless — it subscribes to two channels
- * and calls router.refresh() on any change. Tests verify the subscribe
- * + unsubscribe + handler dispatch.
+ * PipelineDetailRealtime is renderless — it subscribes (via the SSE relay
+ * hook) to `pipelines` + `pipeline_events` for one id and calls
+ * router.refresh() on any change. Tests verify the subscription specs +
+ * handler dispatch.
  */
-import { render } from "@testing-library/react";
+import { render, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 
 const routerRefresh = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: routerRefresh, push: vi.fn(), replace: vi.fn() }),
 }));
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 import { PipelineDetailRealtime } from "./PipelineDetailRealtime";
 
 beforeEach(() => {
   routerRefresh.mockReset();
-  currentClient = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -30,32 +32,30 @@ afterEach(() => {
 });
 
 describe("PipelineDetailRealtime", () => {
-  it("subscribes to a channel named pipeline:<id>", () => {
+  it("subscribes to pipelines + pipeline_events filtered by the id", () => {
     render(<PipelineDetailRealtime pipelineId="p1" />);
-    expect(currentClient._spies.channel).toHaveBeenCalledWith("pipeline:p1");
+    const specs = realtime.listeners.map((l) => ({ table: l.table, filter: l.filter }));
+    expect(specs).toEqual(
+      expect.arrayContaining([
+        { table: "pipelines", filter: "id=eq.p1" },
+        { table: "pipeline_events", filter: "pipeline_id=eq.p1" },
+      ]),
+    );
   });
 
-  it("removes the channel on unmount", () => {
+  it("registers listeners (the relay hook owns its own teardown)", () => {
     const { unmount } = render(<PipelineDetailRealtime pipelineId="p1" />);
-    unmount();
-    expect(currentClient._spies.removeChannel).toHaveBeenCalled();
+    expect(realtime.spy).toHaveBeenCalled();
+    expect(() => unmount()).not.toThrow();
   });
 
   it("router.refresh() fires when either subscribed table receives an event", () => {
-    const handlers: Array<() => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn((_evt: string, _spec: unknown, cb: () => void) => {
-      handlers.push(cb);
-      return fakeChannel;
-    });
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
     render(<PipelineDetailRealtime pipelineId="p1" />);
-    handlers.forEach((h) => h());
-    expect(routerRefresh).toHaveBeenCalledTimes(handlers.length);
+    act(() => {
+      realtime.emit("pipelines", "UPDATE", { new: { id: "p1" } });
+      realtime.emit("pipeline_events", "INSERT", { new: { id: "e1" } });
+    });
+    expect(routerRefresh).toHaveBeenCalledTimes(2);
   });
 
   it("renders nothing visible (renderless)", () => {

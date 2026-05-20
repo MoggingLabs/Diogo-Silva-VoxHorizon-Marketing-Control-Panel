@@ -7,7 +7,8 @@ import { ImageIcon } from "lucide-react";
 
 import { EmptyState } from "@/components/EmptyState";
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
+import { signStoragePath } from "@/lib/realtime/client-data";
 import type { Creative } from "@/lib/creatives";
 
 import { CreativeCard } from "./CreativeCard";
@@ -49,6 +50,11 @@ export function VariantsGrid({
   const [creatives, setCreatives] = useState<Creative[]>(initialCreatives);
   const [signedUrls, setSignedUrls] = useState<Record<string, string | null>>(initialSignedUrls);
   const pendingSignedUrlsRef = useRef(new Set<string>());
+  // Mirror signedUrls in a ref so the realtime UPDATE handler can read the
+  // latest map without the listener set (and thus the SSE connection)
+  // re-subscribing on every URL change.
+  const signedUrlsRef = useRef(signedUrls);
+  signedUrlsRef.current = signedUrls;
 
   // Keep state in sync when the server re-renders (e.g. after router.refresh()).
   useEffect(() => {
@@ -62,12 +68,11 @@ export function VariantsGrid({
     if (pendingSignedUrlsRef.current.has(creativeId)) return;
     pendingSignedUrlsRef.current.add(creativeId);
     try {
-      const supabase = createClient();
-      const { data, error } = await supabase.storage
-        .from("creatives")
-        .createSignedUrl(filePath, 3600);
-      if (!error && data?.signedUrl) {
-        setSignedUrls((prev) => ({ ...prev, [creativeId]: data.signedUrl }));
+      // Signed URLs are minted server-side (service-role) now that the anon
+      // key can't reach Storage under RLS deny-all.
+      const signedUrl = await signStoragePath("creatives", filePath, 3600);
+      if (signedUrl) {
+        setSignedUrls((prev) => ({ ...prev, [creativeId]: signedUrl }));
       }
     } catch {
       // Fail closed: leave the placeholder tile in place.
@@ -76,85 +81,75 @@ export function VariantsGrid({
     }
   }, []);
 
+  // Debounce realtime invalidations: the worker can write several `creatives`
+  // rows in a tight burst (e.g. four-variant fan-out), and we don't want each
+  // row to trigger its own React render. INSERT/UPDATE/DELETE handlers stage
+  // state mutations into the queue and the 200ms flush runs them in a single
+  // batch. Realtime now flows through the server-side SSE relay.
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    // Debounce realtime invalidations: the worker can write several
-    // `creatives` rows in a tight burst (e.g. four-variant fan-out),
-    // and we don't want each row to trigger its own React render.
-    // INSERT/UPDATE/DELETE handlers stage state mutations into the
-    // queue and the 200ms flush runs them in a single batch.
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`creatives:${briefId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as Creative;
-          queue.queue(`insert:${next.id}`, () => {
-            setCreatives((prev) => {
-              if (prev.some((c) => c.id === next.id)) return prev;
-              return [...prev, next];
-            });
-            if (next.file_path_supabase) {
-              void fetchSignedUrl(next.id, next.file_path_supabase);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const next = payload.new as Creative;
-          queue.queue(`update:${next.id}`, () => {
-            setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
-            // If the file path changed and we don't have a URL yet, fetch one.
-            if (next.file_path_supabase && !signedUrls[next.id]) {
-              void fetchSignedUrl(next.id, next.file_path_supabase);
-            }
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "creatives",
-          filter: `brief_id=eq.${briefId}`,
-        },
-        (payload) => {
-          const old = payload.old as Partial<Creative>;
-          if (!old?.id) return;
-          queue.queue(`delete:${old.id}`, () => {
-            setCreatives((prev) => prev.filter((c) => c.id !== old.id));
-            setSignedUrls((prev) => {
-              if (!(old.id! in prev)) return prev;
-              const next = { ...prev };
-              delete next[old.id!];
-              return next;
-            });
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [briefId, fetchSignedUrl, signedUrls]);
+  const filter = `brief_id=eq.${briefId}`;
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "creatives",
+          event: "INSERT" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as Creative;
+            queueRef.current.queue(`insert:${next.id}`, () => {
+              setCreatives((prev) => {
+                if (prev.some((c) => c.id === next.id)) return prev;
+                return [...prev, next];
+              });
+              if (next.file_path_supabase) {
+                void fetchSignedUrl(next.id, next.file_path_supabase);
+              }
+            });
+          },
+        },
+        {
+          table: "creatives",
+          event: "UPDATE" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as Creative;
+            queueRef.current.queue(`update:${next.id}`, () => {
+              setCreatives((prev) => prev.map((c) => (c.id === next.id ? next : c)));
+              // If the file path changed and we don't have a URL yet, fetch one.
+              if (next.file_path_supabase && !signedUrlsRef.current[next.id]) {
+                void fetchSignedUrl(next.id, next.file_path_supabase);
+              }
+            });
+          },
+        },
+        {
+          table: "creatives",
+          event: "DELETE" as const,
+          filter,
+          callback: (payload) => {
+            const old = payload.old as Partial<Creative>;
+            if (!old?.id) return;
+            queueRef.current.queue(`delete:${old.id}`, () => {
+              setCreatives((prev) => prev.filter((c) => c.id !== old.id));
+              setSignedUrls((prev) => {
+                if (!(old.id! in prev)) return prev;
+                const next = { ...prev };
+                delete next[old.id!];
+                return next;
+              });
+            });
+          },
+        },
+      ],
+      [filter, fetchSignedUrl],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import type { EventRow } from "@/lib/briefs";
 
 /**
@@ -66,28 +66,19 @@ export function BriefTimeline({
     setEvents(initialEvents);
   }, [initialEvents]);
 
-  useEffect(() => {
-    const supabase = createBrowserClient();
-    const channel = supabase
-      .channel(`brief:${briefId}`)
-      .on(
-        "postgres_changes",
+  useRealtimeStream(
+    useMemo(
+      () => [
         {
-          event: "UPDATE",
-          schema: "public",
           table: "briefs",
+          event: "UPDATE" as const,
           filter: `id=eq.${briefId}`,
+          callback: () => router.refresh(),
         },
-        () => {
-          router.refresh();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [briefId, router]);
+      ],
+      [briefId, router],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

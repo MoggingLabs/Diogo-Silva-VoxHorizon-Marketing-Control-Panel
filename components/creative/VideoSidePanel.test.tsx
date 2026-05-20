@@ -7,14 +7,14 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
-import type { VideoCreative } from "@/lib/video-creatives";
+import type { VideoCreative, VideoIteration } from "@/lib/video-creatives";
 import type { VideoBrief } from "@/lib/video-briefs";
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+// VideoSidePanel reads its iteration thread from the service-role API via the
+// client-data helper. Mock it per-test to drive success / error paths.
+const fetchVideoIterations = vi.fn<() => Promise<VideoIteration[]>>(async () => []);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchVideoIterations: () => fetchVideoIterations(),
 }));
 
 vi.mock("@/lib/chat-read-status", () => ({
@@ -97,9 +97,8 @@ const briefStub: VideoBrief = {
 } as unknown as VideoBrief;
 
 beforeEach(() => {
-  currentClient = mockSupabaseClient({
-    video_iterations: { select: { error: null, data: [] } },
-  });
+  fetchVideoIterations.mockReset();
+  fetchVideoIterations.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -291,9 +290,7 @@ describe("VideoSidePanel", () => {
   });
 
   it("fetches iterations on open and surfaces error", async () => {
-    currentClient = mockSupabaseClient({
-      video_iterations: { select: { data: null, error: { message: "boom" } } },
-    });
+    fetchVideoIterations.mockRejectedValue(new Error("boom"));
     render(
       <VideoSidePanel
         creative={makeCreative()}
@@ -309,11 +306,9 @@ describe("VideoSidePanel", () => {
   });
 
   it("renders the iteration thread when fetch succeeds", async () => {
-    currentClient = mockSupabaseClient({
-      video_iterations: {
-        select: { error: null, data: [{ id: "i1", creative_id: "v1", created_at: "x" }] },
-      },
-    });
+    fetchVideoIterations.mockResolvedValue([
+      { id: "i1", creative_id: "v1", created_at: "x" } as VideoIteration,
+    ]);
     render(
       <VideoSidePanel
         creative={makeCreative()}

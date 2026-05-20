@@ -12,7 +12,6 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 import type { Pipeline } from "@/lib/pipeline/types";
 
 const routerRefresh = vi.fn();
@@ -25,9 +24,20 @@ vi.mock("@/lib/pipeline/client", () => ({
   submitReviewDecision: (...args: unknown[]) => submitReviewDecision(...args),
 }));
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+// Pick previews + signed URLs are fetched via the service-role API routes
+// (client-data helpers). Mock them per-test.
+type Row = Record<string, unknown>;
+const fetchCreativesByIds = vi.fn<() => Promise<Row[]>>(async () => []);
+const fetchVideoCreativesByIdsWithOutline = vi.fn<
+  () => Promise<{ creatives: Row[]; outlines: Record<string, unknown> }>
+>(async () => ({ creatives: [], outlines: {} }));
+const signStoragePaths = vi.fn<(b: string, p: string[]) => Promise<Record<string, string | null>>>(
+  async (_b, paths) => Object.fromEntries(paths.map((p) => [p, "https://x.example/x.png"])),
+);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchCreativesByIds: () => fetchCreativesByIds(),
+  fetchVideoCreativesByIdsWithOutline: () => fetchVideoCreativesByIdsWithOutline(),
+  signStoragePaths: (b: string, p: string[]) => signStoragePaths(b, p),
 }));
 
 import { StageReview } from "./StageReview";
@@ -56,7 +66,11 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 beforeEach(() => {
   routerRefresh.mockReset();
   submitReviewDecision.mockReset();
-  currentClient = mockSupabaseClient();
+  fetchCreativesByIds.mockReset();
+  fetchCreativesByIds.mockResolvedValue([]);
+  fetchVideoCreativesByIdsWithOutline.mockReset();
+  fetchVideoCreativesByIdsWithOutline.mockResolvedValue({ creatives: [], outlines: {} });
+  signStoragePaths.mockClear();
 });
 
 afterEach(() => {
@@ -70,89 +84,52 @@ describe("StageReview", () => {
   });
 
   it("fetches + renders image pick rows in the order from picks.image", async () => {
-    const createSignedUrl = vi.fn(async () => ({
-      data: { signedUrl: "https://x.example/x.png" },
-      error: null,
-    }));
-    currentClient = mockSupabaseClient({
-      creatives: {
-        select: {
-          error: null,
-          data: [
-            { id: "c2", concept: "Second", ratio: "9x16", file_path_supabase: "b.png" },
-            { id: "c1", concept: "First", ratio: "1x1", file_path_supabase: "a.png" },
-          ],
-        },
-      },
-    });
-    currentClient = {
-      ...currentClient,
-      storage: { from: () => ({ createSignedUrl }) },
-    } as SupabaseClientMock;
+    fetchCreativesByIds.mockResolvedValue([
+      { id: "c2", concept: "Second", ratio: "9x16", file_path_supabase: "b.png" },
+      { id: "c1", concept: "First", ratio: "1x1", file_path_supabase: "a.png" },
+    ]);
     render(<StageReview pipeline={makePipeline({ picks: { image: ["c1", "c2"] } })} />);
     expect(await screen.findByText("First")).toBeInTheDocument();
     expect(screen.getByText("Second")).toBeInTheDocument();
   });
 
   it("surfaces image-fetch error inline", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: { select: { data: null, error: { message: "rls" } } },
-    });
+    fetchCreativesByIds.mockRejectedValue(new Error("rls"));
     render(<StageReview pipeline={makePipeline({ picks: { image: ["c1"] } })} />);
     expect(await screen.findByText(/Failed to load image picks: rls/)).toBeInTheDocument();
   });
 
   it("renders the no-image-picks placeholder when fetch returns no rows", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: { select: { error: null, data: [] } },
-    });
+    fetchCreativesByIds.mockResolvedValue([]);
     render(<StageReview pipeline={makePipeline({ picks: { image: ["c1"] } })} />);
     expect(await screen.findByText(/No image picks yet/)).toBeInTheDocument();
   });
 
   it("renders the No render placeholder when no signed URL", async () => {
-    currentClient = mockSupabaseClient({
-      creatives: {
-        select: {
-          error: null,
-          data: [{ id: "c1", concept: "X", ratio: "1x1", file_path_supabase: null }],
-        },
-      },
-    });
+    fetchCreativesByIds.mockResolvedValue([
+      { id: "c1", concept: "X", ratio: "1x1", file_path_supabase: null },
+    ]);
     render(<StageReview pipeline={makePipeline({ picks: { image: ["c1"] } })} />);
     expect(await screen.findByText("X")).toBeInTheDocument();
   });
 
   it("fetches + renders video pick rows including outline hook", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "composed",
-              duration_actual_s: 30,
-              broll_clips: [{ x: 1 }],
-              brief_id: "b1",
-            },
-          ],
+    fetchVideoCreativesByIdsWithOutline.mockResolvedValue({
+      creatives: [
+        {
+          id: "v1",
+          status: "composed",
+          duration_actual_s: 30,
+          broll_clips: [{ x: 1 }],
+          brief_id: "b1",
         },
-      },
-      video_briefs: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "b1",
-              script_outline: {
-                hook: "Big hook",
-                segments: [
-                  { topic: "a", duration_s: 10 },
-                  { topic: "b", duration_s: 20 },
-                ],
-              },
-            },
+      ],
+      outlines: {
+        b1: {
+          hook: "Big hook",
+          segments: [
+            { topic: "a", duration_s: 10 },
+            { topic: "b", duration_s: 20 },
           ],
         },
       },
@@ -171,24 +148,17 @@ describe("StageReview", () => {
   });
 
   it("renders 'No hook recorded' when video brief has no outline", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "draft",
-              duration_actual_s: null,
-              broll_clips: null,
-              brief_id: "b1",
-            },
-          ],
+    fetchVideoCreativesByIdsWithOutline.mockResolvedValue({
+      creatives: [
+        {
+          id: "v1",
+          status: "draft",
+          duration_actual_s: null,
+          broll_clips: null,
+          brief_id: "b1",
         },
-      },
-      video_briefs: {
-        select: { error: null, data: [{ id: "b1", script_outline: null }] },
-      },
+      ],
+      outlines: { b1: null },
     });
     render(
       <StageReview
@@ -202,9 +172,7 @@ describe("StageReview", () => {
   });
 
   it("surfaces video pick fetch error", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: { select: { data: null, error: { message: "boom" } } },
-    });
+    fetchVideoCreativesByIdsWithOutline.mockRejectedValue(new Error("boom"));
     render(
       <StageReview
         pipeline={makePipeline({
@@ -289,9 +257,7 @@ describe("StageReview", () => {
   });
 
   it("renders empty placeholder when video picks fetch returns nothing", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: { select: { error: null, data: [] } },
-    });
+    fetchVideoCreativesByIdsWithOutline.mockResolvedValue({ creatives: [], outlines: {} });
     render(
       <StageReview
         pipeline={makePipeline({
@@ -304,24 +270,17 @@ describe("StageReview", () => {
   });
 
   it("renders the duration label and segments for video picks", async () => {
-    currentClient = mockSupabaseClient({
-      video_creatives: {
-        select: {
-          error: null,
-          data: [
-            {
-              id: "v1",
-              status: "captioned",
-              duration_actual_s: 30,
-              broll_clips: [],
-              brief_id: "b1",
-            },
-          ],
+    fetchVideoCreativesByIdsWithOutline.mockResolvedValue({
+      creatives: [
+        {
+          id: "v1",
+          status: "captioned",
+          duration_actual_s: 30,
+          broll_clips: [],
+          brief_id: "b1",
         },
-      },
-      video_briefs: {
-        select: { error: null, data: [{ id: "b1", script_outline: { hook: "h", segments: [] } }] },
-      },
+      ],
+      outlines: { b1: { hook: "h", segments: [] } },
     });
     render(
       <StageReview

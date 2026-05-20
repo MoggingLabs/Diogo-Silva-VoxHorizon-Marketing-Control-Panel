@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { createRealtimeQueue } from "@/lib/realtime-queue";
 import type { PipelineEvent } from "@/lib/pipeline/types";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 /**
  * Subscribe to `pipeline_events` for a single pipeline and return the
@@ -48,84 +48,76 @@ export function usePipelineEvents(
     setEvents(sortChronologically(initialEvents));
   }, [initialEvents]);
 
+  // Per-component debounce queue, disposed on unmount. Realtime now flows
+  // through the server-side SSE relay (`/api/realtime`).
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    if (!pipelineId) return;
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    const supabase = createBrowserClient();
-    const queue = createRealtimeQueue();
-
-    const channel = supabase
-      .channel(`pipeline-events:${pipelineId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "pipeline_events",
-          filter: `pipeline_id=eq.${pipelineId}`,
-        },
-        (payload) => {
-          const next = payload.new as PipelineEvent | undefined;
-          if (!next?.id) return;
-          // Debounce by event id: a duplicate notification for the
-          // same row collapses into one queued callback.
-          queue.queue(`insert:${next.id}`, () => {
-            setEvents((prev) => {
-              // Dedupe — the initial fetch may overlap with realtime
-              // notifications if the subscription opens before the
-              // server response is rendered.
-              if (prev.some((e) => e.id === next.id)) return prev;
-              return appendChronologically(prev, next);
-            });
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "pipeline_events",
-          filter: `pipeline_id=eq.${pipelineId}`,
-        },
-        (payload) => {
-          const next = payload.new as PipelineEvent | undefined;
-          if (!next?.id) return;
-          queue.queue(`update:${next.id}`, () => {
-            setEvents((prev) => {
-              const idx = prev.findIndex((e) => e.id === next.id);
-              if (idx === -1) return appendChronologically(prev, next);
-              const updated = [...prev];
-              updated[idx] = next;
-              return updated;
-            });
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "DELETE",
-          schema: "public",
-          table: "pipeline_events",
-          filter: `pipeline_id=eq.${pipelineId}`,
-        },
-        (payload) => {
-          const old = payload.old as Partial<PipelineEvent> | undefined;
-          const id = old?.id;
-          if (!id) return;
-          queue.queue(`delete:${id}`, () => {
-            setEvents((prev) => prev.filter((e) => e.id !== id));
-          });
-        },
-      )
-      .subscribe();
-
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [pipelineId]);
+  const filter = `pipeline_id=eq.${pipelineId}`;
+  useRealtimeStream(
+    useMemo(
+      () =>
+        pipelineId
+          ? [
+              {
+                table: "pipeline_events",
+                event: "INSERT" as const,
+                filter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as PipelineEvent | undefined;
+                  if (!next?.id) return;
+                  // Debounce by event id: a duplicate notification for the
+                  // same row collapses into one queued callback.
+                  queueRef.current.queue(`insert:${next.id}`, () => {
+                    setEvents((prev) => {
+                      // Dedupe — the initial fetch may overlap with realtime
+                      // notifications if the subscription opens before the
+                      // server response is rendered.
+                      if (prev.some((e) => e.id === next.id)) return prev;
+                      return appendChronologically(prev, next);
+                    });
+                  });
+                },
+              },
+              {
+                table: "pipeline_events",
+                event: "UPDATE" as const,
+                filter,
+                callback: (payload) => {
+                  const next = payload.new as unknown as PipelineEvent | undefined;
+                  if (!next?.id) return;
+                  queueRef.current.queue(`update:${next.id}`, () => {
+                    setEvents((prev) => {
+                      const idx = prev.findIndex((e) => e.id === next.id);
+                      if (idx === -1) return appendChronologically(prev, next);
+                      const updated = [...prev];
+                      updated[idx] = next;
+                      return updated;
+                    });
+                  });
+                },
+              },
+              {
+                table: "pipeline_events",
+                event: "DELETE" as const,
+                filter,
+                callback: (payload) => {
+                  const old = payload.old as Partial<PipelineEvent> | undefined;
+                  const id = old?.id;
+                  if (!id) return;
+                  queueRef.current.queue(`delete:${id}`, () => {
+                    setEvents((prev) => prev.filter((e) => e.id !== id));
+                  });
+                },
+              },
+            ]
+          : [],
+      [pipelineId, filter],
+    ),
+  );
 
   return events;
 }

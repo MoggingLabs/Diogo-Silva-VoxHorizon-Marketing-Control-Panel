@@ -8,11 +8,11 @@
  *  - Client-name display (with id-prefix fallback)
  *  - Date formatting branches
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { Pipeline } from "@/lib/pipeline/types";
 
 const routerRefresh = vi.fn();
@@ -20,9 +20,10 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: routerRefresh, push: vi.fn(), replace: vi.fn() }),
 }));
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 import { PipelineList } from "./PipelineList";
@@ -50,7 +51,7 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 
 beforeEach(() => {
   routerRefresh.mockReset();
-  currentClient = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -146,27 +147,19 @@ describe("PipelineList", () => {
     expect(screen.getByText(/No pipelines match these filters/)).toBeInTheDocument();
   });
 
-  it("subscribes to a realtime channel and unsubscribes on unmount", () => {
+  it("subscribes to the pipelines realtime relay", () => {
     const { unmount } = render(<PipelineList initialPipelines={[]} clientNames={{}} />);
-    expect(currentClient._spies.channel).toHaveBeenCalledWith("pipelines:index");
-    unmount();
-    expect(currentClient._spies.removeChannel).toHaveBeenCalled();
+    const pipelinesListener = realtime.listeners.find((l) => l.table === "pipelines");
+    expect(pipelinesListener).toBeDefined();
+    expect(pipelinesListener?.event).toBe("*");
+    expect(() => unmount()).not.toThrow();
   });
 
   it("realtime callback calls router.refresh()", () => {
-    const handlers: Array<() => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn((_e: string, _s: unknown, cb: () => void) => {
-      handlers.push(cb);
-      return fakeChannel;
-    });
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
     render(<PipelineList initialPipelines={[]} clientNames={{}} />);
-    handlers.forEach((h) => h());
+    act(() => {
+      realtime.emit("pipelines", "UPDATE", { new: { id: "p1" } });
+    });
     expect(routerRefresh).toHaveBeenCalled();
   });
 

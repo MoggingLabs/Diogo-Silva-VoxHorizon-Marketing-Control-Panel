@@ -22,7 +22,7 @@ import { StageShell } from "./StageShell";
 import { BriefPayload, type BriefPayloadT } from "@/lib/briefs";
 import { activeTracksLocal } from "@/lib/pipeline/transitions";
 import type { Pipeline, PipelineFormat } from "@/lib/pipeline/types";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { fetchClients } from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 import { Ratio, VideoBriefInput, type VideoBriefInputT } from "@/lib/video-briefs";
 
@@ -392,25 +392,23 @@ export function StageConfiguration({ pipeline, clients: initialClients }: StageC
 
   const { flush: autosave, status: saveStatus, error: saveError } = useAutosave(pipeline.id);
 
-  // Fetch clients on the client when the parent didn't pass them in. Same
-  // shape as BriefForm's lookup — picks the active clients for the operator.
+  // Fetch clients via the service-role API route when the parent didn't pass
+  // them in. Phase 2 of the RLS lockdown means the anon browser key can't read
+  // `clients` directly, so this goes through `/api/clients`.
   useEffect(() => {
     if (initialClients) return;
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
-      const { data, error } = await supabase
-        .from("clients")
-        .select("id, name, slug, service_type")
-        .eq("status", "active")
-        .order("name");
-      if (cancelled) return;
-      if (error) {
-        setClientsError(error.message);
-      } else {
-        setClients((data ?? []) as ClientOption[]);
+      try {
+        const data = await fetchClients();
+        if (cancelled) return;
+        setClients(data as ClientOption[]);
+      } catch (e) {
+        if (cancelled) return;
+        setClientsError(e instanceof Error ? e.message : "Failed to load clients");
+      } finally {
+        if (!cancelled) setClientsLoading(false);
       }
-      setClientsLoading(false);
     })();
     return () => {
       cancelled = true;

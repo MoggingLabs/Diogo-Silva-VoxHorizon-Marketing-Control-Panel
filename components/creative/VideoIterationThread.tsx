@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Edit3, Film, FileText, MessageSquare, Mic, RotateCw, Search, Type } from "lucide-react";
 
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import { timeSince } from "@/lib/format-time";
 import {
   ITERATION_AUTHOR_LABEL,
@@ -98,54 +98,48 @@ export function VideoIterationThread({ creativeId, initialIterations }: VideoIte
     setIterations(initialIterations);
   }, [initialIterations]);
 
+  // Chat-shaped data — flush instantly. The queue object is kept structurally
+  // identical to the non-chat siblings. Realtime now flows through the
+  // server-side SSE relay.
+  const queueRef = useRef(createRealtimeQueue());
   useEffect(() => {
-    // Chat-shaped data — flush instantly. The queue object is kept
-    // structurally identical to the non-chat siblings so a future
-    // refactor to a hook is straightforward.
-    const queue = createRealtimeQueue();
-    const supabase = createClient();
-    const channel = supabase
-      .channel(`video-iterations:${creativeId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "video_iterations",
-          filter: `creative_id=eq.${creativeId}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoIteration;
-          queue.flushNow(`insert:${next.id}`, () => {
-            setIterations((prev) => {
-              if (prev.some((it) => it.id === next.id)) return prev;
-              return [...prev, next];
-            });
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        {
-          event: "UPDATE",
-          schema: "public",
-          table: "video_iterations",
-          filter: `creative_id=eq.${creativeId}`,
-        },
-        (payload) => {
-          const next = payload.new as VideoIteration;
-          queue.flushNow(`update:${next.id}`, () => {
-            setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
-          });
-        },
-      )
-      .subscribe();
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
 
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
-  }, [creativeId]);
+  const filter = `creative_id=eq.${creativeId}`;
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "video_iterations",
+          event: "INSERT" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as VideoIteration;
+            queueRef.current.flushNow(`insert:${next.id}`, () => {
+              setIterations((prev) => {
+                if (prev.some((it) => it.id === next.id)) return prev;
+                return [...prev, next];
+              });
+            });
+          },
+        },
+        {
+          table: "video_iterations",
+          event: "UPDATE" as const,
+          filter,
+          callback: (payload) => {
+            const next = payload.new as unknown as VideoIteration;
+            queueRef.current.flushNow(`update:${next.id}`, () => {
+              setIterations((prev) => prev.map((it) => (it.id === next.id ? next : it)));
+            });
+          },
+        },
+      ],
+      [filter],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

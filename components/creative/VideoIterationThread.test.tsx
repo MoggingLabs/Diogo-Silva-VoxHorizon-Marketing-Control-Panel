@@ -9,13 +9,14 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { VideoIteration } from "@/lib/video-creatives";
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 vi.mock("@/lib/realtime-queue", () => ({
@@ -41,7 +42,7 @@ function makeIter(over: Partial<VideoIteration> = {}): VideoIteration {
 }
 
 beforeEach(() => {
-  currentClient = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -143,53 +144,32 @@ describe("VideoIterationThread", () => {
     expect(screen.getByText("raw text")).toBeInTheDocument();
   });
 
-  it("subscribes to a 'video-iterations:<id>' channel and cleans up", () => {
+  it("subscribes to the video_iterations relay filtered by creative id", () => {
     const { unmount } = render(<VideoIterationThread creativeId="c1" initialIterations={[]} />);
-    expect(currentClient._spies.channel).toHaveBeenCalledWith(
-      expect.stringContaining("video-iterations:c1"),
-    );
-    unmount();
-    expect(currentClient._spies.removeChannel).toHaveBeenCalled();
+    const listener = realtime.listeners.find((l) => l.table === "video_iterations");
+    expect(listener).toBeDefined();
+    expect(listener?.filter).toBe("creative_id=eq.c1");
+    expect(() => unmount()).not.toThrow();
   });
 
   it("appends rows from realtime INSERT events", async () => {
-    const handlers: Array<(p: { new: VideoIteration }) => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn(
-      (_e: string, spec: { event: string }, cb: (p: { new: VideoIteration }) => void) => {
-        if (spec.event === "INSERT") handlers.push(cb);
-        return fakeChannel;
-      },
-    );
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
-
     render(<VideoIterationThread creativeId="c1" initialIterations={[]} />);
-    act(() => handlers[0]?.({ new: makeIter({ content: { message: "fresh" } }) }));
+    act(() =>
+      realtime.emit("video_iterations", "INSERT", {
+        new: makeIter({ content: { message: "fresh" } }),
+      }),
+    );
     expect(await screen.findByText("fresh")).toBeInTheDocument();
   });
 
   it("UPDATE replaces the matching row", async () => {
-    const handlers: Array<(p: { new: VideoIteration }) => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn(
-      (_e: string, spec: { event: string }, cb: (p: { new: VideoIteration }) => void) => {
-        if (spec.event === "UPDATE") handlers.push(cb);
-        return fakeChannel;
-      },
-    );
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
-
     const start = makeIter({ id: "u1", content: { message: "old" } });
     render(<VideoIterationThread creativeId="c1" initialIterations={[start]} />);
-    act(() => handlers[0]?.({ new: { ...start, content: { message: "new" } } }));
+    act(() =>
+      realtime.emit("video_iterations", "UPDATE", {
+        new: { ...start, content: { message: "new" } },
+      }),
+    );
     await waitFor(() => expect(screen.getByText("new")).toBeInTheDocument());
   });
 

@@ -10,13 +10,14 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { CreativeIteration } from "@/lib/creatives";
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 // Make the realtime queue flush synchronously for deterministic tests.
@@ -43,7 +44,7 @@ function makeIter(over: Partial<CreativeIteration> = {}): CreativeIteration {
 }
 
 beforeEach(() => {
-  currentClient = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -81,64 +82,33 @@ describe("IterationThread", () => {
     expect(screen.getByText(/alien/)).toBeInTheDocument();
   });
 
-  it("subscribes to a realtime channel and unsubscribes on unmount", () => {
+  it("subscribes to the creative_iterations relay filtered by creative id", () => {
     const { unmount } = render(<IterationThread creativeId="c1" initialIterations={[]} />);
-    expect(currentClient._spies.channel).toHaveBeenCalledWith(
-      expect.stringContaining("creative-iterations:c1"),
-    );
-    unmount();
-    expect(currentClient._spies.removeChannel).toHaveBeenCalled();
+    const listener = realtime.listeners.find((l) => l.table === "creative_iterations");
+    expect(listener).toBeDefined();
+    expect(listener?.filter).toBe("creative_id=eq.c1");
+    expect(() => unmount()).not.toThrow();
   });
 
   it("appends a new iteration when an INSERT event fires", async () => {
-    // Capture the INSERT handler so we can fire it manually.
-    const handlers: Array<(payload: { new: CreativeIteration }) => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn(
-      (
-        _evt: string,
-        spec: { event: string },
-        cb: (payload: { new: CreativeIteration }) => void,
-      ) => {
-        if (spec.event === "INSERT") handlers.push(cb);
-        return fakeChannel;
-      },
-    );
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    fakeChannel.unsubscribe = vi.fn();
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
-
     render(<IterationThread creativeId="c1" initialIterations={[]} />);
     expect(screen.getByText(/No iterations yet/)).toBeInTheDocument();
 
     const newIter = makeIter({ kind: "regenerate", content: { message: "Redid it" } });
-    act(() => handlers[0]?.({ new: newIter }));
+    act(() => realtime.emit("creative_iterations", "INSERT", { new: newIter }));
     expect(await screen.findByText("Redid it")).toBeInTheDocument();
     expect(screen.getByText("Regenerated")).toBeInTheDocument();
   });
 
   it("dedupes INSERTs for the same id", async () => {
-    const handlers: Array<(p: { new: CreativeIteration }) => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn(
-      (_evt: string, spec: { event: string }, cb: (p: { new: CreativeIteration }) => void) => {
-        if (spec.event === "INSERT") handlers.push(cb);
-        return fakeChannel;
-      },
-    );
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
-
     render(<IterationThread creativeId="c1" initialIterations={[]} />);
     const it = makeIter({ id: "dup", content: { message: "Once" } });
-    act(() => handlers[0]?.({ new: it }));
-    act(() => handlers[0]?.({ new: { ...it, content: { message: "Twice" } } }));
+    act(() => realtime.emit("creative_iterations", "INSERT", { new: it }));
+    act(() =>
+      realtime.emit("creative_iterations", "INSERT", {
+        new: { ...it, content: { message: "Twice" } },
+      }),
+    );
     await waitFor(() => {
       expect(screen.getByText("Once")).toBeInTheDocument();
     });
@@ -147,24 +117,14 @@ describe("IterationThread", () => {
   });
 
   it("applies an UPDATE event to an existing iteration", async () => {
-    const updateHandlers: Array<(p: { new: CreativeIteration }) => void> = [];
-    const fakeChannel: Record<string, unknown> = {};
-    fakeChannel.on = vi.fn(
-      (_evt: string, spec: { event: string }, cb: (p: { new: CreativeIteration }) => void) => {
-        if (spec.event === "UPDATE") updateHandlers.push(cb);
-        return fakeChannel;
-      },
-    );
-    fakeChannel.subscribe = vi.fn(() => fakeChannel);
-    currentClient = {
-      ...currentClient,
-      channel: vi.fn(() => fakeChannel) as unknown as SupabaseClientMock["channel"],
-    } as SupabaseClientMock;
-
     const start = makeIter({ id: "u1", content: { message: "old" } });
     render(<IterationThread creativeId="c1" initialIterations={[start]} />);
     expect(screen.getByText("old")).toBeInTheDocument();
-    act(() => updateHandlers[0]?.({ new: { ...start, content: { message: "new!" } } }));
+    act(() =>
+      realtime.emit("creative_iterations", "UPDATE", {
+        new: { ...start, content: { message: "new!" } },
+      }),
+    );
     expect(await screen.findByText("new!")).toBeInTheDocument();
   });
 

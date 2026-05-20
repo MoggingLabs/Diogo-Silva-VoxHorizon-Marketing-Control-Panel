@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ApprovalModeState } from "@/lib/approval-mode/types";
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 /**
  * Live store of the current operator-controlled approval mode.
@@ -65,36 +65,41 @@ export function useApprovalMode(options: UseApprovalModeOptions = {}): UseApprov
     }
   }, []);
 
+  // Initial load + the 30s "remaining TTL" countdown tick. Realtime fires on
+  // row changes, not on TTL ticks, so we still swap the state object identity
+  // on an interval so countdown components re-render without a round-trip.
   useEffect(() => {
     void refresh();
-    const supabase = createBrowserClient();
-    const queue = createRealtimeQueue();
-
-    const channel = supabase
-      .channel("approval-mode-singleton")
-      .on("postgres_changes", { event: "*", schema: "public", table: "approval_mode" }, () => {
-        queue.queue("refresh", () => {
-          void refresh();
-        });
-      })
-      .subscribe();
-
-    // Also tick a 30s interval so the UI's "remaining TTL" countdown
-    // is fresh — Realtime fires on row changes, not on TTL ticks.
     const tick = setInterval(() => {
-      // Force a state object identity swap so countdown components
-      // re-render without an actual server round-trip. We don't
-      // re-fetch here — the row hasn't changed; only the perceived
-      // remaining-time has.
       setState((cur) => (cur ? { ...cur } : cur));
     }, 30_000);
-
-    return () => {
-      clearInterval(tick);
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
+    return () => clearInterval(tick);
   }, [refresh]);
+
+  // Realtime now flows through the server-side SSE relay; any approval_mode
+  // change triggers a debounced re-fetch.
+  const queueRef = useRef(createRealtimeQueue());
+  useEffect(() => {
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
+
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "approval_mode",
+          event: "*" as const,
+          callback: () => {
+            queueRef.current.queue("refresh", () => {
+              void refresh();
+            });
+          },
+        },
+      ],
+      [refresh],
+    ),
+  );
 
   return { state, loading, error, refresh };
 }

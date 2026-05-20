@@ -4,78 +4,55 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // the node test project.
 vi.mock("server-only", () => ({}));
 
-const createServerClient = vi.fn();
-vi.mock("@supabase/ssr", () => ({
-  createServerClient: (...args: unknown[]) => createServerClient(...args),
-}));
-
-const getAll = vi.fn(() => [{ name: "sb-auth", value: "v", options: {} }]);
-const setSpy = vi.fn();
-vi.mock("next/headers", () => ({
-  cookies: async () => ({
-    getAll: () => getAll(),
-    set: (name: string, value: string, options: unknown) => setSpy(name, value, options),
-  }),
+const createClient = vi.fn();
+vi.mock("@supabase/supabase-js", () => ({
+  createClient: (...args: unknown[]) => createClient(...args),
 }));
 
 beforeEach(() => {
   process.env.NEXT_PUBLIC_SUPABASE_URL = "http://supabase.test ";
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon\n";
-  createServerClient.mockReset();
-  getAll.mockClear();
-  setSpy.mockClear();
+  process.env.SUPABASE_SECRET_KEY = "sb_secret_test\n";
+  createClient.mockReset();
 });
 
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("createClient", () => {
-  it("wires cleaned env + cookie callbacks", async () => {
-    createServerClient.mockReturnValue("client");
-    const { createClient } = await import("./server");
-    const client = await createClient();
+describe("createClient (server, service-role)", () => {
+  it("builds a service-role client with cleaned env + no session persistence", async () => {
+    createClient.mockReturnValue("client");
+    const { createClient: make } = await import("./server");
+    const client = await make();
     expect(client).toBe("client");
-    expect(createServerClient).toHaveBeenCalledWith(
+
+    // URL + the SERVICE-ROLE key (not the anon key) are passed, trimmed.
+    expect(createClient).toHaveBeenCalledWith(
       "http://supabase.test",
-      "anon",
-      expect.any(Object),
+      "sb_secret_test",
+      expect.objectContaining({
+        auth: expect.objectContaining({
+          autoRefreshToken: false,
+          persistSession: false,
+          detectSessionInUrl: false,
+        }),
+      }),
     );
-
-    const args = createServerClient.mock.calls[0]?.[2] as {
-      cookies: {
-        getAll: () => unknown;
-        setAll: (cookies: { name: string; value: string; options?: unknown }[]) => void;
-      };
-    };
-    // getAll proxies to the next/headers cookieStore.
-    expect(args.cookies.getAll()).toEqual([{ name: "sb-auth", value: "v", options: {} }]);
-    expect(getAll).toHaveBeenCalled();
-
-    // setAll forwards each item to cookieStore.set.
-    args.cookies.setAll([
-      { name: "sb-auth", value: "v2", options: { httpOnly: true } },
-      { name: "other", value: "x" },
-    ]);
-    expect(setSpy).toHaveBeenCalledTimes(2);
-    expect(setSpy).toHaveBeenNthCalledWith(1, "sb-auth", "v2", { httpOnly: true });
   });
 
-  it("swallows the ReadOnly cookie error from a Server Component", async () => {
-    createServerClient.mockReturnValue("client");
-    setSpy.mockImplementationOnce(() => {
-      throw new Error("read-only");
-    });
-    const { createClient } = await import("./server");
-    await createClient();
+  it("does NOT read the public anon key", async () => {
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY = "anon-should-not-be-used";
+    createClient.mockReturnValue("client");
+    const { createClient: make } = await import("./server");
+    await make();
+    const keyArg = createClient.mock.calls[0]?.[1];
+    expect(keyArg).toBe("sb_secret_test");
+    expect(keyArg).not.toBe("anon-should-not-be-used");
+  });
 
-    const args = createServerClient.mock.calls[0]?.[2] as {
-      cookies: {
-        setAll: (cookies: { name: string; value: string; options?: unknown }[]) => void;
-      };
-    };
-
-    // Should not throw — the catch silently swallows the read-only error.
-    expect(() => args.cookies.setAll([{ name: "sb-auth", value: "v", options: {} }])).not.toThrow();
+  it("throws when SUPABASE_SECRET_KEY is missing", async () => {
+    delete process.env.SUPABASE_SECRET_KEY;
+    const { createClient: make } = await import("./server");
+    await expect(make()).rejects.toThrow(/SUPABASE_SECRET_KEY/);
   });
 });

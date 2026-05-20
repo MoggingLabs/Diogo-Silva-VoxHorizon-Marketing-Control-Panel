@@ -2,11 +2,11 @@
  * Tests for the `usePipelineEvents` hook (PF-E-3). Verifies:
  *  - initial events are stored chronological-first;
  *  - INSERT/UPDATE/DELETE realtime payloads flow through the debounce queue;
- *  - the subscription is cleaned up + the channel removed on unmount;
+ *  - the queue is disposed on unmount (the SSE relay owns its teardown);
  *  - the hook re-seeds when the caller hands a fresh initialEvents prop.
  *
- * Realtime calls and Supabase clients are stubbed via the shared
- * supabase-mock helper. The queue helper is mocked so we can drive it
+ * Realtime now flows through the server-side SSE relay hook, mocked via the
+ * shared realtime-mock helper. The queue helper is mocked so we can drive it
  * synchronously without juggling fake timers.
  */
 import { act, render } from "@testing-library/react";
@@ -14,18 +14,18 @@ import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PipelineEvent } from "@/lib/pipeline/types";
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 
-const createBrowserClient = vi.fn();
-let currentSupabase: SupabaseClientMock;
+const realtime = mockRealtimeStream();
 const queueImpl = {
   queue: vi.fn(),
   flushNow: vi.fn(),
   dispose: vi.fn(),
 };
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => createBrowserClient(),
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 vi.mock("@/lib/realtime-queue", () => ({
@@ -35,15 +35,13 @@ vi.mock("@/lib/realtime-queue", () => ({
 import { usePipelineEvents } from "./usePipelineEvents";
 
 beforeEach(() => {
+  realtime.reset();
   queueImpl.queue.mockReset();
   queueImpl.flushNow.mockReset();
   queueImpl.dispose.mockReset();
   // The hook's debounce path calls `queue(key, cb)` and then we manually
   // invoke `cb()` to simulate the flush.
   queueImpl.queue.mockImplementation((_key: string, cb: () => void) => cb());
-
-  currentSupabase = mockSupabaseClient();
-  createBrowserClient.mockReturnValue(currentSupabase);
 });
 
 afterEach(() => {
@@ -86,22 +84,24 @@ function eventRow(over: Partial<PipelineEvent>): PipelineEvent {
 }
 
 /**
- * Capture every `.on` handler the hook installed on the channel, keyed by
- * the postgres `event` filter (INSERT / UPDATE / DELETE).
+ * Compatibility shim mirroring the old "capture .on handlers" helper. The
+ * hook now registers listeners via the SSE relay hook; we expose
+ * `handlers.INSERT/UPDATE/DELETE` that fan a payload into the matching
+ * registered listeners on the `pipeline_events` table.
  */
 function captureChannelHandlers() {
-  const handlers: Record<string, (payload: { new?: unknown; old?: unknown }) => void> = {};
-  const channel = {
-    on: vi.fn((_event: string, opts: { event: string }, cb: (payload: unknown) => void) => {
-      handlers[opts.event] = cb as (payload: { new?: unknown; old?: unknown }) => void;
-      return channel;
-    }),
-    subscribe: vi.fn(() => channel),
+  const emitFor =
+    (eventType: "INSERT" | "UPDATE" | "DELETE") => (payload: { new?: unknown; old?: unknown }) =>
+      realtime.emit("pipeline_events", eventType, payload);
+  const handlers: Record<
+    "INSERT" | "UPDATE" | "DELETE",
+    (p: { new?: unknown; old?: unknown }) => void
+  > = {
+    INSERT: emitFor("INSERT"),
+    UPDATE: emitFor("UPDATE"),
+    DELETE: emitFor("DELETE"),
   };
-  currentSupabase.channel.mockReturnValue(
-    channel as unknown as ReturnType<typeof currentSupabase.channel>,
-  );
-  return { handlers, channel };
+  return { handlers };
 }
 
 describe("usePipelineEvents", () => {
@@ -227,18 +227,19 @@ describe("usePipelineEvents", () => {
     expect(getIds()).toEqual(["a"]);
   });
 
-  it("disposes the queue + removes the channel on unmount", () => {
-    const { channel } = captureChannelHandlers();
+  it("disposes the queue on unmount", () => {
+    captureChannelHandlers();
     const { unmount } = render(<Probe pipelineId="p1" initial={[]} />);
     unmount();
     expect(queueImpl.dispose).toHaveBeenCalled();
-    expect(currentSupabase.removeChannel).toHaveBeenCalledWith(channel);
   });
 
   it("does not subscribe when pipelineId is empty", () => {
     captureChannelHandlers();
     render(<Probe pipelineId="" initial={[]} />);
-    expect(currentSupabase.channel).not.toHaveBeenCalled();
+    // With an empty pipelineId the hook registers an empty listener set.
+    const pipelineListeners = realtime.listeners.filter((l) => l.table === "pipeline_events");
+    expect(pipelineListeners.length).toBe(0);
   });
 
   it("re-seeds when a new initialEvents prop arrives", () => {

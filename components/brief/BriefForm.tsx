@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Controller, useForm } from "react-hook-form";
 
 import { BriefPayload, type BriefPayloadT } from "@/lib/briefs";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { fetchClients } from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
@@ -128,25 +128,22 @@ export function BriefForm({ initialClientId }: { initialClientId?: string } = {}
     defaultValues: { ...DEFAULT_VALUES, client_id: initialClientId ?? "" },
   });
 
-  // Fetch clients for the picker. Anon key + RLS-off in v1 makes this safe
-  // from the browser. If RLS is ever turned on, this moves to a server-side
-  // /api/clients endpoint.
+  // Fetch clients for the picker via the service-role API route. Phase 2 of
+  // the RLS lockdown means the anon browser key can no longer read `clients`
+  // directly, so this goes through `/api/clients` (gated by Caddy basic auth).
   useEffect(() => {
     let cancelled = false;
-    const supabase = createBrowserClient();
     (async () => {
-      const { data, error } = await supabase
-        .from("clients")
-        .select("id, name, slug, service_type")
-        .eq("status", "active")
-        .order("name");
-      if (cancelled) return;
-      if (error) {
-        setClientsError(error.message);
-      } else {
-        setClients((data ?? []) as ClientOption[]);
+      try {
+        const data = await fetchClients();
+        if (cancelled) return;
+        setClients(data as ClientOption[]);
+      } catch (e) {
+        if (cancelled) return;
+        setClientsError(e instanceof Error ? e.message : "Failed to load clients");
+      } finally {
+        if (!cancelled) setClientsLoading(false);
       }
-      setClientsLoading(false);
     })();
     return () => {
       cancelled = true;

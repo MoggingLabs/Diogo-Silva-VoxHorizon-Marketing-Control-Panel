@@ -7,6 +7,7 @@ import { act, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { VideoCreative } from "@/lib/video-creatives";
 import type { VideoBrief } from "@/lib/video-briefs";
 
@@ -25,44 +26,18 @@ vi.mock("@/lib/realtime-queue", () => ({
   }),
 }));
 
-const channelHandlers: Record<
-  string,
-  Array<(p: { new?: VideoCreative; old?: Partial<VideoCreative> }) => void>
-> = {
-  INSERT: [],
-  UPDATE: [],
-  DELETE: [],
-};
-
-const removeChannelSpy = vi.fn();
-const channelSpy = vi.fn(() => {
-  const ch: Record<string, unknown> = {};
-  ch.on = vi.fn(
-    (
-      _evt: string,
-      spec: { event: string },
-      cb: (p: { new?: VideoCreative; old?: Partial<VideoCreative> }) => void,
-    ) => {
-      if (spec.event in channelHandlers) channelHandlers[spec.event]!.push(cb);
-      return ch;
-    },
-  );
-  ch.subscribe = vi.fn(() => ch);
-  ch.unsubscribe = vi.fn();
-  return ch;
-});
-
-const createSignedUrl = vi.fn(async (path: string) => ({
-  data: { signedUrl: `https://signed.example/${path}` },
-  error: null,
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => ({
-    channel: channelSpy,
-    removeChannel: removeChannelSpy,
-    storage: { from: () => ({ createSignedUrl }) },
-  }),
+// Signed URLs are minted server-side; mock the batched client-data helper.
+const signStoragePaths = vi.fn(async (_bucket: string, paths: string[]) =>
+  Object.fromEntries(paths.map((p) => [p, `https://signed.example/${p}`])),
+);
+vi.mock("@/lib/realtime/client-data", () => ({
+  signStoragePaths: (bucket: string, paths: string[]) => signStoragePaths(bucket, paths),
 }));
 
 vi.mock("./VideoSidePanel", () => ({
@@ -123,12 +98,8 @@ const briefStub: VideoBrief = {
 
 beforeEach(() => {
   routerReplace.mockReset();
-  removeChannelSpy.mockReset();
-  channelSpy.mockClear();
-  channelHandlers.INSERT = [];
-  channelHandlers.UPDATE = [];
-  channelHandlers.DELETE = [];
-  createSignedUrl.mockClear();
+  realtime.reset();
+  signStoragePaths.mockClear();
 });
 
 afterEach(() => {
@@ -220,7 +191,7 @@ describe("VideoVariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.INSERT?.[0]?.({ new: makeCreative({ id: "vnew" }) });
+      realtime.emit("video_creatives", "INSERT", { new: makeCreative({ id: "vnew" }) });
     });
     expect(screen.getByTestId("video-panel")).toBeInTheDocument();
   });
@@ -235,7 +206,7 @@ describe("VideoVariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.INSERT?.[0]?.({
+      realtime.emit("video_creatives", "INSERT", {
         new: makeCreative({
           id: "vnew",
           captioned_path: "cap.mp4",
@@ -244,7 +215,7 @@ describe("VideoVariantsGrid", () => {
         }),
       });
     });
-    expect(createSignedUrl).toHaveBeenCalled();
+    expect(signStoragePaths).toHaveBeenCalled();
   });
 
   it("INSERT dedupes by id", async () => {
@@ -259,7 +230,7 @@ describe("VideoVariantsGrid", () => {
     );
     const before = screen.getAllByRole("button").length;
     await act(async () => {
-      channelHandlers.INSERT?.[0]?.({ new: existing });
+      realtime.emit("video_creatives", "INSERT", { new: existing });
     });
     expect(screen.getAllByRole("button").length).toBe(before);
   });
@@ -275,7 +246,7 @@ describe("VideoVariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.UPDATE?.[0]?.({ new: { ...c, duration_actual_s: 45 } });
+      realtime.emit("video_creatives", "UPDATE", { new: { ...c, duration_actual_s: 45 } });
     });
     // Card label includes the MM:SS-formatted duration.
     expect(screen.getByText("00:45")).toBeInTheDocument();
@@ -292,7 +263,7 @@ describe("VideoVariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.DELETE?.[0]?.({ old: { id: "v1" } });
+      realtime.emit("video_creatives", "DELETE", { old: { id: "v1" } });
     });
     expect(screen.getByText(/No video creatives yet/)).toBeInTheDocument();
   });
@@ -308,7 +279,7 @@ describe("VideoVariantsGrid", () => {
       />,
     );
     await act(async () => {
-      channelHandlers.DELETE?.[0]?.({ old: {} });
+      realtime.emit("video_creatives", "DELETE", { old: {} });
     });
     expect(screen.getAllByRole("button").length).toBeGreaterThan(0);
   });
@@ -333,7 +304,7 @@ describe("VideoVariantsGrid", () => {
     expect(screen.getByText(/No video creatives yet/)).toBeInTheDocument();
   });
 
-  it("removes the realtime channel on unmount", () => {
+  it("registers the realtime relay (which owns its own teardown)", () => {
     const { unmount } = render(
       <VideoVariantsGrid
         brief={briefStub}
@@ -342,7 +313,7 @@ describe("VideoVariantsGrid", () => {
         selectedId={null}
       />,
     );
-    unmount();
-    expect(removeChannelSpy).toHaveBeenCalled();
+    expect(realtime.spy).toHaveBeenCalled();
+    expect(() => unmount()).not.toThrow();
   });
 });

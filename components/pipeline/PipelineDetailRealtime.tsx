@@ -1,51 +1,41 @@
 "use client";
 
-import { useEffect } from "react";
+import { useMemo } from "react";
 import { useRouter } from "next/navigation";
 
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 /**
  * Subscribes to both `pipelines` (filtered to this id) and `pipeline_events`
  * (filtered to `pipeline_id`) and calls `router.refresh()` whenever something
  * changes. Renderless — drop it into the detail page and let it sit there.
  *
- * Both filters use `eq` against the realtime publication so we only get the
- * notifications relevant to the open pipeline.
+ * Both filters use `eq` against the relay so we only get the notifications
+ * relevant to the open pipeline. Realtime now flows through the server-side
+ * SSE relay (`/api/realtime`) instead of a direct anon Supabase channel.
  */
 export function PipelineDetailRealtime({ pipelineId }: { pipelineId: string }) {
   const router = useRouter();
 
-  useEffect(() => {
-    const supabase = createBrowserClient();
-    const channel = supabase
-      .channel(`pipeline:${pipelineId}`)
-      .on(
-        "postgres_changes",
+  useRealtimeStream(
+    useMemo(
+      () => [
         {
-          event: "*",
-          schema: "public",
           table: "pipelines",
+          event: "*" as const,
           filter: `id=eq.${pipelineId}`,
+          callback: () => router.refresh(),
         },
-        () => router.refresh(),
-      )
-      .on(
-        "postgres_changes",
         {
-          event: "*",
-          schema: "public",
           table: "pipeline_events",
+          event: "*" as const,
           filter: `pipeline_id=eq.${pipelineId}`,
+          callback: () => router.refresh(),
         },
-        () => router.refresh(),
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [pipelineId, router]);
+      ],
+      [pipelineId, router],
+    ),
+  );
 
   return null;
 }

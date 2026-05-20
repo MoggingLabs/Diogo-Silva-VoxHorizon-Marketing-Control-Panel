@@ -27,24 +27,13 @@ vi.mock("@/hooks/usePipelineEvents", () => ({
   usePipelineEvents: (_id: string, seed: PipelineEvent[]) => seed,
 }));
 
-const createSignedUrl: ReturnType<
-  typeof vi.fn<
-    (
-      path?: string,
-      ttl?: number,
-    ) => Promise<{
-      data: { signedUrl: string } | null;
-      error: { message: string } | null;
-    }>
-  >
-> = vi.fn(async () => ({
-  data: { signedUrl: "https://x.example/thumb.png" },
-  error: null,
-}));
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => ({
-    storage: { from: () => ({ createSignedUrl }) },
-  }),
+// Signed URLs are minted server-side; mock the client-data helper. Returns a
+// URL string (or null on failure), matching `signStoragePath`'s contract.
+const signStoragePath = vi.fn<() => Promise<string | null>>(
+  async () => "https://x.example/thumb.png",
+);
+vi.mock("@/lib/realtime/client-data", () => ({
+  signStoragePath: () => signStoragePath(),
 }));
 
 import { StageGeneration } from "./StageGeneration";
@@ -84,7 +73,7 @@ function makeEvent(over: Partial<PipelineEvent> = {}): PipelineEvent {
 
 beforeEach(() => {
   routerRefresh.mockReset();
-  createSignedUrl.mockClear();
+  signStoragePath.mockClear();
 });
 
 afterEach(() => {
@@ -196,7 +185,7 @@ describe("StageGeneration", () => {
     ];
     render(<StageGeneration pipeline={makePipeline()} initialEvents={events} />);
     await waitFor(() => {
-      expect(createSignedUrl).toHaveBeenCalled();
+      expect(signStoragePath).toHaveBeenCalled();
     });
   });
 
@@ -270,7 +259,7 @@ describe("StageGeneration", () => {
   });
 
   it("falls back to the icon when image task has no signed URL", async () => {
-    createSignedUrl.mockResolvedValueOnce({ data: null, error: { message: "denied" } });
+    signStoragePath.mockResolvedValueOnce(null);
     const events: PipelineEvent[] = [
       makeEvent({
         kind: "task_done",
@@ -284,8 +273,8 @@ describe("StageGeneration", () => {
       }),
     ];
     render(<StageGeneration pipeline={makePipeline()} initialEvents={events} />);
-    // No thumbnail image; the icon fallback shows. Just verify createSignedUrl ran.
-    await waitFor(() => expect(createSignedUrl).toHaveBeenCalled());
+    // No thumbnail image; the icon fallback shows. Just verify signStoragePath ran.
+    await waitFor(() => expect(signStoragePath).toHaveBeenCalled());
   });
 
   it("artifact link click warns on failed signing without opening a window", async () => {
@@ -295,7 +284,7 @@ describe("StageGeneration", () => {
         payload: { creative_id: "v1", substage: "compose", kind: "video", captioned_path: "x.mp4" },
       }),
     ];
-    createSignedUrl.mockResolvedValueOnce({ data: null, error: { message: "denied" } });
+    signStoragePath.mockResolvedValueOnce(null);
     const winOpen = vi.fn();
     vi.stubGlobal("open", winOpen);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -318,6 +307,6 @@ describe("StageGeneration", () => {
     ];
     render(<StageGeneration pipeline={makePipeline()} initialEvents={events} />);
     // No file_path → no signing attempt.
-    expect(createSignedUrl).not.toHaveBeenCalled();
+    expect(signStoragePath).not.toHaveBeenCalled();
   });
 });

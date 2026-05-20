@@ -13,13 +13,13 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
-import type { Creative } from "@/lib/creatives";
+import type { Creative, CreativeIteration } from "@/lib/creatives";
 
-let currentClient: SupabaseClientMock = mockSupabaseClient();
-
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentClient,
+// SidePanel reads its iteration thread from the service-role API via the
+// client-data helper. Mock it per-test to drive success / error paths.
+const fetchCreativeIterations = vi.fn<() => Promise<CreativeIteration[]>>(async () => []);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchCreativeIterations: () => fetchCreativeIterations(),
 }));
 
 const markReadSpy = vi.fn<(id: string) => Promise<void>>(async () => {});
@@ -83,9 +83,8 @@ function makeCreative(over: Partial<Creative> = {}): Creative {
 }
 
 beforeEach(() => {
-  currentClient = mockSupabaseClient({
-    creative_iterations: { select: { data: [], error: null } },
-  });
+  fetchCreativeIterations.mockReset();
+  fetchCreativeIterations.mockResolvedValue([]);
 });
 
 afterEach(() => {
@@ -137,15 +136,10 @@ describe("SidePanel", () => {
     expect(screen.getByText(/Decided /)).toBeInTheDocument();
   });
 
-  it("fetches iterations from supabase and renders them", async () => {
-    currentClient = mockSupabaseClient({
-      creative_iterations: {
-        select: {
-          error: null,
-          data: [{ id: "i1", creative_id: "c1", created_at: "2026-05-17T11:01:00Z" }],
-        },
-      },
-    });
+  it("fetches iterations from the API and renders them", async () => {
+    fetchCreativeIterations.mockResolvedValue([
+      { id: "i1", creative_id: "c1", created_at: "2026-05-17T11:01:00Z" } as CreativeIteration,
+    ]);
     render(<SidePanel creative={makeCreative()} signedUrl={null} open onOpenChange={() => {}} />);
     await waitFor(() => {
       expect(screen.getByTestId("iter-thread")).toHaveTextContent("c1");
@@ -153,11 +147,7 @@ describe("SidePanel", () => {
   });
 
   it("surfaces an iteration fetch error inline", async () => {
-    currentClient = mockSupabaseClient({
-      creative_iterations: {
-        select: { data: null, error: { message: "rls denied" } },
-      },
-    });
+    fetchCreativeIterations.mockRejectedValue(new Error("rls denied"));
     render(<SidePanel creative={makeCreative()} signedUrl={null} open onOpenChange={() => {}} />);
     expect(await screen.findByText(/Failed to load iterations: rls denied/)).toBeInTheDocument();
   });

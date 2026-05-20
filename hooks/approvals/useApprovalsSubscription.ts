@@ -1,10 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { Approval } from "@/lib/approvals/types";
 import { createRealtimeQueue } from "@/lib/realtime-queue";
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 
 /**
  * Live store of pending approvals.
@@ -80,54 +80,65 @@ export function useApprovalsSubscription(
     }
   }, [fetchUrl]);
 
+  // Initial load on mount.
   useEffect(() => {
     void refresh();
-    const supabase = createBrowserClient();
-    const queue = createRealtimeQueue();
-
-    const channel = supabase
-      .channel("approvals-pending")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "approvals" },
-        (payload) => {
-          const row = payload.new as unknown;
-          if (isPendingApprovalShape(row)) {
-            callbacksRef.current.onNewApproval?.(row);
-          }
-          queue.queue("refresh", () => {
-            void refresh();
-          });
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "approvals" },
-        (payload) => {
-          const row = payload.new as unknown;
-          if (row && typeof row === "object") {
-            const v = row as Record<string, unknown>;
-            if (v.status !== "pending" && typeof v.id === "string") {
-              callbacksRef.current.onApprovalResolved?.(row as Approval);
-            }
-          }
-          queue.queue("refresh", () => {
-            void refresh();
-          });
-        },
-      )
-      .on("postgres_changes", { event: "DELETE", schema: "public", table: "approvals" }, () => {
-        queue.queue("refresh", () => {
-          void refresh();
-        });
-      })
-      .subscribe();
-
-    return () => {
-      queue.dispose();
-      void supabase.removeChannel(channel);
-    };
   }, [refresh]);
+
+  // Realtime now flows through the server-side SSE relay. We keep the
+  // debounced re-fetch (deduped by key "refresh") and the immediate
+  // callbacks, exactly as the old Supabase channel did.
+  const queueRef = useRef(createRealtimeQueue());
+  useEffect(() => {
+    const queue = queueRef.current;
+    return () => queue.dispose();
+  }, []);
+
+  useRealtimeStream(
+    useMemo(
+      () => [
+        {
+          table: "approvals",
+          event: "INSERT" as const,
+          callback: (payload) => {
+            const row = payload.new as unknown;
+            if (isPendingApprovalShape(row)) {
+              callbacksRef.current.onNewApproval?.(row);
+            }
+            queueRef.current.queue("refresh", () => {
+              void refresh();
+            });
+          },
+        },
+        {
+          table: "approvals",
+          event: "UPDATE" as const,
+          callback: (payload) => {
+            const row = payload.new as unknown;
+            if (row && typeof row === "object") {
+              const v = row as Record<string, unknown>;
+              if (v.status !== "pending" && typeof v.id === "string") {
+                callbacksRef.current.onApprovalResolved?.(row as Approval);
+              }
+            }
+            queueRef.current.queue("refresh", () => {
+              void refresh();
+            });
+          },
+        },
+        {
+          table: "approvals",
+          event: "DELETE" as const,
+          callback: () => {
+            queueRef.current.queue("refresh", () => {
+              void refresh();
+            });
+          },
+        },
+      ],
+      [refresh],
+    ),
+  );
 
   return {
     approvals,

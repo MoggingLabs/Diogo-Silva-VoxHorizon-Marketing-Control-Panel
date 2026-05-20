@@ -45,24 +45,11 @@ vi.mock("./EkkoDraftModal", () => ({
   },
 }));
 
-const supabaseClientsResponse = {
-  data: [
-    { id: "c1", name: "Acme", slug: "acme", service_type: "roofing" },
-    { id: "c2", name: "Beta", slug: "beta", service_type: "remodeling" },
-  ] as unknown[],
-  error: null as { message: string } | null,
-};
-
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => ({
-    from: () => ({
-      select: () => ({
-        eq: () => ({
-          order: () => Promise.resolve(supabaseClientsResponse),
-        }),
-      }),
-    }),
-  }),
+// Clients are fetched via the service-role API route (client-data helper).
+type ClientRow = { id: string; name: string; slug: string; service_type: string };
+const fetchClients = vi.fn<() => Promise<ClientRow[]>>(async () => []);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchClients: () => fetchClients(),
 }));
 
 import { StageConfiguration } from "./StageConfiguration";
@@ -91,11 +78,11 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 beforeEach(() => {
   routerRefresh.mockReset();
   lastProposedCb = null;
-  supabaseClientsResponse.data = [
+  fetchClients.mockReset();
+  fetchClients.mockResolvedValue([
     { id: "c1", name: "Acme", slug: "acme", service_type: "roofing" },
     { id: "c2", name: "Beta", slug: "beta", service_type: "remodeling" },
-  ];
-  supabaseClientsResponse.error = null;
+  ]);
   vi.useFakeTimers({ shouldAdvanceTime: true });
 });
 
@@ -142,8 +129,7 @@ describe("StageConfiguration - clients fetch", () => {
   });
 
   it("renders an error label when client fetch fails", async () => {
-    supabaseClientsResponse.data = [];
-    supabaseClientsResponse.error = { message: "rls denied" };
+    fetchClients.mockRejectedValue(new Error("rls denied"));
     render(<StageConfiguration pipeline={makePipeline()} />);
     expect(await screen.findByText(/rls denied/)).toBeInTheDocument();
   });
@@ -160,7 +146,7 @@ describe("StageConfiguration - clients fetch", () => {
   });
 
   it("renders the placeholder when no active clients are found", async () => {
-    supabaseClientsResponse.data = [];
+    fetchClients.mockResolvedValue([]);
     render(<StageConfiguration pipeline={makePipeline()} />);
     expect(await screen.findByText(/No active clients found/)).toBeInTheDocument();
   });

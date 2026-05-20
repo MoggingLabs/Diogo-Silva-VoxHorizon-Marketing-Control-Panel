@@ -15,12 +15,13 @@ import { render, screen } from "@testing-library/react";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentSupabase,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 import { VideoBriefTimeline } from "./VideoBriefTimeline";
@@ -33,7 +34,7 @@ type LocalEvent = {
 };
 
 beforeEach(() => {
-  currentSupabase = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -123,23 +124,20 @@ describe("VideoBriefTimeline", () => {
     expect(container.querySelector("pre")).toBeNull();
   });
 
-  it("opens and closes the realtime channel", () => {
+  it("subscribes to the events relay filtered by ref_id", () => {
     const { unmount } = render(<VideoBriefTimeline videoBriefId="vb1" initialEvents={[]} />);
-    expect(currentSupabase._spies.channel).toHaveBeenCalledWith("video-brief-events-vb1");
-    unmount();
-    expect(currentSupabase._spies.removeChannel).toHaveBeenCalled();
+    const listener = realtime.listeners.find((l) => l.table === "events");
+    expect(listener).toBeDefined();
+    expect(listener?.event).toBe("INSERT");
+    expect(listener?.filter).toBe("ref_id=eq.vb1");
+    expect(() => unmount()).not.toThrow();
   });
 
   it("appends a new event when the realtime handler fires", () => {
     render(<VideoBriefTimeline videoBriefId="vb1" initialEvents={[]} />);
 
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    const handler = channel.on.mock.calls[0]![2] as (p: { new: LocalEvent }) => void;
-
     act(() => {
-      handler({
+      realtime.emit("events", "INSERT", {
         new: {
           id: "new-1",
           kind: "video_brief_decided",
@@ -161,13 +159,8 @@ describe("VideoBriefTimeline", () => {
     };
     render(<VideoBriefTimeline videoBriefId="vb1" initialEvents={[initial]} />);
 
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    const handler = channel.on.mock.calls[0]![2] as (p: { new: LocalEvent }) => void;
-
     act(() => {
-      handler({ new: initial });
+      realtime.emit("events", "INSERT", { new: initial });
     });
 
     // Should still only have one event rendered.
@@ -177,13 +170,8 @@ describe("VideoBriefTimeline", () => {
   it("drops INSERTs that lack an id", () => {
     render(<VideoBriefTimeline videoBriefId="vb1" initialEvents={[]} />);
 
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    const handler = channel.on.mock.calls[0]![2] as (p: { new: LocalEvent }) => void;
-
     act(() => {
-      handler({
+      realtime.emit("events", "INSERT", {
         new: {
           id: null as unknown as string,
           kind: "video_brief_created",

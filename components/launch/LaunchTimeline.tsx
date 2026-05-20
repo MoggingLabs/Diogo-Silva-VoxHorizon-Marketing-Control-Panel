@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 
-import { createClient as createBrowserClient } from "@/lib/supabase/browser";
+import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import type { Database } from "@/lib/supabase/types.gen";
 
 type EventRow = Pick<
@@ -66,28 +66,19 @@ export function LaunchTimeline({
     setEvents(initialEvents);
   }, [initialEvents]);
 
-  useEffect(() => {
-    const supabase = createBrowserClient();
-    const channel = supabase
-      .channel(`${table}:${launchId}`)
-      .on(
-        "postgres_changes",
+  useRealtimeStream(
+    useMemo(
+      () => [
         {
-          event: "UPDATE",
-          schema: "public",
           table,
+          event: "UPDATE" as const,
           filter: `id=eq.${launchId}`,
+          callback: () => router.refresh(),
         },
-        () => {
-          router.refresh();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [launchId, router, table]);
+      ],
+      [launchId, router, table],
+    ),
+  );
 
   const sorted = useMemo(
     () =>

@@ -11,20 +11,21 @@
  *   - Realtime channel uses the table from props ("launch_packages" default; or video).
  *   - Realtime callback calls router.refresh().
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, act } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 
 const refresh = vi.fn();
-let currentSupabase: SupabaseClientMock = mockSupabaseClient();
+const realtime = mockRealtimeStream();
 
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh, push: vi.fn(), replace: vi.fn(), back: vi.fn() }),
 }));
 
-vi.mock("@/lib/supabase/browser", () => ({
-  createClient: () => currentSupabase,
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
 import { LaunchTimeline } from "./LaunchTimeline";
@@ -44,7 +45,7 @@ const ev = (events: LocalEvent[]) => events as unknown as EventArr;
 
 beforeEach(() => {
   refresh.mockReset();
-  currentSupabase = mockSupabaseClient();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -186,28 +187,29 @@ describe("LaunchTimeline", () => {
     expect(screen.getByText("Launch posted")).toBeInTheDocument();
   });
 
-  it("opens and cleans up the realtime channel for image launches", () => {
+  it("subscribes to the launch_packages relay (default table) filtered by id", () => {
     const { unmount } = render(<LaunchTimeline launchId="L1" initialEvents={[]} />);
 
-    expect(currentSupabase._spies.channel).toHaveBeenCalledWith("launch_packages:L1");
-    unmount();
-    expect(currentSupabase._spies.removeChannel).toHaveBeenCalled();
+    const listener = realtime.listeners.find((l) => l.table === "launch_packages");
+    expect(listener).toBeDefined();
+    expect(listener?.event).toBe("UPDATE");
+    expect(listener?.filter).toBe("id=eq.L1");
+    expect(() => unmount()).not.toThrow();
   });
 
-  it("opens the channel keyed on the video table when table=video_launch_packages", () => {
+  it("subscribes to the video table when table=video_launch_packages", () => {
     render(<LaunchTimeline launchId="L1" table="video_launch_packages" initialEvents={[]} />);
 
-    expect(currentSupabase._spies.channel).toHaveBeenCalledWith("video_launch_packages:L1");
+    const listener = realtime.listeners.find((l) => l.table === "video_launch_packages");
+    expect(listener).toBeDefined();
+    expect(listener?.filter).toBe("id=eq.L1");
   });
 
   it("calls router.refresh() when realtime UPDATE fires", () => {
     render(<LaunchTimeline launchId="L1" initialEvents={[]} />);
-
-    const channel = currentSupabase._spies.channel.mock.results[0]!.value as {
-      on: ReturnType<typeof vi.fn>;
-    };
-    const handler = channel.on.mock.calls[0]![2] as () => void;
-    handler();
+    act(() => {
+      realtime.emit("launch_packages", "UPDATE", { new: { id: "L1" } });
+    });
     expect(refresh).toHaveBeenCalled();
   });
 
