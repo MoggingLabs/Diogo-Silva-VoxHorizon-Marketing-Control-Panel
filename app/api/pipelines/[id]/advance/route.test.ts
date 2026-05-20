@@ -13,9 +13,23 @@ import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
 
+// `@/lib/operator/dispatch` imports `server-only`; neutralise it so the jsdom
+// route-test project can load the (partially mocked) module.
+vi.mock("server-only", () => ({}));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
+
+// `vi.hoisted` so the spy exists when the hoisted `vi.mock` factory runs.
+const { dispatchOperator } = vi.hoisted(() => ({
+  dispatchOperator: vi.fn<(id: string, instruction: string) => Promise<void>>(async () => {}),
+}));
+vi.mock("@/lib/operator/dispatch", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/operator/dispatch")>("@/lib/operator/dispatch");
+  return { ...actual, dispatchOperator };
+});
 
 import { POST } from "./route";
 
@@ -58,6 +72,7 @@ const clientId = "22222222-2222-4222-8222-222222222222";
 beforeEach(() => {
   delete process.env.WORKER_URL;
   delete process.env.WORKER_SHARED_SECRET;
+  dispatchOperator.mockClear();
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -137,6 +152,84 @@ describe("POST /api/pipelines/:id/advance", () => {
         { params },
       );
       expect(res.status).toBe(200);
+    });
+
+    it("re-tasks the operator for ideation after approving the brief", async () => {
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: {
+              single: {
+                data: {
+                  id,
+                  status: "configuration",
+                  format_choice: "image",
+                  client_id: clientId,
+                  config_draft: { operator_driven: true, image_payload: validImagePayload },
+                  advanced_at: {},
+                },
+                error: null,
+              },
+            },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          clients: { select: { single: { data: { slug: "acme" }, error: null } } },
+          briefs: { insert: { single: { data: { id: "ib1" }, error: null } } },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      // The advance fires retaskOperator (await'd internally) which calls dispatch.
+      await new Promise((r) => setTimeout(r, 5));
+      expect(dispatchOperator).toHaveBeenCalledTimes(1);
+      const [pid, instruction] = dispatchOperator.mock.calls[0]!;
+      expect(pid).toBe(id);
+      expect(instruction.toLowerCase()).toContain("concept");
+      // And it records an operator_dispatched event on the timeline.
+      expect(currentSupabase._spies.from).toHaveBeenCalledWith("pipeline_events");
+    });
+
+    it("does not block the advance when the operator dispatch rejects", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      dispatchOperator.mockRejectedValueOnce(new Error("operator worker down"));
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: {
+              single: {
+                data: {
+                  id,
+                  status: "configuration",
+                  format_choice: "image",
+                  client_id: clientId,
+                  config_draft: { operator_driven: true, image_payload: validImagePayload },
+                  advanced_at: {},
+                },
+                error: null,
+              },
+            },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          clients: { select: { single: { data: { slug: "acme" }, error: null } } },
+          briefs: { insert: { single: { data: { id: "ib1" }, error: null } } },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      await new Promise((r) => setTimeout(r, 5));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("operator worker down"));
+      warn.mockRestore();
     });
 
     it("happy path video-only (200)", async () => {

@@ -69,6 +69,40 @@ export async function createPipeline(input: CreatePipelineInput): Promise<Pipeli
   return data.pipeline;
 }
 
+/**
+ * Input to `POST /api/pipelines/operator` — the operator-driven kickoff.
+ * `instruction` is the manager's free-text brief ("4 roofing ads, Austin,
+ * $99 inspection"); the other fields mirror `CreatePipelineInput`.
+ */
+export type KickoffOperatorInput = {
+  instruction: string;
+  format_choice?: PipelineFormat;
+  client_id?: string;
+};
+
+/**
+ * Start an operator-driven pipeline: creates the pipeline row and nudges the
+ * Hermes operator to begin authoring the brief. Returns the created pipeline
+ * so the kickoff UI can redirect to its detail page. Throws on 4xx/5xx with
+ * the inline error body for the caller to surface.
+ */
+export async function kickoffOperatorPipeline(input: KickoffOperatorInput): Promise<Pipeline> {
+  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/operator`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/operator failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+  const data = await readJson<{ pipeline: Pipeline }>(res);
+  return data.pipeline;
+}
+
 export async function listPipelines(
   filters: ListPipelinesFilters = {},
 ): Promise<ListPipelinesResult> {

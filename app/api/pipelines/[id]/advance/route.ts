@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { BriefPayload, type BriefInsert } from "@/lib/briefs";
+import { dispatchOperator, isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
 import { activeTracksLocal, canAdvance } from "@/lib/pipeline/transitions";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -314,20 +315,24 @@ async function advanceFromConfiguration(
     console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
   }
 
-  // 7. Best-effort kick to the worker's image-generation pipeline:
-  //    POST /work/pipeline/ideation kicks off the deterministic
-  //    concept-preview producer (restored in feat/restore-image-generation —
-  //    Ekko's image-ad-prompting skill is an interactive prompt-writer, not
-  //    an automated dashboard executor). The worker emits the
-  //    task_queued/running/done/error pipeline_events the StageGeneration UI
-  //    + the Supabase auto-advance trigger read. Failures are swallowed so a
-  //    worker outage doesn't block the advance — the row + event are the
-  //    primary artifacts.
-  void fireWorkerIdeation(pipeline.id).catch((e) => {
-    console.warn(
-      `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
-    );
-  });
+  // 7. Hand ideation off to the right executor — exactly one of them, never
+  //    both (running both would render every concept twice and double the Kie
+  //    spend). Operator-driven pipelines: the Hermes operator authors + renders
+  //    the concept previews (its render call is the spend gate). Regular
+  //    pipelines: the deterministic /work/pipeline/ideation producer (Ekko's
+  //    image-ad-prompting skill is an interactive prompt-writer, not an
+  //    automated executor). Both paths emit the same task_* / cost_recorded
+  //    pipeline_events the StageGeneration UI + auto-advance trigger read, and
+  //    both are fire-and-forget so a worker outage never blocks the advance.
+  if (isOperatorDriven(pipeline.config_draft)) {
+    void retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+  } else {
+    void fireWorkerIdeation(pipeline.id).catch((e) => {
+      console.warn(
+        `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
+      );
+    });
+  }
 
   return NextResponse.json({
     pipeline: updated,
@@ -436,6 +441,44 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
     out.video = obj.video.filter((v): v is string => typeof v === "string");
   }
   return out;
+}
+
+/**
+ * Re-task the operator for the next stage and record the handoff on the
+ * timeline. Both halves are best-effort:
+ *
+ *   - the `operator_dispatched` event makes the narration view show the
+ *     handoff immediately (before the operator's own events stream in);
+ *   - the worker dispatch nudges the operator container.
+ *
+ * Idempotency lives on the operator side — it reads the live pipeline state
+ * and only does the work that's outstanding for the stage — so a duplicate
+ * dispatch (e.g. a double-clicked Continue) is safe. We swallow every failure
+ * here: a stage transition has already committed and must not be undone by a
+ * worker outage.
+ */
+async function retaskOperator(
+  supabase: SupabaseClient,
+  pipelineId: string,
+  stage: "ideation" | "generation",
+  reason: string,
+): Promise<void> {
+  const instruction = operatorInstruction(stage, pipelineId);
+  const event: PipelineEventInsert = {
+    pipeline_id: pipelineId,
+    kind: "operator_dispatched",
+    stage,
+    payload: { instruction, reason } as Json,
+  };
+  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
+  if (evErr) {
+    console.warn(`[pipelines.advance] operator_dispatched event insert failed: ${evErr.message}`);
+  }
+  try {
+    await dispatchOperator(pipelineId, instruction);
+  } catch (e) {
+    console.warn(`[pipelines.advance] operator dispatch failed for ${pipelineId}: ${String(e)}`);
+  }
 }
 
 /**
