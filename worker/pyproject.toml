@@ -16,6 +16,12 @@ dependencies = [
     "pydantic-settings>=2.5",
     "supabase>=2.8",
     "structlog>=24.4",
+    # Pillow backs the restored image-generation pipeline's compositor step:
+    # `services.image_compositor` shells out to the marketing-dept
+    # `creative-tools/image_compositor.py` script (text/logo/banner overlays
+    # on a Kie.ai base render), which imports PIL. The subprocess runs under
+    # the worker's interpreter, so Pillow must be installed here.
+    "pillow>=10.4",
     # VAPID Web Push for the Hermes-webhook → operator browser fan-out.
     # Lives under :mod:`services.push_delivery`; consumed by
     # :mod:`services.hermes_webhook` after Wave 18.

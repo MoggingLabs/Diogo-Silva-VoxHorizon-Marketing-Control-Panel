@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .routes import (
+    creative,
     health,
     hermes_approval,
     hermes_approval_mode,
@@ -73,10 +74,24 @@ def create_app() -> FastAPI:
     # routes/ping.py and infra/monitoring/README.md (VPS-6).
     app.include_router(ping.router, tags=["ping"])
 
-    # Empty stub router kept while HI-7 finishes repointing Next.js
-    # from /work/pipeline/* onto /work/hermes/*. The router carries no
-    # endpoints so a stale dashboard call lands as a clean 404.
+    # === image-generation pipeline (restored) ===
+    # The deterministic image-generation pipeline that HI-8 deleted, brought
+    # back because Ekko's `image-ad-prompting` skill is an interactive
+    # prompt-writer, not an automated dashboard executor — and there's no
+    # Supabase read path for it. These routes emit the exact `pipeline_events`
+    # kinds (task_queued / task_running / task_done / task_error /
+    # cost_recorded) the dashboard StageGeneration component and the Supabase
+    # auto-advance trigger expect, so restoring them fixes the contract by
+    # construction. /work/pipeline/ideation produces cheap concept previews;
+    # /work/pipeline/generation renders the final 1:1 + 9:16 picks. The
+    # config-draft route is also restored for completeness, but the dashboard
+    # keeps its brief-draft interview on /work/hermes/chat (Ekko owns chat).
     app.include_router(pipeline.router, tags=["pipeline"])
+
+    # /work/creative/generate + /work/creative/composite — the per-brief
+    # image generation + compositor surface used by the pipeline producers
+    # and the standalone creative routes.
+    app.include_router(creative.router, tags=["creative"])
 
     # === wave 18 hermes-bridge routes ===
     # Three thin surfaces that proxy to the co-located Hermes/Ekko

@@ -177,10 +177,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
   }
 
-  // Fire-and-forget worker kick to the hermes-kanban bridge: create a
-  // generation task assigned to `ekko`. Failures are swallowed so a
-  // worker outage doesn't block the commit.
-  void fireWorkerGeneration(pipeline.id, decision).catch((e) => {
+  // Fire-and-forget worker kick to the image-generation pipeline:
+  // POST /work/pipeline/generation renders the final 1:1 + 9:16 assets for
+  // every Review pick (restored in feat/restore-image-generation). This is
+  // the approval gate for generation — the operator approving here is what
+  // fires the worker; the per-tool Ekko ApprovalModal does NOT gate it. The
+  // worker emits the task_queued/running/done/error + cost_recorded
+  // pipeline_events the StageGeneration UI reads. Failures are swallowed so
+  // a worker outage doesn't block the commit.
+  void fireWorkerGeneration(pipeline.id).catch((e) => {
     console.warn(
       `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,
     );
@@ -190,38 +195,28 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 }
 
 /**
- * Fire-and-forget POST to the worker's hermes-kanban bridge to create
- * a generation task assigned to `ekko`. Mirrors the advance route's
- * `fireWorkerIdeation` so the call shape is consistent: if the worker
- * isn't configured (WORKER_URL / WORKER_SHARED_SECRET unset) we skip,
- * and a 404 is swallowed silently.
+ * Fire-and-forget POST to the worker's image-generation endpoint
+ * (`/work/pipeline/generation`). Mirrors the advance route's
+ * `fireWorkerIdeation` so the call shape is consistent: the worker reads the
+ * picks + format off the pipeline row keyed by `pipeline_id`, so the body is
+ * just the id. If the worker isn't configured (WORKER_URL /
+ * WORKER_SHARED_SECRET unset) we skip, and a 404 is swallowed silently.
  */
-async function fireWorkerGeneration(
-  pipelineId: string,
-  decision: "approved" | "approved_with_changes",
-): Promise<void> {
+async function fireWorkerGeneration(pipelineId: string): Promise<void> {
   const base = process.env.WORKER_URL?.replace(/\/$/, "");
   const secret = process.env.WORKER_SHARED_SECRET;
   if (!base || !secret) return;
-  const res = await fetch(`${base}/work/hermes/kanban`, {
+  const res = await fetch(`${base}/work/pipeline/generation`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      title: `Generation for pipeline ${pipelineId}`,
-      assignee: "ekko",
-      context: {
-        kind: "generation",
-        pipeline_id: pipelineId,
-        decision,
-      },
-    }),
+    body: JSON.stringify({ pipeline_id: pipelineId }),
     cache: "no-store",
   });
   if (!res.ok && res.status !== 404) {
     const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/hermes/kanban -> ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`worker /work/pipeline/generation -> ${res.status}: ${text.slice(0, 200)}`);
   }
 }
