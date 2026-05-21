@@ -96,14 +96,15 @@ def test_init_constructs_from_env_when_client_absent() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_build_argv_with_session() -> None:
+def test_build_argv_ignores_session_id() -> None:
+    # The operator is stateless per dispatch; we do NOT pass a session flag
+    # (--pass-session-id is a boolean on the Hermes CLI, not value-taking).
+    # The pipeline id is carried in the instruction instead.
     assert OperatorBridge._build_argv("do it", "p-1") == [
         "hermes",
         "chat",
         "-q",
         "do it",
-        "--pass-session-id",
-        "p-1",
     ]
 
 
@@ -135,8 +136,6 @@ async def test_dispatch_creates_exec_and_drains() -> None:
         "chat",
         "-q",
         "render finals for p-9",
-        "--pass-session-id",
-        "p-9",
     ]
     assert kwargs == {"stdout": True, "stderr": True, "tty": False}
     client.api.exec_start.assert_called_once_with("exec-1", stream=True)

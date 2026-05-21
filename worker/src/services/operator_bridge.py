@@ -78,15 +78,17 @@ class OperatorBridge:
         """Assemble the operator ``hermes chat`` command-line.
 
         Kept static + small so tests can pin the exact argv we send to
-        ``exec_create`` without spinning up a real bridge. The session
-        flag is ``--pass-session-id`` per the Hermes CLI contract; the
-        pipeline id IS the operator's session id, which is how the
-        playbook re-loads pipeline state on each dispatch.
+        ``exec_create`` without spinning up a real bridge.
+
+        The operator is STATELESS per dispatch: it re-reads live pipeline
+        state from the worker (the read tool) and the pipeline id is embedded
+        in ``instruction``, so we do NOT pass a session flag. (On the Hermes
+        CLI ``--pass-session-id`` is a boolean — "include the session id in the
+        system prompt" — not a value-taking option; passing it the pipeline id
+        errors with "unrecognized arguments". ``session_id`` is retained on the
+        signature for call-site clarity + logging.)
         """
-        argv = ["hermes", "chat", "-q", instruction]
-        if session_id:
-            argv.extend(["--pass-session-id", session_id])
-        return argv
+        return ["hermes", "chat", "-q", instruction]
 
     async def dispatch(self, instruction: str, session_id: str) -> None:
         """Run ``hermes chat`` in the operator container, draining stdout.
