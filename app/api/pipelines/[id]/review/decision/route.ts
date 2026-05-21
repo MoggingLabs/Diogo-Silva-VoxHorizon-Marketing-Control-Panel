@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { estimatePipelineCost } from "@/lib/cost-estimator";
+import { dispatchOperator, isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
 import {
   ReviewDecisionInput,
   type PipelineEventInsert,
@@ -177,19 +178,43 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
   }
 
-  // Fire-and-forget worker kick to the image-generation pipeline:
-  // POST /work/pipeline/generation renders the final 1:1 + 9:16 assets for
-  // every Review pick (restored in feat/restore-image-generation). This is
-  // the approval gate for generation — the operator approving here is what
-  // fires the worker; the per-tool Ekko ApprovalModal does NOT gate it. The
-  // worker emits the task_queued/running/done/error + cost_recorded
-  // pipeline_events the StageGeneration UI reads. Failures are swallowed so
-  // a worker outage doesn't block the commit.
-  void fireWorkerGeneration(pipeline.id).catch((e) => {
-    console.warn(
-      `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,
-    );
-  });
+  // Hand generation off to exactly one executor — never both, or every final
+  // would render twice and double the Kie spend. This approval IS the
+  // generation gate; the per-tool Ekko ApprovalModal does not gate it.
+  if (isOperatorDriven(pipeline.config_draft)) {
+    // Operator-driven: the Hermes operator renders the finals for the picked
+    // concepts (its render call is the per-batch spend gate). Best-effort
+    // handoff event + fire-and-forget dispatch (the transition has committed
+    // and must not be undone by a worker outage); idempotent on the operator.
+    const instruction = operatorInstruction("generation", pipeline.id);
+    const dispatchEvent: PipelineEventInsert = {
+      pipeline_id: pipeline.id,
+      kind: "operator_dispatched",
+      stage: "generation",
+      payload: { instruction, reason: "review_approved" } as Json,
+    };
+    const { error: dEvErr } = await supabase.from("pipeline_events").insert(dispatchEvent);
+    if (dEvErr) {
+      console.warn(
+        `[pipelines.review.decision] operator_dispatched event insert failed: ${dEvErr.message}`,
+      );
+    }
+    void dispatchOperator(pipeline.id, instruction).catch((e) => {
+      console.warn(
+        `[pipelines.review.decision] operator dispatch failed for ${pipeline.id}: ${String(e)}`,
+      );
+    });
+  } else {
+    // Regular: the deterministic /work/pipeline/generation producer renders the
+    // final 1:1 + 9:16 assets for every Review pick. The worker emits the
+    // task_* + cost_recorded pipeline_events the StageGeneration UI reads.
+    // Failures are swallowed so a worker outage doesn't block the commit.
+    void fireWorkerGeneration(pipeline.id).catch((e) => {
+      console.warn(
+        `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,
+      );
+    });
+  }
 
   return NextResponse.json({ pipeline: updated });
 }

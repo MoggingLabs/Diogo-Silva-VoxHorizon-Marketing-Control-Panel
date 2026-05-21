@@ -81,6 +81,11 @@ describe("PipelineIndexPage", () => {
     expect(screen.getByRole("heading", { name: /pipeline/i })).toBeInTheDocument();
     expect(screen.getByTestId("pipeline-count")).toHaveTextContent("1");
     expect(screen.getByTestId("client-names")).toHaveTextContent('"c1":"Acme"');
+    // Operator kickoff entry point links to the dedicated page.
+    expect(screen.getByRole("link", { name: /hire the operator/i })).toHaveAttribute(
+      "href",
+      "/pipeline/operator",
+    );
   });
 
   it("renders the error banner when listPipelines throws", async () => {

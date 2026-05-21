@@ -9,9 +9,23 @@ import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
 
+// `@/lib/operator/dispatch` imports `server-only`; neutralise it so the jsdom
+// route-test project can load the (partially mocked) module.
+vi.mock("server-only", () => ({}));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
+
+// `vi.hoisted` so the spy exists when the hoisted `vi.mock` factory runs.
+const { dispatchOperator } = vi.hoisted(() => ({
+  dispatchOperator: vi.fn<(id: string, instruction: string) => Promise<void>>(async () => {}),
+}));
+vi.mock("@/lib/operator/dispatch", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/operator/dispatch")>("@/lib/operator/dispatch");
+  return { ...actual, dispatchOperator };
+});
 
 import { POST } from "./route";
 
@@ -23,9 +37,14 @@ function req(url: string, init: RequestInit = {}): NextRequest {
   return new NextRequest(new Request(url, init));
 }
 
+function flush() {
+  return new Promise((r) => setTimeout(r, 5));
+}
+
 describe("POST /api/pipelines/:id/picks", () => {
   beforeEach(() => {
     currentSupabase = mockClient();
+    dispatchOperator.mockClear();
   });
 
   it("records image picks (200)", async () => {
@@ -58,6 +77,43 @@ describe("POST /api/pipelines/:id/picks", () => {
       { params },
     );
     expect(res.status).toBe(200);
+    // Recording picks does NOT dispatch the operator — finals are dispatched
+    // only at the Review-approval gate, so picks must never trigger a render.
+    await flush();
+    expect(dispatchOperator).not.toHaveBeenCalled();
+  });
+
+  it("does NOT dispatch the operator when only video picks are recorded", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: {
+              id,
+              status: "ideation",
+              format_choice: "video",
+              picks: {},
+              image_brief_id: null,
+              video_brief_id: "22222222-2222-4222-8222-222222222222",
+            },
+            error: null,
+          },
+        },
+        update: { single: { data: { id }, error: null } },
+      },
+      video_creatives: { select: { data: [{ id: creativeUuid }], error: null } },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(
+      req(`http://localhost/api/pipelines/${id}/picks`, {
+        method: "POST",
+        body: JSON.stringify({ video: [creativeUuid] }),
+      }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    await flush();
+    expect(dispatchOperator).not.toHaveBeenCalled();
   });
 
   it("records video picks (200)", async () => {

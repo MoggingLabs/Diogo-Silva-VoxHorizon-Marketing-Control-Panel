@@ -1,8 +1,12 @@
 import Link from "next/link";
+import type { Route } from "next";
 import { notFound } from "next/navigation";
+import { Bell } from "lucide-react";
 
+import { Button } from "@/components/ui/button";
 import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
 import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
+import { OperatorNarration } from "@/components/pipeline/OperatorNarration";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
 import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
 import { StageDone } from "@/components/pipeline/StageDone";
@@ -93,6 +97,12 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
 
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
   const isCancellable = pipeline.status !== "done" && pipeline.status !== "cancelled";
+  // Spend approvals for this run surface in the global ApprovalQueue (header
+  // bell) via the plugin→worker→dashboard flow. We also link straight to the
+  // audit page filtered to this pipeline's operator session (the operator runs
+  // with session_id = pipeline.id) so a supervisor can review render-spend
+  // decisions in context.
+  const approvalsHref = `/approvals?session=${encodeURIComponent(pipeline.id)}` as Route;
 
   return (
     <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
@@ -144,38 +154,64 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         </section>
       )}
 
-      {pipeline.status === "configuration" ? (
-        <StageConfiguration pipeline={pipeline} clients={clients} />
-      ) : pipeline.status === "ideation" ? (
-        <StageIdeation
-          pipeline={pipeline}
-          imageBriefId={pipeline.image_brief_id}
-          videoBriefId={pipeline.video_brief_id}
-        />
-      ) : pipeline.status === "review" ? (
-        <StageReview
-          pipeline={pipeline}
-          imageBriefId={pipeline.image_brief_id}
-          videoBriefId={pipeline.video_brief_id}
-        />
-      ) : pipeline.status === "generation" ? (
-        <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
-      ) : pipeline.status === "done" ? (
-        <StageDone
-          pipeline={pipeline}
-          imageBriefId={pipeline.image_brief_id}
-          videoBriefId={pipeline.video_brief_id}
-        />
-      ) : (
+      {pipeline.status === "cancelled" ? (
+        // Terminal: no supervision sidebar — the run is done.
         <StagePlaceholder
           stageLabel={placeholder.label}
           upcoming={placeholder.wave}
-          subtitle={
-            pipeline.status === "cancelled"
-              ? "Cancelled pipelines do not advance further."
-              : undefined
-          }
+          subtitle="Cancelled pipelines do not advance further."
         />
+      ) : (
+        // Supervision cockpit: stage UI on the main column, operator narration
+        // + spend-approvals access alongside it. The narration view reuses the
+        // realtime relay (pipeline_events), and the spend gate itself lands in
+        // the global ApprovalQueue (header bell) via the approval plugin.
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
+          <div className="flex min-w-0 flex-col gap-6">
+            {pipeline.status === "configuration" ? (
+              <StageConfiguration pipeline={pipeline} clients={clients} />
+            ) : pipeline.status === "ideation" ? (
+              <StageIdeation
+                pipeline={pipeline}
+                imageBriefId={pipeline.image_brief_id}
+                videoBriefId={pipeline.video_brief_id}
+              />
+            ) : pipeline.status === "review" ? (
+              <StageReview
+                pipeline={pipeline}
+                imageBriefId={pipeline.image_brief_id}
+                videoBriefId={pipeline.video_brief_id}
+              />
+            ) : pipeline.status === "generation" ? (
+              <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
+            ) : pipeline.status === "done" ? (
+              <StageDone
+                pipeline={pipeline}
+                imageBriefId={pipeline.image_brief_id}
+                videoBriefId={pipeline.video_brief_id}
+              />
+            ) : (
+              <StagePlaceholder stageLabel={placeholder.label} upcoming={placeholder.wave} />
+            )}
+          </div>
+
+          <aside className="flex flex-col gap-4 lg:sticky lg:top-6 lg:self-start">
+            <OperatorNarration pipelineId={pipeline.id} initialEvents={initialEvents} />
+            <div className="rounded-lg border border-border bg-card px-4 py-4 text-sm">
+              <div className="flex items-center gap-2">
+                <Bell aria-hidden="true" className="h-4 w-4 text-muted-foreground" />
+                <h2 className="text-sm font-semibold tracking-tight">Spend approvals</h2>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Render-spend requests pop up in the header bell. Review this run&apos;s decisions
+                below.
+              </p>
+              <Button asChild variant="outline" size="sm" className="mt-3 w-full">
+                <Link href={approvalsHref}>View spend approvals</Link>
+              </Button>
+            </div>
+          </aside>
+        </div>
       )}
     </main>
   );

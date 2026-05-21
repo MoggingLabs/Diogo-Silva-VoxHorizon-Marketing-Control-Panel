@@ -5,6 +5,7 @@ import {
   createLaunchPackage,
   createPipeline,
   getPipeline,
+  kickoffOperatorPipeline,
   listPipelines,
   submitReviewDecision,
   updatePicks,
@@ -69,6 +70,27 @@ describe("createPipeline", () => {
     const spy = spyOnFetch();
     spy.mockResolvedValueOnce(new Response("", { status: 500, statusText: "Server bad" }));
     await expect(createPipeline({ format_choice: "image" })).rejects.toThrow(/500.*Server bad/);
+  });
+});
+
+describe("kickoffOperatorPipeline", () => {
+  it("posts the instruction to the operator route and returns the pipeline", async () => {
+    const spy = spyOnFetch();
+    const pipeline = { id: "op1", status: "configuration", format_choice: "image" };
+    spy.mockResolvedValueOnce(jsonResponse({ pipeline }));
+    const out = await kickoffOperatorPipeline({ instruction: "4 roofing ads, Austin" });
+    expect(out).toEqual(pipeline);
+    const call = spy.mock.calls[0];
+    expect(call?.[0]).toBe("http://localhost:3000/api/pipelines/operator");
+    const init = call?.[1] as RequestInit | undefined;
+    expect(init?.method).toBe("POST");
+    expect(JSON.parse(init?.body as string)).toEqual({ instruction: "4 roofing ads, Austin" });
+  });
+
+  it("throws with the inline body on a non-2xx", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(new Response("nope", { status: 422 }));
+    await expect(kickoffOperatorPipeline({ instruction: "x" })).rejects.toThrow(/422.*nope/);
   });
 });
 

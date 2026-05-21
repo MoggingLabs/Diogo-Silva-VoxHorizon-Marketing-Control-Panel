@@ -1,3 +1,8 @@
+import Link from "next/link";
+import type { Route } from "next";
+import { Bot } from "lucide-react";
+
+import { Button } from "@/components/ui/button";
 import { listPipelines } from "@/lib/pipeline/client";
 import { PipelineList } from "@/components/pipeline/PipelineList";
 import { createClient } from "@/lib/supabase/server";
@@ -52,6 +57,12 @@ export default async function PipelineIndexPage() {
             Walk a brief through configuration, ideation, review, generation, and launch.
           </p>
         </div>
+        <Button asChild className="gap-2 sm:self-start">
+          <Link href={"/pipeline/operator" as Route}>
+            <Bot className="h-4 w-4" aria-hidden="true" />
+            Hire the operator
+          </Link>
+        </Button>
       </header>
 
       {loadError ? (

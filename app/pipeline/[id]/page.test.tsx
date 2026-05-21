@@ -47,6 +47,13 @@ vi.mock("@/components/pipeline/StagePlaceholder", () => ({
     <div data-testid="placeholder" data-label={stageLabel} />
   ),
 }));
+// OperatorNarration uses the realtime hook; stub it so the server-component
+// render doesn't open an SSE subscription.
+vi.mock("@/components/pipeline/OperatorNarration", () => ({
+  OperatorNarration: ({ pipelineId }: { pipelineId: string }) => (
+    <div data-testid="operator-narration" data-pipeline={pipelineId} />
+  ),
+}));
 
 const notFoundSpy = vi.fn(() => {
   throw new Error("__NOT_FOUND__");
@@ -94,6 +101,35 @@ describe("PipelineDetailPage", () => {
     render(el);
     expect(screen.getByText("Acme")).toBeInTheDocument();
     expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "configuration");
+  });
+
+  it("shows the operator narration + a scoped spend-approvals link on active runs", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "ideation", id: "abcd1234-rest" }),
+      events: [{ id: "e1" }],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "abcd1234-rest" }) });
+    render(el);
+    expect(screen.getByTestId("operator-narration")).toHaveAttribute(
+      "data-pipeline",
+      "abcd1234-rest",
+    );
+    const approvalsLink = screen.getByRole("link", { name: /view spend approvals/i });
+    expect(approvalsLink).toHaveAttribute("href", "/approvals?session=abcd1234-rest");
+  });
+
+  it("hides the supervision sidebar on a cancelled run", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "cancelled" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    // Cancelled pipelines render the placeholder branch but no narration sidebar.
+    expect(screen.queryByTestId("operator-narration")).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /view spend approvals/i })).not.toBeInTheDocument();
   });
 
   it("renders ideation stage", async () => {

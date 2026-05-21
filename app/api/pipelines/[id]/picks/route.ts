@@ -252,5 +252,11 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.picks] event insert failed: ${evErr.message}`);
   }
 
+  // Note: recording picks does NOT dispatch the operator. The operator renders
+  // finals only after the manager approves at the Review gate
+  // (/review/decision), which is the single dispatch point for generation —
+  // dispatching here too would be premature (the operator would just stand by)
+  // and risk a redundant second render.
+
   return NextResponse.json({ pipeline: updated, picks: nextPicks });
 }

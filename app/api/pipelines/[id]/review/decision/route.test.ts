@@ -9,9 +9,23 @@ import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
 let currentSupabase: SupabaseClientMock = mockClient();
 
+// `@/lib/operator/dispatch` imports `server-only`; neutralise it so the jsdom
+// route-test project can load the (partially mocked) module.
+vi.mock("server-only", () => ({}));
+
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
+
+// `vi.hoisted` so the spy exists when the hoisted `vi.mock` factory runs.
+const { dispatchOperator } = vi.hoisted(() => ({
+  dispatchOperator: vi.fn<(id: string, instruction: string) => Promise<void>>(async () => {}),
+}));
+vi.mock("@/lib/operator/dispatch", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/operator/dispatch")>("@/lib/operator/dispatch");
+  return { ...actual, dispatchOperator };
+});
 
 import { POST } from "./route";
 
@@ -24,6 +38,7 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 beforeEach(() => {
   currentSupabase = mockClient();
+  dispatchOperator.mockClear();
   delete process.env.WORKER_URL;
   delete process.env.WORKER_SHARED_SECRET;
 });
@@ -60,6 +75,74 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       { params },
     );
     expect(res.status).toBe(200);
+  });
+
+  it("re-tasks the operator to render finals on approval", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: {
+              id,
+              status: "review",
+              format_choice: "image",
+              picks: { image: ["c1"] },
+              advanced_at: {},
+              // Operator-driven pipeline → the operator renders finals (the
+              // deterministic /work/pipeline/generation producer is skipped).
+              config_draft: { operator_driven: true },
+            },
+            error: null,
+          },
+        },
+        update: { single: { data: { id, status: "generation" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(
+      req(`http://localhost/api/pipelines/${id}/review/decision`, {
+        method: "POST",
+        body: JSON.stringify({ decision: "approved" }),
+      }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(dispatchOperator).toHaveBeenCalledTimes(1);
+    const [pid, instruction] = dispatchOperator.mock.calls[0]!;
+    expect(pid).toBe(id);
+    expect(instruction.toLowerCase()).toContain("final");
+  });
+
+  it("does NOT re-task the operator on rejection", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: {
+              id,
+              status: "review",
+              format_choice: "image",
+              picks: { image: ["c1"] },
+              advanced_at: {},
+            },
+            error: null,
+          },
+        },
+        update: { single: { data: { id, status: "cancelled" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(
+      req(`http://localhost/api/pipelines/${id}/review/decision`, {
+        method: "POST",
+        body: JSON.stringify({ decision: "rejected", notes: "no" }),
+      }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 5));
+    expect(dispatchOperator).not.toHaveBeenCalled();
   });
 
   it("approved_with_changes (200)", async () => {
@@ -319,6 +402,10 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       { params },
     );
     expect(res.status).toBe(200);
+    // Regular (non-operator) pipeline: the deterministic generation producer
+    // runs and the operator is NOT dispatched (no double render).
+    await new Promise((r) => setTimeout(r, 5));
+    expect(dispatchOperator).not.toHaveBeenCalled();
   });
 
   it("warns when worker kick fails (still 200)", async () => {
