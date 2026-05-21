@@ -620,3 +620,232 @@ async def test_mode_allowlisted_tool_skips_mode_check(
     # consulting the mode.
     assert result is None
     assert calls["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Opt-in policy overlay wiring (VOXHORIZON_APPROVAL_POLICY_PATH)
+# ---------------------------------------------------------------------------
+#
+# Ekko safety contract: with the env UNSET the hook behaves exactly as before
+# (decision fn == plain policy.evaluate). With the env SET to the operator
+# profile, the render spend tool is gated while read/brief are allowlisted.
+
+
+from voxhorizon_approvals import POLICY_PATH_ENV, _resolve_evaluate  # noqa: E402
+from voxhorizon_approvals.policy import evaluate as plain_evaluate  # noqa: E402
+
+OPERATOR_POLICY_PATH = (
+    Path(__file__).resolve().parent.parent / "policy.operator.yaml"
+)
+
+#: Exact full tool names as Hermes presents them to the pre_tool_call hook:
+#: ``mcp_<server>_<tool>`` with single underscores (verified live on the VPS).
+#: The gate matches these by exact equality.
+RENDER = "mcp_pipeline_operator_pipeline_operator_render"
+READ = "mcp_pipeline_operator_pipeline_operator_read"
+BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
+
+
+@pytest.fixture
+def _no_policy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(POLICY_PATH_ENV, raising=False)
+
+
+@pytest.fixture
+def _operator_policy_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(POLICY_PATH_ENV, str(OPERATOR_POLICY_PATH))
+
+
+@pytest.fixture
+def _always_ask_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the operator mode to ASK so gated tools take the long-poll path."""
+    from voxhorizon_approvals import mode as mode_module
+
+    async def _fake_fetch_mode(**_kwargs):
+        return mode_module.ModeState(
+            mode="ASK",
+            expires_at=None,
+            set_by=None,
+            set_at="x",
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+
+def test_resolve_evaluate_defaults_to_plain_policy(
+    _no_policy_env: None,
+) -> None:
+    """Env unset → the decision fn is the plain in-code policy.evaluate."""
+    assert _resolve_evaluate() is plain_evaluate
+
+
+def test_resolve_evaluate_ignores_missing_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A path that does not exist → still the plain policy (no crash)."""
+    monkeypatch.setenv(POLICY_PATH_ENV, "/no/such/policy.yaml")
+    assert _resolve_evaluate() is plain_evaluate
+
+
+def test_resolve_evaluate_loads_overlay_when_set(
+    _operator_policy_env: None,
+) -> None:
+    """Env set to an existing file → a bound overlay evaluate (not the plain
+    function)."""
+    decide = _resolve_evaluate()
+    assert decide is not plain_evaluate
+    # The overlay gates render and allowlists read.
+    assert decide(RENDER, {}).action == "ask_operator"
+    assert decide(READ, {}).action == "allow"
+
+
+@pytest.mark.asyncio
+async def test_env_unset_render_behaves_like_plain_engine(
+    env: None,
+    _no_policy_env: None,
+    _always_ask_mode: None,
+) -> None:
+    """With NO overlay, the render tool is just an unknown tool to the base
+    engine — it round-trips the operator like any unknown tool. This is the
+    byte-identical 'Ekko safe' path: the plugin doesn't special-case it."""
+    # Sanity: the base engine treats it as unknown → ask_operator.
+    assert plain_evaluate(RENDER, {}).action == "ask_operator"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": "ok"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    result = await hook(
+        RENDER,
+        {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    # Approved by the (mock) operator → allowed.
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_env_unset_is_byte_identical_for_core_tools(
+    env: None,
+    _no_policy_env: None,
+) -> None:
+    """Allowlisted core tools still pass through with the env unset — proving
+    loading the overlay machinery did not change Ekko's default behavior."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("allowlisted tool must not reach the worker")
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    assert await hook("read_file", {"path": "/x"}, "t") is None
+
+
+@pytest.mark.asyncio
+async def test_overlay_gates_render_returns_ask_then_block(
+    env: None,
+    audit_path: Path,
+    _operator_policy_env: None,
+    _always_ask_mode: None,
+) -> None:
+    """With the operator overlay loaded, the render spend tool round-trips the
+    operator; a rejection becomes a block."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "rejected", "notes": "no budget"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    result = await hook(
+        RENDER,
+        {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is not None
+    assert result["action"] == "block"
+    assert "no budget" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_overlay_gates_render_round_trips_operator(
+    env: None,
+    _operator_policy_env: None,
+    _always_ask_mode: None,
+) -> None:
+    """The exact full render tool name is gated and round-trips the operator."""
+    seen = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["count"] += 1
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": "go"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    result = await hook(
+        RENDER,
+        {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is None  # operator approved
+    assert seen["count"] == 1  # it actually round-tripped the operator
+
+
+@pytest.mark.asyncio
+async def test_overlay_allowlists_read_and_brief(
+    env: None,
+    _operator_policy_env: None,
+) -> None:
+    """read/brief are allowlisted under the operator overlay → no worker hit."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("allowlisted operator tool must not round-trip")
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    assert (
+        await hook(READ, {"pipeline_id": "p"}, "t")
+        is None
+    )
+    assert (
+        await hook(
+            BRIEF,
+            {"pipeline_id": "p", "image_payload": {}},
+            "t",
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_overlay_blocklist_short_circuits(
+    env: None,
+    audit_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A blocklisted tool returns a hard block with no operator round-trip."""
+    policy_file = tmp_path / "policy.yaml"
+    policy_file.write_text("blocklist:\n  - danger_tool\n", encoding="utf-8")
+    monkeypatch.setenv(POLICY_PATH_ENV, str(policy_file))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("blocklisted tool must not reach the worker")
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    result = await hook("danger_tool", {}, "task-1", session_id="sess-1")
+    assert result is not None
+    assert result["action"] == "block"
+    assert "policy" in result["message"].lower()
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert rows[0]["decision"] == "blocked"

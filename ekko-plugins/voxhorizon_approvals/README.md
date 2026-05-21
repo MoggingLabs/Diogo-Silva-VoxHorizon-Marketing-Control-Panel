@@ -78,11 +78,40 @@ defense-in-depth is intentional: it means a malicious override of
 
 The overlay loader lives in `policy_overlay.py` (`load_overlay(path)` →
 `PolicyOverlay.evaluate(...)`, an `evaluate`-compatible decision function that
-applies the three keys with the precedence above). It is **opt-in**: Ekko's
-hot path calls `policy.evaluate` directly and is unchanged, and Ekko ships an
-empty `policy.yaml`, so loading the overlay against it is a pure pass-through.
-No PyYAML dependency is required — the loader parses the policy-file YAML
-subset itself (and uses PyYAML only if it happens to be installed).
+applies the three keys with the precedence above). No PyYAML dependency is
+required — the loader parses the policy-file YAML subset itself (and uses
+PyYAML only if it happens to be installed).
+
+### Opt-in wiring (`VOXHORIZON_APPROVAL_POLICY_PATH`)
+
+The overlay is **opt-in and env-gated** so Ekko is unchanged by default:
+
+| `VOXHORIZON_APPROVAL_POLICY_PATH`  | Decision function used                          |
+| ---------------------------------- | ----------------------------------------------- |
+| unset / empty / non-existent path  | plain in-code `policy.evaluate` (Ekko-safe)     |
+| set to an **existing** policy file | `load_overlay(path).evaluate` (overlay applied) |
+
+`register()` resolves this once at load time, so the hot path pays no per-call
+cost. With the env unset the hook is byte-identical to the pre-overlay plugin;
+Ekko ships an empty `policy.yaml` and does not set the env, so even if it did
+opt in the overlay would be a pure pass-through. Only the dedicated operator
+agent sets the env (pointing at its `policy.operator.yaml`) to turn on the
+spend gate.
+
+### MCP tool-name namespacing
+
+Hermes presents an MCP tool to the `pre_tool_call` hook as
+`mcp_<server>_<tool>` with **single** underscores (verified live on the VPS).
+The server name `pipeline-operator` is normalized to `pipeline_operator`, and
+the tool functions are already named `pipeline_operator_<verb>`, so the live
+names are doubled — e.g. `mcp_pipeline_operator_pipeline_operator_render`.
+
+The overlay matches by **exact equality** (`tool_name in entries`): list the
+**exact full names** in the policy files. There is intentionally **no**
+fuzzy/suffix matching — suffix-matching a short name like `render` or
+`pipeline_operator_render` against the full live name would be ambiguous and
+unsafe for a spend gate (`render` would false-match `pipeline_operator_render`),
+so we rely on the exact full names only.
 
 ## Operator policy profile (`policy.operator.yaml`)
 
@@ -93,22 +122,23 @@ The dedicated **operator** agent (`hermes-agent-operator`, running the
 dropped in as the operator container's `policy.yaml` at deploy time. It does
 **not** modify Ekko's `policy.yaml` or the in-code defaults.
 
-It maps one-for-one to the `pipeline-operator` helper's tool entrypoints
-(`ekko-skills/pipeline-operator/helper.py`) — the plugin gates **by tool
-name**, so the keys are the exact entrypoint names:
+It maps one-for-one to the `pipeline-operator` MCP tools
+(`ekko-skills/pipeline-operator/mcp_server.py`, which delegates to
+`helper.py`) — the plugin gates **by tool name**, so the keys are the exact
+full live names (`mcp_<server>_<tool>`, single underscores; see above):
 
-| Policy key                | Tool                       | Effect                                                                |
-| ------------------------- | -------------------------- | --------------------------------------------------------------------- |
-| `extra_requires_approval` | `pipeline_operator_render` | **spend gate** — manager approves every render batch in the dashboard |
-| `allowlist`               | `pipeline_operator_read`   | read pipeline state without a prompt                                  |
-| `allowlist`               | `pipeline_operator_brief`  | author the brief (free write; reviewed via the dashboard stage gate)  |
+| Policy key                | Tool                                                | Effect                                                                |
+| ------------------------- | --------------------------------------------------- | --------------------------------------------------------------------- |
+| `extra_requires_approval` | `mcp_pipeline_operator_pipeline_operator_render`    | **spend gate** — manager approves every render batch in the dashboard |
+| `allowlist`               | `mcp_pipeline_operator_pipeline_operator_read`      | read pipeline state without a prompt                                  |
+| `allowlist`               | `mcp_pipeline_operator_pipeline_operator_brief`     | author the brief (free write; reviewed via the dashboard stage gate)  |
 
-Because gating uses the tool name, the spend gate is wired to the helper's
-`pipeline_operator_render` function: every call to it round-trips the manager
-for spend approval. The operator sends all concept previews in a single
-`render` call, so the manager approves the whole ideation batch once rather
-than per concept. **Do not rename `pipeline_operator_render`** without updating
-this file in lock-step.
+Because gating uses the exact tool name, the spend gate is wired to the helper's
+render tool (`mcp_pipeline_operator_pipeline_operator_render`): every call to it
+round-trips the manager for spend approval. The operator sends all concept
+previews in a single render call, so the manager approves the whole ideation
+batch once rather than per concept. **Do not rename the render tool** (or change
+the MCP server name) without updating this file in lock-step.
 
 Deploy it as the operator's policy (do not overwrite Ekko's):
 

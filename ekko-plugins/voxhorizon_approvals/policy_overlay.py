@@ -30,6 +30,14 @@ In-code defaults always WIN over a *softening* override:
   (this is how the operator profile allowlists ``pipeline_operator_read``).
 * everything else             → delegate to :func:`policy.evaluate`.
 
+Tool-name matching is **exact equality** (``tool_name in entries``). Hermes
+presents an MCP tool to the ``pre_tool_call`` hook as ``mcp_<server>_<tool>``
+with *single* underscores (verified live on the VPS), so the policy files list
+the exact full names (e.g. ``mcp_pipeline_operator_pipeline_operator_render``)
+and we match them as-is. There is intentionally **no** fuzzy/suffix matching —
+a short name like ``pipeline_operator_render`` would otherwise false-match a
+longer live name, which is unsafe for a spend gate.
+
 No hard PyYAML dependency: the policy files are a tiny YAML subset
 (``key: []`` or ``key:`` followed by ``- item`` lines), so we parse that
 subset ourselves and only use PyYAML if it happens to be installed.
@@ -78,7 +86,7 @@ class PolicyOverlay:
 
         Order encodes the precedence rules in the module docstring.
         """
-        # 1. Hard blocklist — highest precedence, no prompt.
+        # 1. Hard blocklist — highest precedence, no prompt. Exact name match.
         if tool_name in self.blocklist:
             return Decision(
                 action="block",
@@ -89,14 +97,15 @@ class PolicyOverlay:
         # 2. In-code baked-in gates win over a softening allowlist. If the
         #    tool is already gated in code (destructive pattern or
         #    REQUIRES_APPROVAL), defer to the engine so the overlay can't
-        #    allowlist it away.
+        #    allowlist it away. These are Ekko's own (non-MCP) tools, so an
+        #    exact name match against the engine's sets is correct.
         if tool_name in ALWAYS_ASK_PATTERNS or tool_name in REQUIRES_APPROVAL:
             return evaluate(tool_name, args, ctx)
 
         # 3. Operator-added approval requirement (e.g. the render spend tool).
         #    This wins over the overlay allowlist for the same tool, matching
         #    the "in-code defaults win over softening; gating wins over
-        #    allowing" intent.
+        #    allowing" intent. Exact full-name match.
         if tool_name in self.extra_requires_approval:
             return Decision(
                 action="ask_operator",
@@ -105,7 +114,7 @@ class PolicyOverlay:
             )
 
         # 4. Operator-added allowlist (e.g. the read tool). Only reached when
-        #    the tool isn't otherwise gated above.
+        #    the tool isn't otherwise gated above. Exact full-name match.
         if tool_name in self.allowlist:
             return Decision(
                 action="allow",

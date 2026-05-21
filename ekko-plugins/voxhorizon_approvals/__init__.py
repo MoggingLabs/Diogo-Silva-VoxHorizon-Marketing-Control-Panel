@@ -37,13 +37,43 @@ called entry point, and it creates the client and registers the hook.
 
 from __future__ import annotations
 
+import os
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Callable
 
 from .audit import log_decision
 from .client import ApprovalClient, ApprovalVerdict
 from .mode import ModeState, fetch_mode
 from .policy import Decision, args_hash, evaluate
+from .policy_overlay import load_overlay
+
+#: Env var that opts a deployment into the operator-tunable policy overlay.
+#: When set to the path of an EXISTING file, ``register`` loads that overlay
+#: and routes decisions through ``PolicyOverlay.evaluate``; otherwise the hook
+#: calls the plain in-code :func:`policy.evaluate` and Ekko's behavior is
+#: byte-identical to before this overlay existed. This is how the dedicated
+#: operator agent (which ships ``policy.operator.yaml`` as its ``policy.yaml``)
+#: gates ``pipeline_operator_render`` while Ekko stays unchanged.
+POLICY_PATH_ENV = "VOXHORIZON_APPROVAL_POLICY_PATH"
+
+#: A decision function with the same signature as :func:`policy.evaluate`.
+EvaluateFn = Callable[[str, dict], Decision]
+
+
+def _resolve_evaluate() -> EvaluateFn:
+    """Pick the decision function for this deployment.
+
+    Opt-in + env-gated: if ``VOXHORIZON_APPROVAL_POLICY_PATH`` points at an
+    existing file, load it as a :class:`PolicyOverlay` and return its
+    ``evaluate``; otherwise return the plain in-code :func:`policy.evaluate`
+    (exact pre-overlay behavior). Resolved once at ``register`` time so the
+    hot path pays no per-call file-stat cost.
+    """
+    raw = os.environ.get(POLICY_PATH_ENV, "").strip()
+    if raw and Path(raw).is_file():
+        return load_overlay(raw).evaluate
+    return evaluate
 
 
 # Block-response shape Hermes expects. Pre-built so the hot path
@@ -65,6 +95,9 @@ def register(ctx: Any) -> None:
         ctx: Hermes plugin context with ``register_hook(name, handler)``.
     """
     client = ApprovalClient()
+    # Resolve the decision function once. Default = plain in-code policy
+    # (Ekko-safe); overlay only when the deployment opts in via env.
+    decide: EvaluateFn = _resolve_evaluate()
 
     async def on_pre_tool_call(
         tool_name: str,
@@ -95,7 +128,7 @@ def register(ctx: Any) -> None:
         )
 
         try:
-            decision: Decision = evaluate(tool_name, args)
+            decision: Decision = decide(tool_name, args)
 
             if decision.action == "allow":
                 _audit(
@@ -106,6 +139,22 @@ def register(ctx: Any) -> None:
                     t0=t0,
                 )
                 return None
+
+            # A "block" decision comes only from the opt-in overlay's
+            # blocklist (the in-code engine never emits "block"). It is a hard
+            # reject with no operator prompt — short-circuit before the mode
+            # probe and the long-poll.
+            if decision.action == "block":
+                _audit(
+                    tool_name,
+                    args,
+                    "blocked",
+                    reason=decision.reason,
+                    t0=t0,
+                )
+                return _block(
+                    f"Blocked by policy: {decision.reason}"
+                )
 
             # ask_operator path — first check the operator-controlled
             # mode. AUTO_APPROVE short-circuits to allow; HALT
@@ -263,9 +312,11 @@ __all__ = [
     "ApprovalVerdict",
     "Decision",
     "ModeState",
+    "POLICY_PATH_ENV",
     "args_hash",
     "evaluate",
     "fetch_mode",
+    "load_overlay",
     "log_decision",
     "register",
 ]
