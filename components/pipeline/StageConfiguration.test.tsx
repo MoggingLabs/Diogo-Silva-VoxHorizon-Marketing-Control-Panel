@@ -52,6 +52,14 @@ vi.mock("@/lib/realtime/client-data", () => ({
   fetchClients: () => fetchClients(),
 }));
 
+// Stub the operator brief-review panel so the branch test asserts dispatch,
+// not the panel's internals (covered in OperatorBriefReview.test.tsx).
+vi.mock("./OperatorBriefReview", () => ({
+  OperatorBriefReview: ({ pipeline }: { pipeline: { id: string } }) => (
+    <div data-testid="operator-brief-review" data-pipeline={pipeline.id} />
+  ),
+}));
+
 import { StageConfiguration } from "./StageConfiguration";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -713,5 +721,53 @@ describe("StageConfiguration - autosave indicator", () => {
     await waitFor(() => {
       expect(screen.getByText(/Autosave failed/)).toBeInTheDocument();
     });
+  });
+});
+
+describe("StageConfiguration - operator-driven branch", () => {
+  it("renders the brief-review panel when operator_driven + image_brief_id set", () => {
+    render(
+      <StageConfiguration
+        pipeline={makePipeline({
+          image_brief_id: "brief-1",
+          config_draft: { operator_driven: true, image_payload: { offer_text: "$99" } },
+        })}
+      />,
+    );
+    expect(screen.getByTestId("operator-brief-review")).toBeInTheDocument();
+    // The manual brief form must NOT render in the operator path.
+    expect(screen.queryByText("Image brief")).not.toBeInTheDocument();
+  });
+
+  it("renders a waiting state when operator_driven but brief not yet authored", () => {
+    render(
+      <StageConfiguration
+        pipeline={makePipeline({
+          image_brief_id: null,
+          config_draft: { operator_driven: true, operator_instruction: "make ads" },
+        })}
+      />,
+    );
+    expect(screen.getByText(/operator is drafting the brief/i)).toBeInTheDocument();
+    expect(screen.queryByTestId("operator-brief-review")).not.toBeInTheDocument();
+    expect(screen.queryByText("Image brief")).not.toBeInTheDocument();
+  });
+
+  it("treats a stored operator_instruction (no flag) as operator-driven", () => {
+    render(
+      <StageConfiguration
+        pipeline={makePipeline({
+          image_brief_id: "brief-1",
+          config_draft: { operator_instruction: "legacy row", image_payload: {} },
+        })}
+      />,
+    );
+    expect(screen.getByTestId("operator-brief-review")).toBeInTheDocument();
+  });
+
+  it("renders the manual form unchanged when NOT operator-driven", () => {
+    render(<StageConfiguration pipeline={makePipeline()} />);
+    expect(screen.getByText("Image brief")).toBeInTheDocument();
+    expect(screen.queryByTestId("operator-brief-review")).not.toBeInTheDocument();
   });
 });
