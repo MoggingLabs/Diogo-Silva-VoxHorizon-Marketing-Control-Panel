@@ -987,6 +987,208 @@ def test_render_400_when_no_brief(
 
 
 # ===========================================================================
+# POST /work/pipeline/tools/store_creative
+# ===========================================================================
+
+
+import base64 as _base64
+
+
+def _png_b64() -> str:
+    """A short, valid base64 blob standing in for codex-rendered PNG bytes."""
+    return _base64.b64encode(b"CODEXPNGBYTES").decode("ascii")
+
+
+def test_store_creative_requires_auth(client: TestClient) -> None:
+    resp = client.post("/work/pipeline/tools/store_creative", json={})
+    assert resp.status_code == 401
+
+
+def test_store_creative_concept_preview(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """concept_preview → ideation/v0.ideation, running+done+cost(0) events."""
+    tools_sb.pipeline_row = _pipeline_row()
+
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "kind": "concept_preview",
+            "concept": "trust",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "prompt": "owner on a roof, golden hour",
+            "image_b64": _png_b64(),
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The fake mints creative ids as ``creatives-id-<n>`` where n is the
+    # running insert count (the task_running event inserts before the
+    # creative), so assert the shape rather than a hardcoded counter.
+    assert body["creative_id"].startswith("creatives-id-")
+    assert body["version"] == "v0.ideation"
+    assert body["file_path_supabase"] == "ib-1/trust-1x1-v0.ideation.png"
+
+    # Bytes uploaded (the decoded base64, not the base64 string).
+    assert len(tools_sb.storage_uploads) == 1
+    upload_path, upload_bytes = tools_sb.storage_uploads[0]
+    assert upload_path == "ib-1/trust-1x1-v0.ideation.png"
+    assert upload_bytes == b"CODEXPNGBYTES"
+
+    # One creative row, stamped with the codex backend + operator authorship.
+    creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
+    assert len(creatives) == 1
+    assert creatives[0]["ratio"] == "1x1"
+    assert creatives[0]["version"] == "v0.ideation"
+    assert creatives[0]["prompt_used"]["author"] == "operator"
+    assert creatives[0]["prompt_used"]["backend"] == "openai-codex"
+    assert creatives[0]["prompt_used"]["model"] == "openai-codex/gpt-image-2"
+
+    pe = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
+    kinds = [e["kind"] for e in pe]
+    assert kinds.count("task_running") == 1
+    assert kinds.count("task_done") == 1
+    assert "task_error" not in kinds
+    # Cost recorded at $0 against openai-codex, in the ideation stage.
+    cost = [e for e in pe if e["kind"] == "cost_recorded"]
+    assert len(cost) == 1
+    assert cost[0]["stage"] == "ideation"
+    assert cost[0]["payload"]["api"] == "openai-codex"
+    assert cost[0]["payload"]["subtotal"] == 0
+
+
+def test_store_creative_final_9x16(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """final + 9x16 → generation/v1.0 with parent_creative_id threaded through."""
+    tools_sb.pipeline_row = _pipeline_row(status="generation")
+
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "kind": "final",
+            "concept": "trust",
+            "ratio": "9x16",
+            "version": "v1.0",
+            "prompt": "owner on a roof, photoreal, vertical",
+            "image_b64": _png_b64(),
+            "offer_text": "$99 inspection",
+            "parent_creative_id": "cr-c1",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["version"] == "v1.0"
+    assert body["file_path_supabase"] == "ib-1/trust-9x16-v1.0.png"
+
+    creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
+    assert len(creatives) == 1
+    assert creatives[0]["ratio"] == "9x16"
+    assert creatives[0]["version"] == "v1.0"
+    assert creatives[0]["offer_text"] == "$99 inspection"
+    assert creatives[0]["prompt_used"]["parent_creative_id"] == "cr-c1"
+
+    pe = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
+    done = [e for e in pe if e["kind"] == "task_done"]
+    assert len(done) == 1
+    assert done[0]["stage"] == "generation"
+    assert done[0]["payload"]["parent_creative_id"] == "cr-c1"
+    cost = [e for e in pe if e["kind"] == "cost_recorded"]
+    assert cost[0]["payload"]["subtotal"] == 0
+    assert cost[0]["payload"]["api"] == "openai-codex"
+
+
+def test_store_creative_final_requires_parent(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(status="generation")
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "kind": "final",
+            "concept": "trust",
+            "ratio": "1x1",
+            "version": "v1.0",
+            "prompt": "a roof",
+            "image_b64": _png_b64(),
+        },
+    )
+    assert resp.status_code == 400
+    assert "parent_creative_id" in resp.json()["detail"]
+
+
+def test_store_creative_rejects_bad_base64(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row()
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "kind": "concept_preview",
+            "concept": "trust",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "prompt": "a roof",
+            "image_b64": "!!!not-base64!!!",
+        },
+    )
+    assert resp.status_code == 400
+    assert "base64" in resp.json()["detail"]
+    # Nothing persisted on a decode failure.
+    assert not any(n == "creatives" for n, _ in tools_sb.inserts)
+    assert tools_sb.storage_uploads == []
+
+
+def test_store_creative_404_when_pipeline_missing(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = None
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-nope",
+            "kind": "concept_preview",
+            "concept": "x",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "prompt": "y",
+            "image_b64": _png_b64(),
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_store_creative_400_when_no_brief(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(image_brief_id=None)
+    resp = client.post(
+        "/work/pipeline/tools/store_creative",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "kind": "concept_preview",
+            "concept": "x",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "prompt": "y",
+            "image_b64": _png_b64(),
+        },
+    )
+    assert resp.status_code == 400
+
+
+# ===========================================================================
 # POST /work/pipeline/tools/dispatch
 # ===========================================================================
 

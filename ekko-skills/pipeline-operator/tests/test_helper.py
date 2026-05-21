@@ -15,6 +15,7 @@ returns scripted responses; the helper never talks over the wire. We exercise:
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 from dataclasses import dataclass, field
@@ -288,7 +289,7 @@ def test_brief_rejects_non_string_notes(env_set: None) -> None:
 
 
 def test_render_concept_preview_batches_all_items(
-    env_set: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": []}
     built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
@@ -324,7 +325,7 @@ def test_render_final_requires_parent_creative_id(env_set: None) -> None:
 
 
 def test_render_final_passes_parent_creative_id(
-    env_set: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _install_fake_client(
         monkeypatch,
@@ -380,7 +381,7 @@ def test_render_rejects_item_without_concept(env_set: None) -> None:
 
 
 def test_render_strips_whitespace_in_items(
-    env_set: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     built = _install_fake_client(
         monkeypatch,
@@ -396,7 +397,7 @@ def test_render_strips_whitespace_in_items(
 
 
 def test_render_per_item_errors_do_not_raise(
-    env_set: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Worker reports per-item failures inside a 2xx body; helper returns it."""
     resp = {
@@ -412,6 +413,213 @@ def test_render_per_item_errors_do_not_raise(
         items=[{"concept": "a", "prompt": "pa"}, {"concept": "b", "prompt": "pb"}],
     )
     assert out["errors"] == [{"concept": "b", "error": "kie 429"}]
+
+
+# ---------------------------------------------------------------------------
+# Render backend selection (RENDER_BACKEND)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def kie_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("RENDER_BACKEND", "kie")
+
+
+def test_render_default_backend_is_codex_not_kie(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With RENDER_BACKEND unset, render uses codex (store_creative), not /render."""
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+
+    # Fake the codex renderer so no Hermes / network is needed.
+    fake_codex = type(sys)("codex_render")
+    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
+
+    # store_creative posts; one item × concept_preview = one 1x1 store call.
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(
+                200,
+                {
+                    "creative_id": "cr-1",
+                    "file_path_supabase": "ib/trust-1x1-v0.ideation.png",
+                    "version": "v0.ideation",
+                },
+            )
+        ],
+    )
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="concept_preview",
+        items=[{"concept": "trust", "prompt": "owner on a roof"}],
+    )
+    assert out["ok"] is True
+    assert out["total_cost_usd"] == 0
+    assert out["errors"] == []
+    assert len(out["renders"]) == 1
+    assert out["renders"][0]["ratio"] == "1x1"
+    assert out["renders"][0]["cost_usd"] == 0
+
+    # It hit /store_creative, NOT /render.
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/store_creative"
+    assert req.json_body["kind"] == "concept_preview"
+    assert req.json_body["ratio"] == "1x1"
+    assert req.json_body["version"] == "v0.ideation"
+    # Bytes were base64-encoded in the body.
+    assert req.json_body["image_b64"] == base64.b64encode(b"PNG-1x1").decode()
+
+
+def test_render_codex_final_renders_both_ratios(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex final fans out to 1x1 + 9x16 and stores each (v1.0)."""
+    monkeypatch.setenv("RENDER_BACKEND", "openai-codex")
+    fake_codex = type(sys)("codex_render")
+    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
+
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v1.0"}),
+            _FakeResponse(200, {"creative_id": "cr-b", "file_path_supabase": "y", "version": "v1.0"}),
+        ],
+    )
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="final",
+        items=[
+            {"concept": "trust", "prompt": "vertical roof", "parent_creative_id": "cr-c1"}
+        ],
+    )
+    assert out["total_cost_usd"] == 0
+    assert sorted(r["ratio"] for r in out["renders"]) == ["1x1", "9x16"]
+    # Two store_creative calls (a fresh httpx.Client per request), both v1.0
+    # with the parent threaded through. Aggregate requests across all clients.
+    all_requests = [r for c in built for r in c.requests]
+    urls = [r.url for r in all_requests]
+    assert urls == ["/work/pipeline/tools/store_creative"] * 2
+    for r in all_requests:
+        assert r.json_body["version"] == "v1.0"
+        assert r.json_body["parent_creative_id"] == "cr-c1"
+
+
+def test_render_codex_per_item_error_collected_not_raised(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A codex generation failure lands in errors[], the batch continues."""
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+
+    def _render(prompt: str, ratio: str) -> bytes:
+        if ratio == "9x16":
+            raise RuntimeError("codex 9x16 boom")
+        return b"PNG-ok"
+
+    fake_codex = type(sys)("codex_render")
+    fake_codex.render_image = _render
+    monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
+
+    # Only the 1x1 store call should reach the worker.
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v1.0"})
+        ],
+    )
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="final",
+        items=[
+            {"concept": "trust", "prompt": "p", "parent_creative_id": "cr-c1"}
+        ],
+    )
+    assert len(out["renders"]) == 1
+    assert out["renders"][0]["ratio"] == "1x1"
+    assert len(out["errors"]) == 1
+    assert out["errors"][0]["ratio"] == "9x16"
+    assert "boom" in out["errors"][0]["error"]
+    assert len(built[0].requests) == 1
+
+
+def test_render_kie_backend_posts_to_render(
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """RENDER_BACKEND=kie keeps the legacy /render path (one batched call)."""
+    resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": []}
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="concept_preview",
+        items=[{"concept": "a", "prompt": "pa"}, {"concept": "b", "prompt": "pb"}],
+    )
+    assert out == resp
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/render"
+    assert req.json_body == {
+        "pipeline_id": "p-1",
+        "kind": "concept_preview",
+        "items": [
+            {"concept": "a", "prompt": "pa"},
+            {"concept": "b", "prompt": "pb"},
+        ],
+    }
+
+
+def test_render_rejects_unknown_backend(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("RENDER_BACKEND", "midjourney")
+    with pytest.raises(PipelineOperatorError, match="RENDER_BACKEND must be one of"):
+        pipeline_operator_render(
+            pipeline_id="p-1",
+            kind="concept_preview",
+            items=[{"concept": "a", "prompt": "pa"}],
+        )
+
+
+def test_store_creative_posts_expected_body(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from helper import pipeline_operator_store_creative
+
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(
+                200,
+                {"creative_id": "cr-1", "file_path_supabase": "p", "version": "v1.0"},
+            )
+        ],
+    )
+    out = pipeline_operator_store_creative(
+        pipeline_id="p-1",
+        kind="final",
+        concept="trust",
+        ratio="9x16",
+        version="v1.0",
+        prompt="vertical roof",
+        image_b64="QUJD",
+        offer_text="$99",
+        parent_creative_id="cr-c1",
+    )
+    assert out["creative_id"] == "cr-1"
+    req = built[0].requests[0]
+    assert req.method == "POST"
+    assert req.url == "/work/pipeline/tools/store_creative"
+    assert req.json_body == {
+        "pipeline_id": "p-1",
+        "kind": "final",
+        "concept": "trust",
+        "ratio": "9x16",
+        "version": "v1.0",
+        "prompt": "vertical roof",
+        "image_b64": "QUJD",
+        "offer_text": "$99",
+        "parent_creative_id": "cr-c1",
+    }
 
 
 # ---------------------------------------------------------------------------
