@@ -85,6 +85,27 @@ Think about three things while you fill it:
 The `angles` list is also your **concept plan**: one angle → one concept.
 Order it by what you'd bet on first.
 
+### When client context is present
+
+The `pipeline-operator` skill may hand you a **client context** (from
+`pipeline_operator_client_read`: brand, profile, offers, constraints, value
+props). When it does, author from it instead of generic assumptions:
+
+- **`offer_text`** comes from the client's active `offers` — use a real offer
+  the client runs, not an invented one. (If every offer is weak, flag it and
+  propose sharpening _within_ what the client actually sells.)
+- **`must_avoid` / `extra_negatives`** must include the client's
+  `offer_constraints` — these are do-not-say compliance rules; never write copy,
+  on-image text, or angles that violate them.
+- **Voice and setting** reflect the client's `tone` / `voice_note` and local
+  market (`city` / `state` / `primary_city`, `targeting_detail`) — the mood,
+  wording, and the house style of the shot should sound and look like _this_
+  client in _their_ service area, not stock.
+- **Proof points** back the `social_proof` and `authority` angles: pull
+  `years_in_business`, google reviews / rating, `warranty`, licensed/insured,
+  family-owned, project counts from the profile — but only claim proof that is
+  actually present.
+
 ---
 
 ## Step 2 — Choose distinct angles (different reasons to believe)

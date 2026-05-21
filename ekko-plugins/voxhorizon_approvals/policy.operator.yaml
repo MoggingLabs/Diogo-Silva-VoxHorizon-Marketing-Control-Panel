@@ -27,13 +27,15 @@
 extra_requires_approval:
   - mcp_pipeline_operator_pipeline_operator_render
 
-# The read tool is a pure GET of pipeline state (no spend, no side effects),
-# and the brief tool is a free Supabase write the manager reviews via the
-# dashboard STAGE gate (not the spend gate). Allowlisting both keeps the
-# operator's read-state-then-author loop running without pestering the manager
-# for non-spend actions.
+# The read tool is a pure GET of pipeline state, the client-read tool is a pure
+# GET of the client's brand / offers / do-not-say context (both no spend, no
+# side effects), and the brief tool is a free Supabase write the manager reviews
+# via the dashboard STAGE gate (not the spend gate). Allowlisting all three
+# keeps the operator's read-state → read-client → author loop running without
+# pestering the manager for non-spend actions.
 allowlist:
   - mcp_pipeline_operator_pipeline_operator_read
+  - mcp_pipeline_operator_pipeline_operator_client_read
   - mcp_pipeline_operator_pipeline_operator_brief
 
 # Hard-block the shell/code tools. A focused marketing operator authors brief

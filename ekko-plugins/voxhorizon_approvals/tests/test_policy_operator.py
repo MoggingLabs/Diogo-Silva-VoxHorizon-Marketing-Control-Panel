@@ -38,6 +38,7 @@ OPERATOR_POLICY_PATH = (
 #: Exact full tool names as Hermes presents them (single-underscore namespacing).
 RENDER = "mcp_pipeline_operator_pipeline_operator_render"
 READ = "mcp_pipeline_operator_pipeline_operator_read"
+CLIENT_READ = "mcp_pipeline_operator_pipeline_operator_client_read"
 BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
 
 
@@ -76,6 +77,15 @@ def test_read_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
     assert "allowlist" in decision.reason
 
 
+def test_client_read_tool_is_allowlisted(
+    operator_overlay: PolicyOverlay,
+) -> None:
+    """The client-read tool (pure GET of brand/offers/do-not-say) is allowed."""
+    decision = operator_overlay.evaluate(CLIENT_READ, {})
+    assert decision.action == "allow"
+    assert "allowlist" in decision.reason
+
+
 def test_brief_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
     """The brief tool (free write, reviewed via the stage gate) is allowed."""
     decision = operator_overlay.evaluate(BRIEF, {})
@@ -109,7 +119,9 @@ def test_bare_short_render_name_is_not_gated_by_overlay(
 def test_shipped_operator_policy_contents() -> None:
     overlay = load_overlay(OPERATOR_POLICY_PATH)
     assert overlay.extra_requires_approval == frozenset({RENDER})
-    assert overlay.allowlist == frozenset({READ, BRIEF})
+    # The allowlist now carries the three non-spend tools: read + client_read +
+    # brief (all GET/free-write; the manager gates spend + brief stage review).
+    assert overlay.allowlist == frozenset({READ, CLIENT_READ, BRIEF})
     assert overlay.blocklist == frozenset({"execute_code", "terminal", "shell"})
 
 

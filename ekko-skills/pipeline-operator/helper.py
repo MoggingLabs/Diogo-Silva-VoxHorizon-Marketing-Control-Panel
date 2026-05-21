@@ -6,6 +6,7 @@ this module is the typed, validated HTTP surface the operator calls to talk to
 the Wave-A worker endpoints:
 
 * ``GET  {WORKER_BASE_URL}/work/pipeline/tools/{pipeline_id}``  → read state
+* ``GET  {WORKER_BASE_URL}/work/client/{client_id}``            → client context
 * ``POST {WORKER_BASE_URL}/work/pipeline/tools/brief``          → author brief
 * ``POST {WORKER_BASE_URL}/work/pipeline/tools/render``         → render (SPEND)
 
@@ -21,9 +22,10 @@ The approval plugin (voxhorizon-approvals) gates tool calls **by tool name**
 operator capabilities are exposed under *distinct, stable* entrypoint names
 that the operator policy references one-for-one:
 
-* ``pipeline_operator_read``   — the READ tool (allowlisted; no spend)
-* ``pipeline_operator_brief``  — the BRIEF tool (free Supabase write)
-* ``pipeline_operator_render`` — the RENDER tool (**spend; requires approval**)
+* ``pipeline_operator_read``        — the READ tool (allowlisted; no spend)
+* ``pipeline_operator_client_read`` — the CLIENT-CONTEXT tool (allowlisted; no spend)
+* ``pipeline_operator_brief``       — the BRIEF tool (free Supabase write)
+* ``pipeline_operator_render``      — the RENDER tool (**spend; requires approval**)
 
 Do NOT rename ``pipeline_operator_render`` without updating
 ``policy.operator.yaml`` in the plugin — the gate keys on this exact name.
@@ -130,6 +132,12 @@ def _require_pipeline_id(pipeline_id: Any) -> str:
     return pipeline_id.strip()
 
 
+def _require_client_id(client_id: Any) -> str:
+    if not isinstance(client_id, str) or not client_id.strip():
+        raise PipelineOperatorError("client_id must be a non-empty string")
+    return client_id.strip()
+
+
 # ---------------------------------------------------------------------------
 # READ — pipeline_operator_read (allowlisted by the operator policy)
 # ---------------------------------------------------------------------------
@@ -151,6 +159,33 @@ def pipeline_operator_read(pipeline_id: str) -> dict[str, Any]:
     """
     pid = _require_pipeline_id(pipeline_id)
     return _request("GET", f"{_TOOLS_PREFIX}/{pid}")
+
+
+# ---------------------------------------------------------------------------
+# CLIENT READ — pipeline_operator_client_read (allowlisted; pure GET, no spend)
+# ---------------------------------------------------------------------------
+
+
+def pipeline_operator_client_read(client_id: str) -> dict[str, Any]:
+    """Read the full client context for ``client_id``.
+
+    Calls ``GET {WORKER_BASE_URL}/work/client/{client_id}`` and returns the
+    worker's JSON: ``slug``, ``name``, ``service_type``, ``brand_colors``,
+    ``profile`` (the typed ``client_profiles`` row or null), ``offers``,
+    ``offer_constraints`` (the do-not-say rules), ``services``, ``value_props``
+    (``usps`` / ``differentiators``), ``assets``, and ``past_projects``.
+
+    Use this after ``pipeline_operator_read`` whenever the pipeline is linked to
+    a client, so you can author on-brand, compliant ads from the client's REAL
+    offers, brand voice, and proof points. This performs NO spend and the
+    operator policy ALLOWLISTS it, so it never round-trips the manager.
+
+    Raises:
+        PipelineOperatorError: On missing env, network failure, non-2xx
+            (e.g. 404 when the client is missing), or a non-object body.
+    """
+    cid = _require_client_id(client_id)
+    return _request("GET", f"/work/client/{cid}")
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +330,7 @@ def pipeline_operator_render(
 # ---------------------------------------------------------------------------
 
 get_pipeline = pipeline_operator_read
+get_client = pipeline_operator_client_read
 post_brief = pipeline_operator_brief
 post_render = pipeline_operator_render
 
@@ -304,8 +340,10 @@ __all__ = [
     "ENV_WORKER_SHARED_SECRET",
     "PipelineOperatorError",
     "RENDER_KINDS",
+    "get_client",
     "get_pipeline",
     "pipeline_operator_brief",
+    "pipeline_operator_client_read",
     "pipeline_operator_read",
     "pipeline_operator_render",
     "post_brief",

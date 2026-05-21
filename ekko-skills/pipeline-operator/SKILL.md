@@ -31,15 +31,19 @@ You have three **MCP tools** (served by `mcp_server.py`, which delegates to the
 worker). Call them like any other tool — do NOT shell out to `helper.py`. The
 names matter: the spend gate keys on them.
 
-| MCP tool                   | What it does                  | Spend?  | Manager gate                       |
-| -------------------------- | ----------------------------- | ------- | ---------------------------------- |
-| `pipeline_operator_read`   | Read pipeline state + stage   | no      | allowlisted (no prompt)            |
-| `pipeline_operator_brief`  | Author/upsert the image brief | no      | reviewed via the _stage_ gate      |
-| `pipeline_operator_render` | Render concepts/finals (Kie)  | **yes** | **requires approval** (spend gate) |
+| MCP tool                        | What it does                       | Spend?  | Manager gate                       |
+| ------------------------------- | ---------------------------------- | ------- | ---------------------------------- |
+| `pipeline_operator_read`        | Read pipeline state + stage        | no      | allowlisted (no prompt)            |
+| `pipeline_operator_client_read` | Read client brand/offers/do-not-say | no      | allowlisted (no prompt)            |
+| `pipeline_operator_brief`       | Author/upsert the image brief      | no      | reviewed via the _stage_ gate      |
+| `pipeline_operator_render`      | Render concepts/finals (Kie)       | **yes** | **requires approval** (spend gate) |
 
 Tool signatures:
 
 - `pipeline_operator_read(pipeline_id)` — returns the state object below.
+- `pipeline_operator_client_read(client_id)` — returns the client context
+  object (brand, profile, offers, offer_constraints, value_props, …); see
+  "Read the client context" below.
 - `pipeline_operator_brief(pipeline_id, image_payload, notes=None)` — upserts
   the brief; `{ok, brief_id}`.
 - `pipeline_operator_render(pipeline_id, kind, items)` — **the spend tool**;
@@ -80,6 +84,8 @@ finals) in the dashboard; each of those re-dispatches you for the next stage.
   brief:   {id, payload} | null,
   concepts:[{creative_id, concept, ratio, version, file_path_supabase}],
   finals:  [...],
+  client:  {client_id, name, service_type, tone, offers, offer_constraints,
+            top_usps} | null,   # COMPACT — full profile via client_read
   events_tail: [last ~20 pipeline_events],
 }
 ```
@@ -87,6 +93,10 @@ finals) in the dashboard; each of those re-dispatches you for the next stage.
 - `status` is the stage: `configuration | ideation | review | generation |
 done | cancelled`.
 - `picks.image` is the list of `creative_id`s the manager chose at review.
+- `client` is a COMPACT block (present only when the pipeline is linked to a
+  client): the brand `tone`, the client's REAL `offers`, the do-not-say
+  `offer_constraints`, and the `top_usps`. It is enough to start authoring;
+  pull the FULL profile with `pipeline_operator_client_read(client["client_id"])`.
 - `events_tail` tells you what already happened — use it to stay **idempotent**
   (don't re-author a brief that exists, don't re-render concepts that are
   already there).
@@ -96,23 +106,85 @@ stop — do not guess.
 
 ---
 
+## Read the client context
+
+If the pipeline read returns a non-null `client`, this pipeline belongs to a
+real client with a brand, real offers, and compliance rules. **Author from
+that, not from generic assumptions.** In `configuration` and `ideation`, right
+after `pipeline_operator_read`, call:
+
+```
+client = pipeline_operator_client_read(<client_id>)   # client_id from read's `client` block
+```
+
+It returns (allowlisted, no spend):
+
+```text
+{
+  client_id, slug, name, service_type, brand_colors,
+  profile: { tone, tagline, voice_note, years_in_business, google_reviews,
+             google_rating, warranty, financing, city, state, primary_city,
+             targeting, targeting_detail, business_hours, ... } | null,
+  offers:           [{offer_text, active}],
+  offer_constraints:["do-not-say rule", ...],
+  services:         ["service name", ...],
+  value_props:      {usps:[...], differentiators:[...]},
+  assets:           [{kind, source, ref, formats, label}],
+  past_projects:    ["url", ...],
+}
+```
+
+**Author USING it:**
+
+- **Voice/tone** — match `profile.tone` / `voice_note` / `tagline`. The mood
+  and wording of every concept should sound like this client, not generic.
+- **Offers** — the `offer_text` you put in the brief and on concepts comes from
+  the client's **active** `offers` (`offers` where `active` is true). Do not
+  invent an offer the client doesn't run.
+- **Do-not-say (STRICT)** — `offer_constraints` are hard compliance rules.
+  NEVER author copy, on-image text, or angles that violate them. Pass them to
+  `image-ad-authoring` as `must_avoid` / `extra_negatives`. When in doubt,
+  leave the claim out.
+- **Proof points** — use `years_in_business`, `google_reviews` / `google_rating`,
+  `warranty`, license/insured, family-owned, project counts to back the
+  `social_proof` and `authority` angles (e.g. "Family-owned, 4.9★ on 700+
+  reviews"). Only use proof that is actually present in the profile.
+- **Locale/targeting** — use `city` / `state` / `primary_city` and
+  `targeting` / `targeting_detail` so the setting, market wording, and audience
+  reflect the client's real service area, not a stock location.
+
+If `client` is null (no client linked), author from `config_draft` + the
+dispatch instruction as before. If `pipeline_operator_client_read` 404s,
+narrate it and fall back to the compact `client` block from the read.
+
+---
+
 ## Stage: `configuration` → draft the brief
 
 Goal: produce a brief the manager can review. **No spend.**
 
-1. Gather the intent from `config_draft` and the dispatch instruction
+1. If the read returned a `client`, call
+   `pipeline_operator_client_read(client["client_id"])` and author from it:
+   the **market** comes from the client's locale/targeting, the **offer_text**
+   from the client's active `offers`, the **service** from `service_type` /
+   `services`, and the **audience** from `targeting` / `targeting_detail`. Feed
+   the `offer_constraints` (do-not-say) and brand `tone` into the brief so the
+   downstream concepts honor them.
+2. Otherwise gather the intent from `config_draft` and the dispatch instruction
    (market, offer, service, audience, how many concepts — default 4 angles).
-2. Use **`image-ad-authoring`** → `build_image_brief(...)` to assemble a
-   validated `image_payload` (required: `market`, `offer_text`, `angles`).
-   If the offer is weak, sharpen it (see image-ad-authoring's "offer is the
-   ad" rule) and say what you changed.
-3. Call `pipeline_operator_brief(pipeline_id=..., image_payload=..., notes=...)`.
+3. Use **`image-ad-authoring`** → `build_image_brief(...)` to assemble a
+   validated `image_payload` (required: `market`, `offer_text`, `angles`). Put
+   the client's do-not-say constraints in `extras.must_avoid`. If the offer is
+   weak, sharpen it (see image-ad-authoring's "offer is the ad" rule) — but
+   only ever to one of the client's REAL offers — and say what you changed.
+4. Call `pipeline_operator_brief(pipeline_id=..., image_payload=..., notes=...)`.
    This upserts the brief and is idempotent — if a brief already exists it
    updates it.
-4. **Narrate**: summarize the market, the offer, the chosen angles, and any
-   judgment calls. End with: _"Brief is ready for your review — approve it in
+5. **Narrate**: summarize the market, the offer, the chosen angles, and any
+   judgment calls (note when you pulled the offer / market / proof from the
+   client context). End with: _"Brief is ready for your review — approve it in
    the dashboard and I'll author the concepts."_
-5. **Stop.** Do not render anything. The manager approves the brief at the
+6. **Stop.** Do not render anything. The manager approves the brief at the
    stage gate.
 
 Call the MCP tool (image-ad-authoring built `payload`):
@@ -132,11 +204,24 @@ pipeline_operator_brief(
 Goal: give the manager real choices to pick from. **This spends** — but as a
 _single_ approval for the whole batch.
 
-1. Read state; pull the approved brief from `brief.payload`.
+1. Read state; pull the approved brief from `brief.payload`. If the read
+   returned a `client`, call `pipeline_operator_client_read(client["client_id"])`
+   and AUTHOR the concepts from it.
 2. Use **`image-ad-authoring`** to author **4 distinct concepts** — different
-   angles, not variations of one idea. Assemble each with `build_concept(...)`
-   and run `assert_distinct_concepts(...)` so you never spend on a set that
-   isn't a real choice.
+   angles, not variations of one idea — grounded in the client context:
+   - the brand **tone**/voice sets the mood and wording of every concept;
+   - `offer_text` on each concept comes from the client's active `offers`;
+   - STRICTLY honor `offer_constraints` (do-not-say) — pass them as
+     `must_avoid` / `extra_negatives`; never author copy or on-image text that
+     violates them;
+   - back `social_proof` / `authority` concepts with real proof points
+     (`years_in_business`, google reviews/rating, `warranty`, licensed/insured,
+     family-owned) from the profile;
+   - set the **setting** and audience from the client's locale/targeting
+     (`city` / `state` / `primary_city`, `targeting_detail`), not a stock place.
+   Assemble each with `build_concept(...)` and run
+   `assert_distinct_concepts(...)` so you never spend on a set that isn't a
+   real choice.
 3. Call `pipeline_operator_render(pipeline_id=..., kind="concept_preview",
 items=<all 4>)` — **all items in ONE call**. That is one spend approval for
    the manager, not four. (Previews render 1:1 @ 1K.)
@@ -249,10 +334,12 @@ pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final", items=finals)
 
 - `image-ad-authoring` — where every brief, concept, and prompt is authored.
   This skill calls it; do not hand-roll prompts here.
-- `mcp_server.py` — the stdio MCP server that publishes the three tools you
-  call (`pipeline_operator_read` / `_brief` / `_render`); it delegates to
-  `helper.py`, which is the only thing that talks to the worker.
+- `mcp_server.py` — the stdio MCP server that publishes the four tools you
+  call (`pipeline_operator_read` / `_client_read` / `_brief` / `_render`); it
+  delegates to `helper.py`, which is the only thing that talks to the worker.
 - `voxhorizon-approvals` plugin (`policy.operator.yaml`) — the spend gate on
-  `pipeline_operator_render` and the allowlist on `pipeline_operator_read`.
-- Worker endpoints (Wave A): `GET /work/pipeline/tools/{id}`,
-  `POST /work/pipeline/tools/brief`, `POST /work/pipeline/tools/render`.
+  `pipeline_operator_render` and the allowlist on `pipeline_operator_read` /
+  `pipeline_operator_client_read` / `pipeline_operator_brief`.
+- Worker endpoints: `GET /work/pipeline/tools/{id}`,
+  `GET /work/client/{id}`, `POST /work/pipeline/tools/brief`,
+  `POST /work/pipeline/tools/render`.

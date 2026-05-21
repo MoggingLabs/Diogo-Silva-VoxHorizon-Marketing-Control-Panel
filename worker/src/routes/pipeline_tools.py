@@ -13,7 +13,18 @@ Endpoints (all bearer-authed via :func:`verify_secret`):
       Operator READ path. Returns the pipeline row's operator-relevant
       fields plus the authored brief, the ideation concepts, the final
       renders, and the tail of the event timeline so the agent can decide
-      what to do next.
+      what to do next. When the pipeline is linked to a client, a compact
+      ``client`` block (name, service_type, offers, offer_constraints, tone,
+      a few USPs) rides along so the operator gets brand + offers +
+      do-not-say on the first read; the FULL profile stays behind
+      ``/work/client/{id}``.
+
+  GET  /work/client/{client_id}
+      Operator CLIENT-CONTEXT path. Returns the client's brand / company /
+      campaign knowledge (identity, the typed ``client_profiles`` row, the
+      offers, the do-not-say constraints, services, value props, assets and
+      past projects) so the operator can author on-brand, compliant ads.
+      Read-only; no spend.
 
   POST /work/pipeline/tools/brief
       Operator AUTHORS the image brief (idempotent upsert). NOT spend-gated
@@ -196,6 +207,16 @@ async def read_pipeline_tools(pipeline_id: str) -> dict[str, Any]:
             elif version.startswith("v1"):
                 finals.append(view)
 
+    # When the pipeline is linked to a client, surface a COMPACT client block
+    # so the operator gets brand voice + the real offers + the do-not-say rules
+    # on its very first read (no second round-trip needed for the common case).
+    # The FULL typed profile + assets + past projects stay behind
+    # /work/client/{id} so this read response stays small.
+    client_compact: dict[str, Any] | None = None
+    client_id = pipeline.get("client_id")
+    if client_id:
+        client_compact = _fetch_client_compact(str(client_id))
+
     return {
         "pipeline_id": pipeline.get("id"),
         "status": pipeline.get("status"),
@@ -205,7 +226,232 @@ async def read_pipeline_tools(pipeline_id: str) -> dict[str, Any]:
         "brief": brief,
         "concepts": concepts,
         "finals": finals,
+        "client": client_compact,
         "events_tail": _fetch_events_tail(pipeline_id, limit=EVENTS_TAIL_LIMIT),
+    }
+
+
+# ---------------------------------------------------------------------------
+# GET /work/client/{client_id}  — operator client context
+# ---------------------------------------------------------------------------
+#
+# The dashboard operator authors ads from the per-client brand / company /
+# campaign knowledge that migration 0012 normalized into Supabase
+# (``clients`` + ``client_profiles`` + the child tables). The operator reaches
+# the DB only through the worker, so these read helpers mirror
+# :func:`_fetch_brief_for_read` exactly: ``get_supabase_admin()`` →
+# ``select(...).eq(...).maybe_single()/execute()`` with the
+# ``resp.data if resp is not None`` None-guard for the maybe_single reads.
+
+# How many USPs the COMPACT block (on the pipeline read) carries, so the
+# operator gets the top differentiators without the full value-prop list.
+_COMPACT_USP_LIMIT = 3
+
+
+def _fetch_client_row(client_id: str) -> dict[str, Any] | None:
+    """Pull the identity columns off ``clients``, or None if missing.
+
+    maybe_single().execute() returns None (not a response) when the row is
+    absent — guard it so the route can 404 cleanly rather than raising.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("clients")
+        .select("id, slug, name, service_type, brand_colors")
+        .eq("id", client_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+
+
+def _fetch_client_profile(client_id: str) -> dict[str, Any] | None:
+    """Pull the 1:1 ``client_profiles`` row, or None when unfilled.
+
+    The whole typed row is returned verbatim (``select("*")``) so the operator
+    can reason over every fact (years_in_business, google_rating, warranty,
+    targeting, …) without the worker having to enumerate ~70 columns.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_profiles")
+        .select("*")
+        .eq("client_id", client_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+
+
+def _fetch_client_offers(client_id: str) -> list[dict[str, Any]]:
+    """Return the client's offers (offer_text + active), source order."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_offers")
+        .select("offer_text, active, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return [
+        {"offer_text": r.get("offer_text"), "active": r.get("active")}
+        for r in rows
+    ]
+
+
+def _fetch_client_offer_constraints(client_id: str) -> list[str]:
+    """Return the do-not-say constraint texts, source order.
+
+    These are the CRITICAL compliance rules — the operator must never author
+    copy that violates them.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_offer_constraints")
+        .select("constraint_text, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return [r["constraint_text"] for r in rows if r.get("constraint_text")]
+
+
+def _fetch_client_services(client_id: str) -> list[str]:
+    """Return the client's service names, source order."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_services")
+        .select("service_name, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return [r["service_name"] for r in rows if r.get("service_name")]
+
+
+def _fetch_client_value_props(client_id: str) -> dict[str, list[str]]:
+    """Return value props split into ``usps`` / ``differentiators``.
+
+    The ``client_value_props.kind`` enum is ``usp | differentiator``; we
+    bucket in Python (one read) rather than two filtered selects.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_value_props")
+        .select("kind, prop_text, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    usps: list[str] = []
+    differentiators: list[str] = []
+    for r in rows:
+        text = r.get("prop_text")
+        if not text:
+            continue
+        if r.get("kind") == "usp":
+            usps.append(text)
+        elif r.get("kind") == "differentiator":
+            differentiators.append(text)
+    return {"usps": usps, "differentiators": differentiators}
+
+
+def _fetch_client_assets(client_id: str) -> list[dict[str, Any]]:
+    """Return the client's assets (kind, source, ref, formats, label)."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_assets")
+        .select("kind, source, ref, formats, label, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return [
+        {
+            "kind": r.get("kind"),
+            "source": r.get("source"),
+            "ref": r.get("ref"),
+            "formats": r.get("formats"),
+            "label": r.get("label"),
+        }
+        for r in rows
+    ]
+
+
+def _fetch_client_past_projects(client_id: str) -> list[str]:
+    """Return the client's past-project URLs, source order."""
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("client_past_projects")
+        .select("url, sort_order")
+        .eq("client_id", client_id)
+        .order("sort_order", desc=False)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return [r["url"] for r in rows if r.get("url")]
+
+
+def _fetch_client_compact(client_id: str) -> dict[str, Any] | None:
+    """Build the COMPACT client block carried on the pipeline read.
+
+    Returns the minimum the operator needs to start authoring on-brand and
+    compliant on its FIRST read: the name, the service type, the REAL offers,
+    the do-not-say constraints, the brand tone, and the top few USPs. Returns
+    None when the client row is missing so the read tool degrades cleanly to
+    ``client: null``. The FULL profile stays behind /work/client/{id}.
+    """
+    client_row = _fetch_client_row(client_id)
+    if client_row is None:
+        return None
+    profile = _fetch_client_profile(client_id)
+    tone = profile.get("tone") if isinstance(profile, dict) else None
+    value_props = _fetch_client_value_props(client_id)
+    return {
+        "client_id": client_id,
+        "name": client_row.get("name"),
+        "service_type": client_row.get("service_type"),
+        "tone": tone,
+        "offers": _fetch_client_offers(client_id),
+        "offer_constraints": _fetch_client_offer_constraints(client_id),
+        "top_usps": value_props["usps"][:_COMPACT_USP_LIMIT],
+    }
+
+
+@router.get("/work/client/{client_id}", dependencies=[Depends(verify_secret)])
+async def read_client(client_id: str) -> dict[str, Any]:
+    """Operator client-context path: brand + company + offers + constraints.
+
+    Returns the full per-client knowledge the operator authors ads from. The
+    client row is required (404 when missing, mirroring the pipeline-not-found
+    pattern); the typed ``client_profiles`` row degrades to ``profile: null``
+    when unfilled, and every child collection degrades to an empty list. Pure
+    read — no spend, no side effects.
+    """
+    client_row = _fetch_client_row(client_id)
+    if client_row is None:
+        raise HTTPException(
+            status_code=404, detail=f"client not found: {client_id}"
+        )
+
+    return {
+        "client_id": client_row.get("id"),
+        "slug": client_row.get("slug"),
+        "name": client_row.get("name"),
+        "service_type": client_row.get("service_type"),
+        "brand_colors": client_row.get("brand_colors"),
+        "profile": _fetch_client_profile(client_id),
+        "offers": _fetch_client_offers(client_id),
+        "offer_constraints": _fetch_client_offer_constraints(client_id),
+        "services": _fetch_client_services(client_id),
+        "value_props": _fetch_client_value_props(client_id),
+        "assets": _fetch_client_assets(client_id),
+        "past_projects": _fetch_client_past_projects(client_id),
     }
 
 
