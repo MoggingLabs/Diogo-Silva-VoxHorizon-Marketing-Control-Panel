@@ -36,6 +36,13 @@ allowlist:
   - mcp_pipeline_operator_pipeline_operator_read
   - mcp_pipeline_operator_pipeline_operator_brief
 
-# No hard blocks for the operator profile. (A blocklisted tool is rejected
-# outright with no operator prompt — reserved for known-bad tools.)
-blocklist: []
+# Hard-block the shell/code tools. A focused marketing operator authors brief
+# and concept payloads directly (in reasoning) and persists them via the MCP
+# pipeline tools — it never needs a shell. Blocking these (instant reject, no
+# long-poll) stops the operator from shelling out to run helper.py, which would
+# otherwise hit the spend-gate long-poll and hang for the full timeout. The
+# worker validates every payload server-side, so authoring-by-reasoning is safe.
+blocklist:
+  - execute_code
+  - terminal
+  - shell
