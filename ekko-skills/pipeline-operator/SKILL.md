@@ -36,7 +36,15 @@ names matter: the spend gate keys on them.
 | `pipeline_operator_read`        | Read pipeline state + stage        | no      | allowlisted (no prompt)            |
 | `pipeline_operator_client_read` | Read client brand/offers/do-not-say | no      | allowlisted (no prompt)            |
 | `pipeline_operator_brief`       | Author/upsert the image brief      | no      | reviewed via the _stage_ gate      |
-| `pipeline_operator_render`      | Render concepts/finals (Kie)       | **yes** | **requires approval** (spend gate) |
+| `pipeline_operator_render`      | Render concepts/finals             | **yes** | **requires approval** (spend gate) |
+
+> **Render backend (transparent to you):** `pipeline_operator_render` renders
+> via the manager's ChatGPT/Codex subscription by default (`RENDER_BACKEND=openai-codex`,
+> `gpt-image-2`, $0) and uploads the bytes to the worker; set `RENDER_BACKEND=kie`
+> to use the legacy paid Kie path. You call the tool the SAME way either way, the
+> spend gate fires the same way, and the worker records the same events/cost
+> (the codex path reports `total_cost_usd: 0`). Finals' 9:16 is a TRUE 9:16
+> (864x1536) on the codex backend.
 
 Tool signatures:
 
@@ -351,4 +359,5 @@ pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final", items=finals)
   `pipeline_operator_client_read` / `pipeline_operator_brief`.
 - Worker endpoints: `GET /work/pipeline/tools/{id}`,
   `GET /work/client/{id}`, `POST /work/pipeline/tools/brief`,
-  `POST /work/pipeline/tools/render`.
+  `POST /work/pipeline/tools/render` (Kie backend),
+  `POST /work/pipeline/tools/store_creative` (codex backend uploads bytes here).

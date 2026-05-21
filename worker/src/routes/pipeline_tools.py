@@ -60,6 +60,8 @@ operator's authorship stays traceable without a schema change.
 
 from __future__ import annotations
 
+import base64
+import binascii
 from typing import Any, Literal
 
 import structlog
@@ -75,6 +77,7 @@ from ..services.pipeline_runner import (
     EVENT_TASK_ERROR,
     EVENT_TASK_QUEUED,
     EVENT_TASK_RUNNING,
+    PipelineStage,
     emit_cost,
     emit_pipeline_event,
     fetch_pipeline,
@@ -110,6 +113,21 @@ _FINAL = {
     "stage": "generation",
     "cost_usd": 0.05,
 }
+
+# Per-kind storage parameters for the codex-backed /store_creative path. The
+# operator renders the bytes IN ITS OWN CONTAINER via Hermes' codex image
+# provider (the manager's ChatGPT/Codex OAuth — $0), so the worker just stores
+# them and records a zero-cost line. Stage/version mirror the Kie /render path
+# exactly so the two backends produce indistinguishable creatives, events and
+# auto-advance behaviour; only the cost (0) and the cost `api` differ.
+_STORE_STAGE: dict[str, PipelineStage] = {
+    "concept_preview": "ideation",
+    "final": "generation",
+}
+# Cost ``api`` label for the subscription-backed render. The operator pays
+# nothing (the image is generated on the manager's ChatGPT/Codex subscription),
+# so every stored creative records subtotal=0 against this api.
+_CODEX_COST_API = "openai-codex"
 
 
 # ---------------------------------------------------------------------------
@@ -903,6 +921,217 @@ async def render(body: RenderInput) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# POST /work/pipeline/tools/store_creative
+# ---------------------------------------------------------------------------
+#
+# Subscription-backed render path. The operator generates the image bytes in
+# its OWN container via Hermes' codex image provider (the manager's ChatGPT/
+# Codex OAuth — $0, model gpt-image-2 through the Codex Responses
+# image_generation tool) and POSTs the finished bytes here. This endpoint is
+# the storage twin of /render's ``_render_one``: it uploads the bytes,
+# records the creative + iteration + event rows, emits the SAME pipeline_events
+# (task_running → task_done) and records a zero-cost line against
+# ``openai-codex``. The only difference from /render is that the bytes arrive
+# pre-rendered instead of being fetched from Kie — so the dashboard, the
+# auto-advance trigger and the cost aggregator all behave identically.
+
+
+class StoreCreativeInput(BaseModel):
+    """POST body for ``/work/pipeline/tools/store_creative``.
+
+    ``image_b64`` is the base64-encoded PNG the operator already rendered via
+    the codex image provider. ``kind`` selects the stage/version (mirroring
+    /render): ``concept_preview`` → ideation/v0.ideation, ``final`` →
+    generation/v1.0. ``ratio`` is the canonical worker label and is stamped
+    onto the creative + the storage path exactly as /render does.
+    """
+
+    pipeline_id: str = Field(..., min_length=1)
+    kind: Literal["concept_preview", "final"]
+    concept: str = Field(..., min_length=1)
+    ratio: Literal["1x1", "9x16", "16x9"]
+    version: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    image_b64: str = Field(..., min_length=1)
+    offer_text: str | None = None
+    parent_creative_id: str | None = None
+
+
+@router.post(
+    "/work/pipeline/tools/store_creative", dependencies=[Depends(verify_secret)]
+)
+async def store_creative(body: StoreCreativeInput) -> dict[str, Any]:
+    """Store an operator-rendered (codex) image as a pipeline creative.
+
+    The storage twin of /render: it takes pre-rendered bytes instead of
+    calling Kie, then runs the SAME upload → record_creative_stage →
+    task_running/task_done events → cost path. Cost is recorded against
+    ``openai-codex`` with ``subtotal=0`` (the image was generated free on the
+    manager's ChatGPT/Codex subscription). Finals require ``parent_creative_id``
+    just like /render. Returns ``{creative_id, file_path_supabase, version}``.
+    """
+    pipeline = fetch_pipeline(body.pipeline_id)
+    if not pipeline:
+        raise HTTPException(
+            status_code=404, detail=f"pipeline not found: {body.pipeline_id}"
+        )
+
+    brief_id = pipeline.get("image_brief_id")
+    if not brief_id:
+        raise HTTPException(
+            status_code=400,
+            detail="pipeline has no image_brief_id; author a brief first",
+        )
+    brief_id = str(brief_id)
+
+    if body.kind == "final" and not body.parent_creative_id:
+        raise HTTPException(
+            status_code=400,
+            detail="final renders require parent_creative_id",
+        )
+
+    try:
+        image_bytes = base64.b64decode(body.image_b64, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise HTTPException(
+            status_code=400, detail=f"image_b64 is not valid base64: {e}"
+        ) from e
+    if not image_bytes:
+        raise HTTPException(status_code=400, detail="image_b64 decoded to empty")
+
+    stage = _STORE_STAGE[body.kind]
+    sb = get_supabase_admin()
+
+    base_payload: dict[str, Any] = {
+        "kind": "image",
+        "concept": body.concept,
+        "ratio": body.ratio,
+    }
+    if body.parent_creative_id:
+        base_payload["parent_creative_id"] = body.parent_creative_id
+
+    # Emit the same task lifecycle the /render path emits. The bytes are
+    # already rendered, so queued→running→done collapses to running→done.
+    running_id = emit_pipeline_event(
+        pipeline_id=body.pipeline_id,
+        kind=EVENT_TASK_RUNNING,
+        stage=stage,
+        payload=base_payload,
+    )
+
+    try:
+        storage_path = build_creative_path(
+            brief_id, body.concept, body.ratio, body.version
+        )
+        sb.storage.from_(BUCKET).upload(
+            path=storage_path,
+            file=image_bytes,
+            file_options={"content-type": "image/png", "x-upsert": "true"},
+        )
+        insert = await record_creative_stage(
+            brief_id=brief_id,
+            file_path_supabase=storage_path,
+            concept=body.concept,
+            offer_text=body.offer_text,
+            ratio=body.ratio,
+            version=body.version,
+            prompt_used={
+                "model": "openai-codex/gpt-image-2",
+                "prompt": body.prompt,
+                "ratio": body.ratio,
+                "stage": stage,
+                # Operator authorship marker (the DB enum can't store it on
+                # the author column — see module docstring).
+                "author": "operator",
+                "backend": "openai-codex",
+                **(
+                    {"parent_creative_id": body.parent_creative_id}
+                    if body.parent_creative_id
+                    else {}
+                ),
+            },
+            iteration_kind="generate",
+            iteration_content={
+                "prompt": body.prompt,
+                "pipeline_id": body.pipeline_id,
+                "stage": stage,
+                "author": "operator",
+                "backend": "openai-codex",
+            },
+            # The iteration_author enum is ('user','ekko'); the operator is a
+            # Hermes agent in the Ekko family, so we reuse 'ekko' here.
+            author="ekko",
+            parent_creative_id=body.parent_creative_id,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        log.warning(
+            "operator_store_creative_failed",
+            pipeline_id=body.pipeline_id,
+            brief_id=brief_id,
+            concept=body.concept,
+            ratio=body.ratio,
+            error=str(e),
+        )
+        err_payload = {**base_payload, "error": str(e)}
+        emit_pipeline_event(
+            pipeline_id=body.pipeline_id,
+            kind=EVENT_TASK_ERROR,
+            stage=stage,
+            payload=err_payload,
+        )
+        raise HTTPException(
+            status_code=502, detail=f"store_creative failed: {e}"
+        ) from e
+
+    done_payload = {
+        **base_payload,
+        "creative_id": insert.creative_id,
+        "file_path_supabase": storage_path,
+    }
+    done_id = emit_pipeline_event(
+        pipeline_id=body.pipeline_id,
+        kind=EVENT_TASK_DONE,
+        stage=stage,
+        payload=done_payload,
+    )
+    # Zero-cost line: the image was generated on the manager's ChatGPT/Codex
+    # subscription, so the worker pays nothing — but we still emit the cost
+    # event so the aggregator and the dashboard timeline stay consistent with
+    # the Kie path (which always emits a cost_recorded after task_done).
+    emit_cost(
+        pipeline_id=body.pipeline_id,
+        api=_CODEX_COST_API,
+        units=1,
+        subtotal=0,
+        task_event_id=done_id or running_id,
+        stage=stage,
+        extra={
+            "creative_id": insert.creative_id,
+            "ratio": body.ratio,
+            "backend": "openai-codex",
+        },
+    )
+
+    log.info(
+        "operator_store_creative_done",
+        pipeline_id=body.pipeline_id,
+        brief_id=brief_id,
+        concept=body.concept,
+        ratio=body.ratio,
+        version=body.version,
+        creative_id=insert.creative_id,
+        bytes=len(image_bytes),
+    )
+    return {
+        "creative_id": insert.creative_id,
+        "file_path_supabase": storage_path,
+        "version": body.version,
+    }
+
+
+# ---------------------------------------------------------------------------
 # POST /work/pipeline/tools/dispatch
 # ---------------------------------------------------------------------------
 
@@ -969,6 +1198,7 @@ __all__ = [
     "BriefImagePayload",
     "RenderInput",
     "RenderItem",
+    "StoreCreativeInput",
     "DispatchInput",
     "EVENTS_TAIL_LIMIT",
 ]

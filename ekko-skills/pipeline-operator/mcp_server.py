@@ -113,15 +113,20 @@ def pipeline_operator_render(
     kind: str,
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Render a batch of concepts or finals — THE SPEND TOOL.
+    """Render a batch of concepts or finals — THE SPEND-GATED TOOL.
 
-    Use this to spend on Kie renders: ``kind="concept_preview"`` in the
-    ``ideation`` stage (send ALL concepts in ONE call so the manager approves
-    the batch once) and ``kind="final"`` in the ``generation`` stage (each item
-    needs ``parent_creative_id``, the picked concept it derives from). Each
-    call costs real money, so the approval plugin gates it by name: the manager
-    approves the spend in the dashboard before the worker runs. Returns
-    ``{ok, renders, total_cost_usd, errors}``.
+    Use ``kind="concept_preview"`` in the ``ideation`` stage (send ALL concepts
+    in ONE call so the manager approves the batch once) and ``kind="final"`` in
+    the ``generation`` stage (each item needs ``parent_creative_id``, the picked
+    concept it derives from; 9:16 finals come back as a true 864x1536).
+
+    The backend is chosen by the operator container's ``RENDER_BACKEND`` env: by
+    default (``openai-codex``) the image is generated in-container on the
+    manager's ChatGPT/Codex subscription ($0) and uploaded to the worker;
+    ``kie`` restores the legacy paid path. Either way the approval plugin gates
+    this call by name — the manager approves in the dashboard before any render
+    runs. Returns ``{ok, renders, total_cost_usd, errors}`` (``total_cost_usd``
+    is 0 on the codex backend).
     """
     return helper.pipeline_operator_render(
         pipeline_id=pipeline_id,

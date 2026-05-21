@@ -8,11 +8,22 @@ the Wave-A worker endpoints:
 * ``GET  {WORKER_BASE_URL}/work/pipeline/tools/{pipeline_id}``  → read state
 * ``GET  {WORKER_BASE_URL}/work/client/{client_id}``            → client context
 * ``POST {WORKER_BASE_URL}/work/pipeline/tools/brief``          → author brief
-* ``POST {WORKER_BASE_URL}/work/pipeline/tools/render``         → render (SPEND)
+* ``POST {WORKER_BASE_URL}/work/pipeline/tools/render``         → render via Kie
+* ``POST {WORKER_BASE_URL}/work/pipeline/tools/store_creative`` → store codex bytes
 
 Conventions match the sibling dashboard skills: synchronous ``httpx.Client``,
 a custom error type, lazy env reads (so importing is free and tests need no
 env), and a fresh client per call.
+
+Render backend (env ``RENDER_BACKEND``)
+---------------------------------------
+``pipeline_operator_render`` is backend-selectable. The DEFAULT, ``openai-codex``,
+generates each image IN THE OPERATOR CONTAINER via Hermes' codex image-gen
+plugin (the operator's ChatGPT/Codex subscription — gpt-image-2, $0; see
+:mod:`codex_render`) and uploads the bytes to ``/store_creative``. Setting
+``RENDER_BACKEND=kie`` restores the legacy paid path that POSTs to ``/render``.
+Both backends produce identical worker-side rows / events / cost lines, so the
+dashboard and the spend gate are unaffected by the choice; only the bill is.
 
 Tool-name surface (THE GATING CONTRACT)
 ---------------------------------------
@@ -49,12 +60,32 @@ class PipelineOperatorError(Exception):
 ENV_WORKER_BASE_URL = "WORKER_BASE_URL"
 #: Bearer shared secret env var (matches the worker's ``verify_secret``).
 ENV_WORKER_SHARED_SECRET = "WORKER_SHARED_SECRET"
+#: Render backend selector env var. ``openai-codex`` (default) generates the
+#: image in-container via the operator's ChatGPT/Codex subscription ($0) and
+#: uploads the bytes to the worker; ``kie`` POSTs to the worker's Kie /render
+#: path (the legacy paid fallback).
+ENV_RENDER_BACKEND = "RENDER_BACKEND"
 
 #: Route prefix for the operator tool endpoints on the worker.
 _TOOLS_PREFIX = "/work/pipeline/tools"
 
 #: The render ``kind`` values the worker accepts (Wave A contract).
 RENDER_KINDS: frozenset[str] = frozenset({"concept_preview", "final"})
+
+#: Supported render backends.
+BACKEND_OPENAI_CODEX = "openai-codex"
+BACKEND_KIE = "kie"
+RENDER_BACKENDS: frozenset[str] = frozenset({BACKEND_OPENAI_CODEX, BACKEND_KIE})
+#: Default backend: the operator's subscription-backed codex renderer (free).
+DEFAULT_RENDER_BACKEND = BACKEND_OPENAI_CODEX
+
+#: Per-kind render parameters for the codex backend, mirroring the worker's
+#: SOP (``pipeline_tools._CONCEPT_PREVIEW`` / ``_FINAL``): which ratios to
+#: render and the version string each creative is stamped with.
+_KIND_PARAMS: dict[str, dict[str, Any]] = {
+    "concept_preview": {"ratios": ("1x1",), "version": "v0.ideation"},
+    "final": {"ratios": ("1x1", "9x16"), "version": "v1.0"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +167,24 @@ def _require_client_id(client_id: Any) -> str:
     if not isinstance(client_id, str) or not client_id.strip():
         raise PipelineOperatorError("client_id must be a non-empty string")
     return client_id.strip()
+
+
+def _resolve_render_backend() -> str:
+    """Resolve the active render backend from ``RENDER_BACKEND`` (env).
+
+    Defaults to ``openai-codex`` (the operator's subscription-backed renderer).
+    An unset / empty value uses the default; an unrecognized value raises so a
+    typo in the container env fails loudly instead of silently spending on Kie.
+    """
+    raw = os.environ.get(ENV_RENDER_BACKEND, "").strip().lower()
+    if not raw:
+        return DEFAULT_RENDER_BACKEND
+    if raw not in RENDER_BACKENDS:
+        raise PipelineOperatorError(
+            f"{ENV_RENDER_BACKEND} must be one of {sorted(RENDER_BACKENDS)}, "
+            f"got {raw!r}"
+        )
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -244,30 +293,41 @@ def pipeline_operator_render(
     kind: str,
     items: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Render a batch of concepts — THE SPEND TOOL.
+    """Render a batch of concepts — THE SPEND-GATED TOOL.
 
-    Calls ``POST {WORKER_BASE_URL}/work/pipeline/tools/render`` with
-    ``{pipeline_id, kind, items}``. Each item is
-    ``{concept, prompt, offer_text?, parent_creative_id?}`` (build them with
-    the ``image-ad-authoring`` skill).
+    Each item is ``{concept, prompt, offer_text?, parent_creative_id?}`` (build
+    them with the ``image-ad-authoring`` skill).
 
-    * ``kind="concept_preview"`` renders 1:1 @ 1K previews (ideation). Send
-      ALL concepts in ONE call so the manager sees a single spend approval for
-      the whole ideation batch.
-    * ``kind="final"`` renders 1:1 + 9:16 @ 2K finals (generation). Each item
-      MUST carry ``parent_creative_id`` (the picked concept it derives from).
+    * ``kind="concept_preview"`` renders 1:1 previews (ideation). Send ALL
+      concepts in ONE call so the manager sees a single approval for the whole
+      ideation batch.
+    * ``kind="final"`` renders 1:1 + 9:16 finals (generation). Each item MUST
+      carry ``parent_creative_id`` (the picked concept it derives from). 9:16 is
+      a TRUE 9:16 (864x1536) on the codex backend.
 
-    This call spends real money on Kie renders, so the approval plugin gates
-    it: the manager approves the spend in the dashboard before the worker
-    runs. The gate keys on this function's tool name
-    (``pipeline_operator_render``) — see ``policy.operator.yaml``.
+    **Backend (env ``RENDER_BACKEND``, default ``openai-codex``):**
 
-    Returns ``{ok, renders:[...], total_cost_usd, errors:[...]}``.
+    * ``openai-codex`` — generate each image IN-CONTAINER via the operator's
+      ChatGPT/Codex subscription (gpt-image-2 through the Codex Responses
+      ``image_generation`` tool, $0) and upload the bytes to the worker's
+      ``/work/pipeline/tools/store_creative``. No paid API.
+    * ``kie`` — POST to the worker's ``/work/pipeline/tools/render`` (the legacy
+      paid Kie path), kept as a selectable fallback.
+
+    Either way the worker emits the SAME pipeline_events + cost line + creative
+    row, so the dashboard, the auto-advance trigger, and the cost aggregator
+    behave identically. The approval plugin gates this call by its tool name
+    (``pipeline_operator_render``) regardless of backend — the manager approves
+    in the dashboard before any render runs. The gate is unchanged.
+
+    Returns ``{ok, renders:[...], total_cost_usd, errors:[...]}`` for both
+    backends (the codex path synthesizes the same shape; ``total_cost_usd`` is
+    0 there).
 
     Raises:
         PipelineOperatorError: On bad input, missing env, or a failed call.
-            (Per-item Kie failures are reported by the worker inside
-            ``errors`` with a 2xx — they do NOT raise here.)
+            Per-item render failures are reported inside ``errors`` with a 2xx
+            (they do NOT raise here), matching the Kie path.
     """
     pid = _require_pipeline_id(pipeline_id)
     if kind not in RENDER_KINDS:
@@ -320,8 +380,125 @@ def pipeline_operator_render(
             out["parent_creative_id"] = parent
         normalized.append(out)
 
-    body = {"pipeline_id": pid, "kind": kind, "items": normalized}
-    return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
+    backend = _resolve_render_backend()
+    if backend == BACKEND_KIE:
+        body = {"pipeline_id": pid, "kind": kind, "items": normalized}
+        return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
+    return _render_via_codex(pipeline_id=pid, kind=kind, items=normalized)
+
+
+# ---------------------------------------------------------------------------
+# STORE — the worker side of the codex render (free; store pre-rendered bytes)
+# ---------------------------------------------------------------------------
+
+
+def pipeline_operator_store_creative(
+    *,
+    pipeline_id: str,
+    kind: str,
+    concept: str,
+    ratio: str,
+    version: str,
+    prompt: str,
+    image_b64: str,
+    offer_text: Optional[str] = None,
+    parent_creative_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Upload a pre-rendered (codex) image to the worker as a creative.
+
+    Calls ``POST {WORKER_BASE_URL}/work/pipeline/tools/store_creative``. The
+    worker uploads the bytes, records the creative + iteration + event rows,
+    emits the same task_running/task_done pipeline_events, and records a
+    zero-cost line against ``openai-codex``. Returns
+    ``{creative_id, file_path_supabase, version}``.
+
+    This is an internal helper for the codex render backend (not a separately
+    gated tool): it is reached only THROUGH ``pipeline_operator_render`` after
+    the spend gate has already cleared.
+    """
+    body: dict[str, Any] = {
+        "pipeline_id": pipeline_id,
+        "kind": kind,
+        "concept": concept,
+        "ratio": ratio,
+        "version": version,
+        "prompt": prompt,
+        "image_b64": image_b64,
+    }
+    if offer_text is not None:
+        body["offer_text"] = offer_text
+    if parent_creative_id is not None:
+        body["parent_creative_id"] = parent_creative_id
+    return _request("POST", f"{_TOOLS_PREFIX}/store_creative", json_body=body)
+
+
+def _render_via_codex(
+    *, pipeline_id: str, kind: str, items: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Generate each item's image(s) via codex, then store them on the worker.
+
+    Mirrors the worker's per-kind ratio fan-out (concept_preview → 1x1; final →
+    1x1 + 9x16) and synthesizes the same ``{ok, renders, total_cost_usd,
+    errors}`` shape the Kie ``/render`` path returns. Per-item failures land in
+    ``errors`` (a 2xx-equivalent) so one bad render doesn't abort the batch —
+    matching the Kie path's behaviour.
+
+    The image bytes are generated in-process via :mod:`codex_render` (the
+    operator's ChatGPT/Codex subscription) and uploaded base64-encoded; cost is
+    always 0 because nothing is paid.
+    """
+    import base64 as _b64
+
+    # Imported lazily so the Kie path and the unit tests don't require Hermes.
+    import codex_render
+
+    params = _KIND_PARAMS[kind]
+    ratios: tuple[str, ...] = params["ratios"]
+    version: str = params["version"]
+
+    renders: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for item in items:
+        concept = item["concept"]
+        prompt = item["prompt"]
+        offer_text = item.get("offer_text")
+        parent = item.get("parent_creative_id")
+        for ratio in ratios:
+            try:
+                image_bytes = codex_render.render_image(prompt, ratio)
+                image_b64 = _b64.b64encode(image_bytes).decode("ascii")
+                stored = pipeline_operator_store_creative(
+                    pipeline_id=pipeline_id,
+                    kind=kind,
+                    concept=concept,
+                    ratio=ratio,
+                    version=version,
+                    prompt=prompt,
+                    image_b64=image_b64,
+                    offer_text=offer_text,
+                    parent_creative_id=parent,
+                )
+                renders.append(
+                    {
+                        "creative_id": stored.get("creative_id"),
+                        "concept": concept,
+                        "ratio": ratio,
+                        "file_path_supabase": stored.get("file_path_supabase"),
+                        "cost_usd": 0,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 — collect, don't abort batch
+                errors.append(
+                    {"concept": concept, "ratio": ratio, "error": str(exc)}
+                )
+
+    return {
+        "ok": True,
+        "renders": renders,
+        "total_cost_usd": 0,
+        "errors": errors,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +515,11 @@ post_render = pipeline_operator_render
 __all__ = [
     "ENV_WORKER_BASE_URL",
     "ENV_WORKER_SHARED_SECRET",
+    "ENV_RENDER_BACKEND",
+    "BACKEND_OPENAI_CODEX",
+    "BACKEND_KIE",
+    "RENDER_BACKENDS",
+    "DEFAULT_RENDER_BACKEND",
     "PipelineOperatorError",
     "RENDER_KINDS",
     "get_client",
@@ -346,6 +528,7 @@ __all__ = [
     "pipeline_operator_client_read",
     "pipeline_operator_read",
     "pipeline_operator_render",
+    "pipeline_operator_store_creative",
     "post_brief",
     "post_render",
 ]

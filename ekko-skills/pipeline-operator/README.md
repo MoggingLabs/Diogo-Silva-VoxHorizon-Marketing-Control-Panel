@@ -18,17 +18,45 @@ creative craft) and is gated by the `voxhorizon-approvals` plugin's
 ekko-skills/pipeline-operator/
 ├── SKILL.md           # the operator playbook (per-stage behavior, narration,
 │                      #   the spend-gate discipline)
-├── mcp_server.py      # stdio MCP server: publishes the three tools below and
+├── mcp_server.py      # stdio MCP server: publishes the four tools below and
 │                      #   delegates each to helper.py (no logic of its own)
 ├── helper.py          # worker-tool client (single source of truth):
-│                      #   pipeline_operator_read   (GET state; allowlisted)
-│                      #   pipeline_operator_brief  (POST brief; free write)
-│                      #   pipeline_operator_render (POST render; SPEND-gated)
+│                      #   pipeline_operator_read         (GET state; allowlisted)
+│                      #   pipeline_operator_client_read  (GET client; allowlisted)
+│                      #   pipeline_operator_brief        (POST brief; free write)
+│                      #   pipeline_operator_render       (render; SPEND-gated)
+├── codex_render.py    # in-container codex image renderer (the manager's
+│                      #   ChatGPT/Codex subscription → gpt-image-2; $0). Backs
+│                      #   the default RENDER_BACKEND=openai-codex path.
 ├── README.md          # this file
 └── tests/
-    ├── test_helper.py     # helper unit tests (mock httpx.Client)
-    └── test_mcp_server.py # MCP server: registration + delegation (mock helper)
+    ├── test_helper.py       # helper unit tests (mock httpx.Client + codex)
+    ├── test_codex_render.py # codex renderer unit tests (faked Hermes plugin)
+    └── test_mcp_server.py   # MCP server: registration + delegation (mock helper)
 ```
+
+## Render backend (codex vs Kie)
+
+`pipeline_operator_render` is backend-selectable via the operator container's
+`RENDER_BACKEND` env (the tool name + the spend gate are UNCHANGED — the gate
+keys on the tool name regardless of backend):
+
+| `RENDER_BACKEND`        | How it renders                                                                                 | Cost |
+| ----------------------- | ---------------------------------------------------------------------------------------------- | ---- |
+| `openai-codex` (default) | Generates each image IN-CONTAINER via Hermes' codex image-gen plugin (the operator's ChatGPT/Codex OAuth → `gpt-image-2` through the Codex Responses `image_generation` tool), then POSTs the bytes to the worker's `POST /work/pipeline/tools/store_creative`. | **$0** |
+| `kie`                   | POSTs to the worker's `POST /work/pipeline/tools/render` (the legacy paid Kie path).            | paid |
+
+Both backends make the worker emit the SAME `pipeline_events`
+(task_running/task_done), the same cost line (`cost_recorded`; subtotal 0 for
+codex, against `api="openai-codex"`), and the same creative/iteration rows — so
+the dashboard, the auto-advance trigger, and the cost aggregator behave
+identically. Only the bill changes.
+
+**True 9:16:** finals' 9:16 renders are a TRUE 9:16 (864x1536), not 2:3. The
+codex renderer calls the plugin's lower-level helper with an explicit pixel
+`size="864x1536"` (gpt-image-2 supports up to 3:1; the Codex backend honors the
+non-canonical size — the OpenAI SDK emits a harmless serialization warning).
+**No VPS plugin edit and no post-crop are required** — confirmed on the VPS.
 
 ## Tool-name surface (the gating contract)
 
@@ -59,6 +87,19 @@ Set in the operator container's `.env`:
 
 Both are read lazily on the first call; missing/empty values raise
 `PipelineOperatorError` immediately.
+
+Optional (codex backend — all have working defaults):
+
+- `RENDER_BACKEND` — `openai-codex` (default) | `kie`. Unset = `openai-codex`.
+- `HERMES_CODEX_PLUGIN_PATH` — path to the Hermes codex image-gen plugin
+  `__init__.py`. Default `/opt/hermes/plugins/image_gen/openai-codex/__init__.py`.
+- `HERMES_SRC_PATH` — Hermes source root put on `sys.path` so the plugin's
+  `from agent...` imports resolve. Default `/opt/hermes`.
+- `OPENAI_IMAGE_QUALITY` — `low` | `medium` | `high`. Default `high`.
+
+The codex backend requires the operator's ChatGPT/Codex OAuth credentials to be
+present in the container (`auth.json` under `$HERMES_HOME`); the renderer reads
+them through Hermes' canonical token reader. No `OPENAI_API_KEY` is needed.
 
 ## Local tests
 

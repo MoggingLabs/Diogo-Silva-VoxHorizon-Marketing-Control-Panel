@@ -39,11 +39,12 @@ import helper  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# Registration: exactly three tools, under the gating-canonical names
+# Registration: the four tools, under the gating-canonical names
 # ---------------------------------------------------------------------------
 
 EXPECTED_TOOLS = {
     "pipeline_operator_read",
+    "pipeline_operator_client_read",
     "pipeline_operator_brief",
     "pipeline_operator_render",
 }
@@ -58,7 +59,7 @@ def test_server_name_is_pipeline_operator() -> None:
     assert mcp_server.mcp.name == "pipeline-operator"
 
 
-def test_exactly_three_tools_registered() -> None:
+def test_exactly_expected_tools_registered() -> None:
     names = {t.name for t in _list_tools()}
     assert names == EXPECTED_TOOLS
 
