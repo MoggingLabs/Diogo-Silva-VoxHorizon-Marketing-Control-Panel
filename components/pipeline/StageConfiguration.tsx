@@ -18,6 +18,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 
 import { EkkoDraftModal, type ProposedConfig } from "./EkkoDraftModal";
+import { OperatorBriefReview } from "./OperatorBriefReview";
 import { StageShell } from "./StageShell";
 import { BriefPayload, type BriefPayloadT } from "@/lib/briefs";
 import { activeTracksLocal } from "@/lib/pipeline/transitions";
@@ -135,6 +136,23 @@ const VIDEO_DEFAULTS: VideoFormValues = {
 };
 
 const RATIO_OPTIONS = Ratio.options;
+
+/**
+ * Whether this pipeline is operator-driven. Mirrors `isOperatorDriven` in
+ * `lib/operator/dispatch.ts`, re-implemented here because that module is
+ * `server-only` and this is a client component. Kept in sync deliberately:
+ * `config_draft.operator_driven === true` is the canonical marker, with a
+ * stored `operator_instruction` as the legacy fallback for rows created before
+ * the explicit flag existed.
+ */
+function isOperatorDrivenDraft(configDraft: Record<string, unknown> | null): boolean {
+  if (!configDraft) return false;
+  if (configDraft.operator_driven === true) return true;
+  return (
+    typeof configDraft.operator_instruction === "string" &&
+    configDraft.operator_instruction.trim().length > 0
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Form-state <-> payload codecs
@@ -352,7 +370,61 @@ function useAutosave(pipelineId: string) {
 // Main component
 // ---------------------------------------------------------------------------
 
-export function StageConfiguration({ pipeline, clients: initialClients }: StageConfigurationProps) {
+/**
+ * Configuration-stage dispatcher.
+ *
+ * Operator-driven pipelines DON'T use the manual brief form — the operator
+ * authors the brief and the manager reviews + approves it:
+ *   - brief authored (`image_brief_id` set) → render `<OperatorBriefReview />`;
+ *   - operator still drafting (`image_brief_id` null) → a waiting state (live
+ *     progress shows in the OperatorNarration sidebar).
+ * Everything else falls through to the existing manual form unchanged, so the
+ * deterministic flow does not regress.
+ */
+export function StageConfiguration(props: StageConfigurationProps) {
+  const { pipeline } = props;
+  const operatorDriven = isOperatorDrivenDraft(pipeline.config_draft);
+
+  if (operatorDriven) {
+    if (pipeline.image_brief_id) {
+      return <OperatorBriefReview pipeline={pipeline} />;
+    }
+    return <OperatorDraftingWaiting />;
+  }
+
+  return <ManualConfiguration {...props} />;
+}
+
+/**
+ * Waiting state shown while an operator-driven pipeline's brief is still being
+ * authored. Live progress streams into the OperatorNarration sidebar; this
+ * panel just reassures the manager there's nothing to do yet.
+ */
+function OperatorDraftingWaiting() {
+  return (
+    <StageShell
+      title="The operator is drafting the brief…"
+      subtitle="Hang tight — the operator is authoring the image brief. Live progress shows in the Operator panel."
+      canContinue={false}
+      continueLabel="Waiting for the brief…"
+      body={
+        <div
+          role="status"
+          aria-live="polite"
+          className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center"
+        >
+          <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-muted-foreground" />
+          <p className="text-sm text-muted-foreground">
+            The operator hasn&apos;t finished the brief yet. You&apos;ll be able to review and
+            approve it here once it&apos;s ready.
+          </p>
+        </div>
+      }
+    />
+  );
+}
+
+function ManualConfiguration({ pipeline, clients: initialClients }: StageConfigurationProps) {
   const router = useRouter();
 
   const [format, setFormat] = useState<PipelineFormat>(pipeline.format_choice);
