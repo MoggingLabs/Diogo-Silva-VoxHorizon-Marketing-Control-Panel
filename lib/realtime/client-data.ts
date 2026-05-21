@@ -70,9 +70,10 @@ export type ClientOption = {
   name: string;
   slug: string;
   service_type: string;
+  status?: string;
 };
 
-/** Fetch active clients for the brief/pipeline pickers. */
+/** Fetch clients for the brief/pipeline pickers (active-first, then by name). */
 export async function fetchClients(): Promise<ClientOption[]> {
   const body = await getJson<{ clients?: ClientOption[] }>("/api/clients");
   return body.clients ?? [];

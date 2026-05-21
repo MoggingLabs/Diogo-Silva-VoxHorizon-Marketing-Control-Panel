@@ -1,11 +1,33 @@
 /**
- * OperatorKickoffForm: a free-text brief + "Hire the operator" button that
- * calls `kickoffOperatorPipeline` and navigates to the new pipeline. Tests
- * cover the disabled gate, success navigation, in-flight label, and error.
+ * OperatorKickoffForm: a free-text brief + optional client picker + "Hire the
+ * operator" button that calls `kickoffOperatorPipeline` and navigates to the
+ * new pipeline. Tests cover the disabled gate, success navigation, in-flight
+ * label, error handling, and the optional client selector.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import type { ClientOption } from "@/lib/realtime/client-data";
+
+// Radix Select uses ResizeObserver / pointer capture / scrollIntoView, none of
+// which jsdom implements. Polyfill them so the picker can mount + open.
+if (typeof globalThis.ResizeObserver === "undefined") {
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+}
+if (!HTMLElement.prototype.hasPointerCapture) {
+  HTMLElement.prototype.hasPointerCapture = () => false;
+}
+if (!HTMLElement.prototype.releasePointerCapture) {
+  HTMLElement.prototype.releasePointerCapture = () => {};
+}
+if (!HTMLElement.prototype.scrollIntoView) {
+  HTMLElement.prototype.scrollIntoView = () => {};
+}
 
 const routerPush = vi.fn();
 vi.mock("next/navigation", () => ({
@@ -17,11 +39,22 @@ vi.mock("@/lib/pipeline/client", () => ({
   kickoffOperatorPipeline: (...args: unknown[]) => kickoffOperatorPipeline(...args),
 }));
 
+// Clients are fetched on mount via the service-role `/api/clients` helper.
+const fetchClients = vi.fn<() => Promise<ClientOption[]>>(async () => []);
+vi.mock("@/lib/realtime/client-data", () => ({
+  fetchClients: () => fetchClients(),
+}));
+
 import { OperatorKickoffForm } from "./OperatorKickoffForm";
 
 beforeEach(() => {
   routerPush.mockReset();
   kickoffOperatorPipeline.mockReset();
+  fetchClients.mockReset();
+  fetchClients.mockResolvedValue([
+    { id: "11111111-1111-4111-8111-111111111111", name: "Acme Roofing", slug: "acme", service_type: "roofing", status: "active" },
+    { id: "22222222-2222-4222-8222-222222222222", name: "Beta Remodel", slug: "beta", service_type: "remodeling", status: "active" },
+  ]);
 });
 
 afterEach(() => {
@@ -82,5 +115,58 @@ describe("OperatorKickoffForm", () => {
     await user.click(screen.getByRole("button", { name: /hire the operator/i }));
     expect(await screen.findByText(/Starting…/)).toBeInTheDocument();
     resolve({ id: "p1" });
+  });
+
+  it("renders the optional client picker defaulting to 'No client / generic'", async () => {
+    render(<OperatorKickoffForm />);
+    expect(screen.getByLabelText("Client (optional)")).toBeInTheDocument();
+    // The default selected value is shown in the trigger.
+    expect(await screen.findByText(/No client \/ generic/)).toBeInTheDocument();
+  });
+
+  it("omits client_id from the kickoff body when no client is picked", async () => {
+    kickoffOperatorPipeline.mockResolvedValue({ id: "p1" });
+    const user = userEvent.setup();
+    render(<OperatorKickoffForm />);
+    await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
+    await user.click(screen.getByRole("button", { name: /hire the operator/i }));
+    await waitFor(() => {
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({ instruction: "4 roofing ads" });
+    });
+    const arg = kickoffOperatorPipeline.mock.calls[0]![0] as Record<string, unknown>;
+    expect("client_id" in arg).toBe(false);
+  });
+
+  it("includes the chosen client_id in the kickoff body when a client is picked", async () => {
+    kickoffOperatorPipeline.mockResolvedValue({ id: "p2" });
+    const user = userEvent.setup();
+    render(<OperatorKickoffForm />);
+
+    // Wait for the fetched clients to populate the picker.
+    await screen.findByText(/No client \/ generic/);
+    await user.click(screen.getByLabelText("Client (optional)"));
+    await user.click(await screen.findByRole("option", { name: /Acme Roofing/ }));
+
+    await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
+    await user.click(screen.getByRole("button", { name: /hire the operator/i }));
+
+    await waitFor(() => {
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
+        instruction: "4 roofing ads",
+        client_id: "11111111-1111-4111-8111-111111111111",
+      });
+    });
+  });
+
+  it("still kicks off generically when the client list fails to load", async () => {
+    fetchClients.mockRejectedValue(new Error("clients down"));
+    kickoffOperatorPipeline.mockResolvedValue({ id: "p3" });
+    const user = userEvent.setup();
+    render(<OperatorKickoffForm />);
+    await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
+    await user.click(screen.getByRole("button", { name: /hire the operator/i }));
+    await waitFor(() => {
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({ instruction: "4 roofing ads" });
+    });
   });
 });
