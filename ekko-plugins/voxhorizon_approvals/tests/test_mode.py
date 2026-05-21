@@ -16,7 +16,6 @@ Coverage targets:
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -48,7 +47,7 @@ def env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _mock_response(handler):
     transport = httpx.MockTransport(handler)
-    return httpx.AsyncClient(transport=transport)
+    return httpx.Client(transport=transport)
 
 
 # ---------------------------------------------------------------------------
@@ -69,11 +68,8 @@ def test_fetch_mode_returns_ask_default(env: None) -> None:
             },
         )
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
     assert state.expires_at is None
     assert state.effective_mode == "ASK"
@@ -96,11 +92,8 @@ def test_fetch_mode_returns_auto_approve_with_expiry(env: None) -> None:
             },
         )
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "AUTO_APPROVE"
     assert state.effective_mode == "AUTO_APPROVE"
 
@@ -118,11 +111,8 @@ def test_fetch_mode_returns_halt(env: None) -> None:
             },
         )
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "HALT"
     assert state.effective_mode == "HALT"
 
@@ -143,14 +133,12 @@ def test_fetch_mode_uses_cache_within_ttl(env: None) -> None:
             },
         )
 
-    async def _run() -> None:
-        async with _mock_response(handler) as client:
-            s1 = await fetch_mode(http_client=client)
-            s2 = await fetch_mode(http_client=client)
-            assert s1.mode == "HALT"
-            assert s2.mode == "HALT"
+    with _mock_response(handler) as client:
+        s1 = fetch_mode(http_client=client)
+        s2 = fetch_mode(http_client=client)
+        assert s1.mode == "HALT"
+        assert s2.mode == "HALT"
 
-    asyncio.run(_run())
     assert calls["count"] == 1, "second call must hit cache"
 
 
@@ -175,14 +163,12 @@ def test_fetch_mode_refreshes_after_ttl(
 
     monkeypatch.setattr(mode_module, "_now", lambda: fake_time["now"])
 
-    async def _run() -> None:
-        async with _mock_response(handler) as client:
-            await fetch_mode(http_client=client)
-            # Advance past TTL.
-            fake_time["now"] += MODE_CACHE_TTL_S + 1
-            await fetch_mode(http_client=client)
+    with _mock_response(handler) as client:
+        fetch_mode(http_client=client)
+        # Advance past TTL.
+        fake_time["now"] += MODE_CACHE_TTL_S + 1
+        fetch_mode(http_client=client)
 
-    asyncio.run(_run())
     assert calls["count"] == 2
 
 
@@ -202,13 +188,11 @@ def test_clear_cache_forces_refresh(env: None) -> None:
             },
         )
 
-    async def _run() -> None:
-        async with _mock_response(handler) as client:
-            await fetch_mode(http_client=client)
-            clear_cache()
-            await fetch_mode(http_client=client)
+    with _mock_response(handler) as client:
+        fetch_mode(http_client=client)
+        clear_cache()
+        fetch_mode(http_client=client)
 
-    asyncio.run(_run())
     assert calls["count"] == 2
 
 
@@ -227,10 +211,7 @@ def test_fetch_mode_missing_env_returns_ask_default(
         "VOXHORIZON_APPROVAL_TOKEN", raising=False
     )
 
-    async def _run() -> ModeState:
-        return await fetch_mode()
-
-    state = asyncio.run(_run())
+    state = fetch_mode()
     assert state.mode == "ASK"
 
 
@@ -240,11 +221,8 @@ def test_fetch_mode_network_failure_returns_ask_default(
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("dns failure", request=request)
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -277,15 +255,12 @@ def test_fetch_mode_network_failure_returns_cached_when_available(
     fake_time = {"now": 1000.0}
     monkeypatch.setattr(mode_module, "_now", lambda: fake_time["now"])
 
-    async def _run() -> tuple[ModeState, ModeState]:
-        async with _mock_response(handler) as client:
-            s1 = await fetch_mode(http_client=client)
-            # Past TTL → forces refresh.
-            fake_time["now"] += MODE_CACHE_TTL_S + 1
-            s2 = await fetch_mode(http_client=client)
-            return s1, s2
+    with _mock_response(handler) as client:
+        s1 = fetch_mode(http_client=client)
+        # Past TTL → forces refresh.
+        fake_time["now"] += MODE_CACHE_TTL_S + 1
+        s2 = fetch_mode(http_client=client)
 
-    s1, s2 = asyncio.run(_run())
     assert s1.mode == "HALT"
     # Second fetch fails — we get the cached HALT back.
     assert s2.mode == "HALT"
@@ -295,11 +270,8 @@ def test_fetch_mode_timeout_returns_ask_default(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("timed out", request=request)
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -307,11 +279,8 @@ def test_fetch_mode_500_returns_ask_default(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, text="boom")
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -342,14 +311,11 @@ def test_fetch_mode_non_200_returns_cached_when_available(
     fake_time = {"now": 1000.0}
     monkeypatch.setattr(mode_module, "_now", lambda: fake_time["now"])
 
-    async def _run() -> tuple[ModeState, ModeState]:
-        async with _mock_response(handler) as client:
-            s1 = await fetch_mode(http_client=client)
-            fake_time["now"] += MODE_CACHE_TTL_S + 1
-            s2 = await fetch_mode(http_client=client)
-            return s1, s2
+    with _mock_response(handler) as client:
+        s1 = fetch_mode(http_client=client)
+        fake_time["now"] += MODE_CACHE_TTL_S + 1
+        s2 = fetch_mode(http_client=client)
 
-    s1, s2 = asyncio.run(_run())
     assert s1.mode == "AUTO_APPROVE"
     # Cached fallback after 500 — keeps last-known AUTO_APPROVE.
     assert s2.mode == "AUTO_APPROVE"
@@ -359,11 +325,8 @@ def test_fetch_mode_non_json_returns_ask_default(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"not json", headers={"content-type": "text/plain"})
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -396,14 +359,11 @@ def test_fetch_mode_non_json_returns_cached_when_available(
     fake_time = {"now": 1000.0}
     monkeypatch.setattr(mode_module, "_now", lambda: fake_time["now"])
 
-    async def _run() -> tuple[ModeState, ModeState]:
-        async with _mock_response(handler) as client:
-            s1 = await fetch_mode(http_client=client)
-            fake_time["now"] += MODE_CACHE_TTL_S + 1
-            s2 = await fetch_mode(http_client=client)
-            return s1, s2
+    with _mock_response(handler) as client:
+        s1 = fetch_mode(http_client=client)
+        fake_time["now"] += MODE_CACHE_TTL_S + 1
+        s2 = fetch_mode(http_client=client)
 
-    s1, s2 = asyncio.run(_run())
     assert s1.mode == "HALT"
     assert s2.mode == "HALT"
 
@@ -412,11 +372,8 @@ def test_fetch_mode_non_dict_payload_returns_ask(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=["not", "a", "dict"])
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -433,11 +390,8 @@ def test_fetch_mode_invalid_mode_returns_ask(env: None) -> None:
             },
         )
 
-    async def _run() -> ModeState:
-        async with _mock_response(handler) as client:
-            return await fetch_mode(http_client=client)
-
-    state = asyncio.run(_run())
+    with _mock_response(handler) as client:
+        state = fetch_mode(http_client=client)
     assert state.mode == "ASK"
 
 
@@ -513,7 +467,9 @@ def test_effective_mode_auto_approve_with_unparseable_expiry_drops_to_ask() -> N
 
 def test_effective_mode_handles_naive_expiry() -> None:
     """If the worker ever emits a naive timestamp, treat as UTC."""
-    deadline = (datetime.utcnow() + timedelta(hours=1)).isoformat()
+    deadline = (
+        datetime.now(timezone.utc) + timedelta(hours=1)
+    ).replace(tzinfo=None).isoformat()
     s = ModeState(
         mode="AUTO_APPROVE",
         expires_at=deadline,

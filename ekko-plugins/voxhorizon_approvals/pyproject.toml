@@ -6,4 +6,3 @@
 # pytest's import system; testpaths just keeps pytest from collecting
 # __init__.py itself.
 testpaths = ["tests"]
-asyncio_mode = "auto"

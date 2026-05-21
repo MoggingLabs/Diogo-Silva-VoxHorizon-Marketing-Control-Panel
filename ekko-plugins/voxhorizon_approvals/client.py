@@ -2,8 +2,13 @@
 
 Wraps the worker's long-poll endpoint
 (``POST /work/hermes/approval``, see ``worker/src/routes/hermes_approval.py``)
-behind an async-friendly facade. Layered so the plugin's ``register``
+behind a synchronous facade. Layered so the plugin's ``register``
 hook never has to know about httpx, env-var resolution, or cache TTLs.
+
+Hermes invokes ``pre_tool_call`` hooks SYNCHRONOUSLY (it uses each
+hook's return value directly, it does not ``await``), so this client is
+a plain blocking ``httpx.Client``. Blocking is the intended behavior:
+the gate must hold the tool call open until the operator decides.
 
 Why an in-process cache?
 ------------------------
@@ -25,7 +30,6 @@ a swallowed exception. The cache is only populated on a definitive
 
 from __future__ import annotations
 
-import asyncio
 import os
 import time
 import uuid
@@ -166,10 +170,10 @@ class _SessionCache:
 
 
 class ApprovalClient:
-    """Async wrapper around the worker's approval endpoint.
+    """Synchronous wrapper around the worker's approval endpoint.
 
     One instance per plugin load — built in :func:`register`. The
-    underlying :class:`httpx.AsyncClient` is created lazily on the first
+    underlying :class:`httpx.Client` is created lazily on the first
     request so import-time has no side effects; that's important
     because Hermes imports plugins at startup before the env vars are
     necessarily exported.
@@ -182,7 +186,7 @@ class ApprovalClient:
         token: str | None = None,
         default_timeout_s: int = DEFAULT_TIMEOUT_S,
         cache_ttl_s: float = DEFAULT_CACHE_TTL_S,
-        http_client: httpx.AsyncClient | None = None,
+        http_client: httpx.Client | None = None,
     ) -> None:
         # Resolve env at call-time (in :meth:`_resolve_target`) NOT at
         # ``__init__`` time — that way the plugin can be constructed
@@ -225,20 +229,20 @@ class ApprovalClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def aclose(self) -> None:
+    def close(self) -> None:
         """Close the underlying httpx client if we own it."""
         if (
             self._owns_http_client
             and self._http_client is not None
         ):
-            await self._http_client.aclose()
+            self._http_client.close()
             self._http_client = None
 
     # ------------------------------------------------------------------
     # Auto-decision writer (AUTO_APPROVE / HALT mode short-circuits)
     # ------------------------------------------------------------------
 
-    async def write_auto_decision(
+    def write_auto_decision(
         self,
         *,
         tool_name: str,
@@ -323,10 +327,10 @@ class ApprovalClient:
         # Use a one-shot client with a tight timeout — we MUST NOT
         # delay the agent's tool dispatch on this best-effort write.
         try:
-            async with httpx.AsyncClient(
+            with httpx.Client(
                 timeout=httpx.Timeout(connect=1.0, read=2.0, write=1.0, pool=1.0)
             ) as scratch:
-                await scratch.post(url, json=body, headers=headers)
+                scratch.post(url, json=body, headers=headers)
         except Exception:  # noqa: BLE001 — never raise on best-effort
             return
 
@@ -334,7 +338,7 @@ class ApprovalClient:
     # Request
     # ------------------------------------------------------------------
 
-    async def request_approval(
+    def request_approval(
         self,
         *,
         tool_name: str,
@@ -380,7 +384,7 @@ class ApprovalClient:
 
         client = self._ensure_client(effective_timeout)
         try:
-            response = await client.post(url, json=body, headers=headers)
+            response = client.post(url, json=body, headers=headers)
         except httpx.TimeoutException as exc:
             raise ApprovalClientError(
                 f"approval worker timed out after {effective_timeout}s"
@@ -463,7 +467,7 @@ class ApprovalClient:
             )
         return f"{worker}{APPROVAL_PATH}", token
 
-    def _ensure_client(self, timeout_s: int) -> httpx.AsyncClient:
+    def _ensure_client(self, timeout_s: int) -> httpx.Client:
         """Lazily build the httpx client.
 
         The ``read`` timeout is set just above the worker's hard
@@ -473,7 +477,7 @@ class ApprovalClient:
         connect means trouble worth surfacing fast.
         """
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(
+            self._http_client = httpx.Client(
                 timeout=httpx.Timeout(
                     connect=5.0,
                     read=timeout_s + _TIMEOUT_SLACK_S,
@@ -501,13 +505,6 @@ def _approval_id_from_tool_call(tool_call_id: str) -> str:
     return str(
         uuid.uuid5(uuid.NAMESPACE_URL, f"voxhorizon-approval:{tool_call_id}")
     )
-
-
-# Defensive guard for asyncio surface tests — kept as a no-op to avoid
-# pulling in an unused import warning. Importing ``asyncio`` is
-# nontrivial overhead; keeping the import live so future code paths
-# (e.g. background cache eviction) don't need to re-add it.
-_ = asyncio
 
 
 __all__ = [

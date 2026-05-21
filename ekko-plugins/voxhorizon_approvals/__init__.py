@@ -14,17 +14,23 @@ Wires a single ``pre_tool_call`` hook that gates every tool dispatch:
 6. If "ask_operator" AND mode is ASK → check the in-process session
    cache (see :mod:`.client._SessionCache`). Cache hit: <1us, returns
    immediately.
-7. Cache miss → HTTP POST to the worker; await the operator's decision
-   (long poll, ~3-30s typical, configurable timeout).
+7. Cache miss → HTTP POST to the worker; block on the operator's
+   decision (long poll, ~3-30s typical, configurable timeout).
 8. Operator approves → audit + return ``None``.
 9. Operator rejects → audit + return ``{"action": "block", "message": ...}``.
 10. ANY exception → fail-closed: audit + return ``{"action": "block", ...}``.
 
-The hook signature matches Hermes' plugin contract:
+The hook is SYNCHRONOUS — this is Hermes' real ``pre_tool_call``
+contract. Hermes invokes the hook and uses its RETURN value directly
+(``hermes_cli/plugins.py::get_pre_tool_call_block_message`` calls the
+hook via ``invoke_hook`` and does NOT ``await`` it); an ``async`` hook
+would return an un-awaited coroutine that Hermes silently ignores,
+bypassing the gate. Blocking is correct: the gate must hold the tool
+call open until the operator decides. The hook signature is:
 
 ::
 
-    async def on_pre_tool_call(
+    def on_pre_tool_call(
         tool_name: str, args: dict, task_id: str, **kwargs
     ) -> dict | None
 
@@ -99,7 +105,7 @@ def register(ctx: Any) -> None:
     # (Ekko-safe); overlay only when the deployment opts in via env.
     decide: EvaluateFn = _resolve_evaluate()
 
-    async def on_pre_tool_call(
+    def on_pre_tool_call(
         tool_name: str,
         args: dict,
         task_id: str,
@@ -107,7 +113,9 @@ def register(ctx: Any) -> None:
     ) -> dict[str, str] | None:
         """Gate one tool call.
 
-        See module docstring for the decision flow.
+        Synchronous to match Hermes' ``pre_tool_call`` contract (the
+        host uses the return value directly without awaiting). See the
+        module docstring for the decision flow.
         """
         # Use the perf counter — wall clock would drift under NTP and
         # is irrelevant for latency measurement.
@@ -165,7 +173,7 @@ def register(ctx: Any) -> None:
             # fails-to-ASK on any error, so the worst case is a 5s
             # delay before a dashboard mode flip propagates.
             try:
-                mode_state: ModeState = await fetch_mode()
+                mode_state: ModeState = fetch_mode()
                 effective_mode = mode_state.effective_mode
             except Exception:  # noqa: BLE001 — fail-to-ASK for any error
                 effective_mode = "ASK"
@@ -185,7 +193,7 @@ def register(ctx: Any) -> None:
                 # the dashboard's audit page reflects the auto-approve
                 # decision. Fire-and-forget — a failed audit write
                 # MUST NOT block the agent's tool call.
-                await client.write_auto_decision(
+                client.write_auto_decision(
                     tool_name=tool_name,
                     args=args,
                     session_id=session_id,
@@ -209,7 +217,7 @@ def register(ctx: Any) -> None:
                     reason="auto_mode:HALT",
                     t0=t0,
                 )
-                await client.write_auto_decision(
+                client.write_auto_decision(
                     tool_name=tool_name,
                     args=args,
                     session_id=session_id,
@@ -244,7 +252,7 @@ def register(ctx: Any) -> None:
                 )
                 return None
 
-            verdict = await client.request_approval(
+            verdict = client.request_approval(
                 tool_name=tool_name,
                 args=args,
                 session_id=session_id,
