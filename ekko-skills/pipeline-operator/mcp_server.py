@@ -19,9 +19,10 @@ The three tools are published under the helper's exact entrypoint names so the
 approval policy (``ekko-plugins/voxhorizon_approvals/policy.operator.yaml``)
 maps one-for-one:
 
-* ``pipeline_operator_read``   — READ tool (allowlisted; no spend)
-* ``pipeline_operator_brief``  — BRIEF tool (free Supabase write)
-* ``pipeline_operator_render`` — RENDER tool (**spend; requires approval**)
+* ``pipeline_operator_read``        — READ tool (allowlisted; no spend)
+* ``pipeline_operator_client_read`` — CLIENT-CONTEXT tool (allowlisted; no spend)
+* ``pipeline_operator_brief``       — BRIEF tool (free Supabase write)
+* ``pipeline_operator_render``      — RENDER tool (**spend; requires approval**)
 
 Run it over stdio (the default Hermes MCP transport)::
 
@@ -66,6 +67,23 @@ def pipeline_operator_read(pipeline_id: str) -> dict[str, Any]:
     idempotent. No spend, no side effects — the operator policy allowlists it.
     """
     return helper.pipeline_operator_read(pipeline_id)
+
+
+@mcp.tool()
+def pipeline_operator_client_read(client_id: str) -> dict[str, Any]:
+    """Read the client's brand / company / campaign context for a client_id.
+
+    Use this AFTER ``pipeline_operator_read`` whenever the pipeline is linked to
+    a client (the pipeline read carries a compact ``client`` block; this returns
+    the FULL context). Returns ``slug``, ``name``, ``service_type``,
+    ``brand_colors``, ``profile`` (the typed client_profiles row or null),
+    ``offers``, ``offer_constraints`` (the do-not-say rules you MUST honor),
+    ``services``, ``value_props`` (``usps`` / ``differentiators``), ``assets``,
+    and ``past_projects``. Author on-brand, compliant ads from this: the
+    client's REAL offers, brand voice/tone, proof points, and local market. No
+    spend, no side effects — the operator policy allowlists it.
+    """
+    return helper.pipeline_operator_client_read(client_id)
 
 
 @mcp.tool()

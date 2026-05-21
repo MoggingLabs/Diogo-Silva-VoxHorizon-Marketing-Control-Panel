@@ -1,8 +1,10 @@
 """Tests for the Wave A operator-tool routes.
 
-Covers the four endpoints on the pipeline-tools router:
+Covers the endpoints on the pipeline-tools router:
 
-  * GET  /work/pipeline/tools/{pipeline_id} — read shape.
+  * GET  /work/pipeline/tools/{pipeline_id} — read shape + compact client
+                                              enrichment.
+  * GET  /work/client/{client_id}           — client-context shape + 404.
   * POST /work/pipeline/tools/brief         — validate + upsert + event.
   * POST /work/pipeline/tools/render        — events + cost + creatives,
                                               per-item error handling.
@@ -72,6 +74,15 @@ class _ToolsSupabase:
         self.pipeline_row: dict | None = None
         self.brief_row: dict | None = None
         self.client_row: dict | None = None
+        # Client-context tables (migration 0012). ``client_profile_row`` backs
+        # the 1:1 maybe_single read; the rest back the child-table multi reads.
+        self.client_profile_row: dict | None = None
+        self.client_offers_rows: list[dict] = []
+        self.client_offer_constraints_rows: list[dict] = []
+        self.client_services_rows: list[dict] = []
+        self.client_value_props_rows: list[dict] = []
+        self.client_assets_rows: list[dict] = []
+        self.client_past_projects_rows: list[dict] = []
         self.creatives_rows: list[dict] = []
         self.events_rows: list[dict] = []
         self.rpc_return: Any = "acme-2026-05-20-001"
@@ -161,6 +172,8 @@ class _ToolsTable:
                 return SimpleNamespace(data=self.sb.brief_row)
             if self.name == "clients":
                 return SimpleNamespace(data=self.sb.client_row)
+            if self.name == "client_profiles":
+                return SimpleNamespace(data=self.sb.client_profile_row)
             return SimpleNamespace(data=None)
 
         # multi-row selects:
@@ -171,10 +184,26 @@ class _ToolsTable:
                 if all(r.get(c) == v for c, v in self._filters)
             ]
             return SimpleNamespace(data=rows)
-        if self.name == "pipeline_events":
+
+        # Client-context child tables (migration 0012). Each is filtered by the
+        # eq() filters, then ordered by sort_order like the route issues it.
+        _child_sources: dict[str, list[dict]] = {
+            "client_offers": self.sb.client_offers_rows,
+            "client_offer_constraints": self.sb.client_offer_constraints_rows,
+            "client_services": self.sb.client_services_rows,
+            "client_value_props": self.sb.client_value_props_rows,
+            "client_assets": self.sb.client_assets_rows,
+            "client_past_projects": self.sb.client_past_projects_rows,
+        }
+        if self.name in _child_sources or self.name == "pipeline_events":
+            source = (
+                self.sb.events_rows
+                if self.name == "pipeline_events"
+                else _child_sources[self.name]
+            )
             rows = [
                 r
-                for r in self.sb.events_rows
+                for r in source
                 if all(r.get(c) == v for c, v in self._filters)
             ]
             if self._order:
@@ -376,6 +405,219 @@ def test_read_null_brief_when_unlinked(
     assert body["brief"] is None
     assert body["concepts"] == []
     assert body["finals"] == []
+
+
+def test_read_client_null_when_no_client_row(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """Pipeline linked to a client_id whose row is gone → client: null."""
+    tools_sb.pipeline_row = _pipeline_row(client_id="c-1")
+    tools_sb.client_row = None
+    resp = client.get("/work/pipeline/tools/p-1", headers=_auth())
+    assert resp.status_code == 200
+    assert resp.json()["client"] is None
+
+
+def test_read_client_null_when_unlinked(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """No client_id on the pipeline → client: null, no client reads."""
+    tools_sb.pipeline_row = _pipeline_row(client_id=None)
+    resp = client.get("/work/pipeline/tools/p-1", headers=_auth())
+    assert resp.status_code == 200
+    assert resp.json()["client"] is None
+
+
+def test_read_enriches_compact_client_block(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """A linked client surfaces a COMPACT client block on the pipeline read."""
+    tools_sb.pipeline_row = _pipeline_row(client_id="c-1")
+    tools_sb.client_row = {
+        "id": "c-1",
+        "slug": "acme-roofing",
+        "name": "Acme Roofing",
+        "service_type": "roofing",
+        "brand_colors": {"primary": "#0a3d62"},
+    }
+    tools_sb.client_profile_row = {"client_id": "c-1", "tone": "warm, expert"}
+    tools_sb.client_offers_rows = [
+        {"client_id": "c-1", "offer_text": "$99 inspection", "active": True, "sort_order": 0},
+        {"client_id": "c-1", "offer_text": "free quote", "active": False, "sort_order": 1},
+    ]
+    tools_sb.client_offer_constraints_rows = [
+        {"client_id": "c-1", "constraint_text": "never say 'guaranteed approval'", "sort_order": 0},
+    ]
+    tools_sb.client_value_props_rows = [
+        {"client_id": "c-1", "kind": "usp", "prop_text": "family-owned 25 yrs", "sort_order": 0},
+        {"client_id": "c-1", "kind": "usp", "prop_text": "4.9 stars", "sort_order": 1},
+        {"client_id": "c-1", "kind": "usp", "prop_text": "lifetime warranty", "sort_order": 2},
+        {"client_id": "c-1", "kind": "usp", "prop_text": "fourth usp", "sort_order": 3},
+        {"client_id": "c-1", "kind": "differentiator", "prop_text": "owner on every job", "sort_order": 0},
+    ]
+
+    resp = client.get("/work/pipeline/tools/p-1", headers=_auth())
+    assert resp.status_code == 200, resp.text
+    block = resp.json()["client"]
+    assert block is not None
+    assert block["client_id"] == "c-1"
+    assert block["name"] == "Acme Roofing"
+    assert block["service_type"] == "roofing"
+    assert block["tone"] == "warm, expert"
+    assert block["offers"] == [
+        {"offer_text": "$99 inspection", "active": True},
+        {"offer_text": "free quote", "active": False},
+    ]
+    assert block["offer_constraints"] == ["never say 'guaranteed approval'"]
+    # Compact: top 3 USPs only, differentiators not in the compact block.
+    assert block["top_usps"] == [
+        "family-owned 25 yrs",
+        "4.9 stars",
+        "lifetime warranty",
+    ]
+
+
+# ===========================================================================
+# GET /work/client/{client_id}
+# ===========================================================================
+
+
+def test_client_read_requires_auth(client: TestClient) -> None:
+    resp = client.get("/work/client/c-1")
+    assert resp.status_code == 401
+
+
+def test_client_read_404_when_missing(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.client_row = None
+    resp = client.get("/work/client/c-nope", headers=_auth())
+    assert resp.status_code == 404
+
+
+def test_client_read_returns_full_shape(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.client_row = {
+        "id": "c-1",
+        "slug": "acme-roofing",
+        "name": "Acme Roofing",
+        "service_type": "roofing",
+        "brand_colors": {"primary": "#0a3d62", "accent": "#fa983a"},
+    }
+    tools_sb.client_profile_row = {
+        "client_id": "c-1",
+        "tone": "warm, expert, no-pressure",
+        "years_in_business": 25,
+        "google_rating": 4.9,
+        "warranty": "lifetime workmanship",
+        "primary_city": "Austin",
+        "state": "TX",
+        "needs_input": [],
+        "raw_profile": {"source": "file"},
+    }
+    tools_sb.client_offers_rows = [
+        {"client_id": "c-1", "offer_text": "$99 roof inspection", "active": True, "sort_order": 0},
+        {"client_id": "c-1", "offer_text": "$0 down financing", "active": True, "sort_order": 1},
+        {"client_id": "c-1", "offer_text": "old promo", "active": False, "sort_order": 2},
+    ]
+    tools_sb.client_offer_constraints_rows = [
+        {"client_id": "c-1", "constraint_text": "no 'guaranteed approval'", "sort_order": 0},
+        {"client_id": "c-1", "constraint_text": "no price claims without '+tax'", "sort_order": 1},
+    ]
+    tools_sb.client_services_rows = [
+        {"client_id": "c-1", "service_name": "roof replacement", "sort_order": 0},
+        {"client_id": "c-1", "service_name": "storm repair", "sort_order": 1},
+    ]
+    tools_sb.client_value_props_rows = [
+        {"client_id": "c-1", "kind": "usp", "prop_text": "family-owned 25 yrs", "sort_order": 0},
+        {"client_id": "c-1", "kind": "differentiator", "prop_text": "owner on every job", "sort_order": 0},
+        {"client_id": "c-1", "kind": "usp", "prop_text": "4.9 stars on 700+ reviews", "sort_order": 1},
+    ]
+    tools_sb.client_assets_rows = [
+        {
+            "client_id": "c-1",
+            "kind": "logo",
+            "source": "drive",
+            "ref": "drive-id-123",
+            "formats": "1x1",
+            "label": "primary logo",
+            "sort_order": 0,
+        },
+    ]
+    tools_sb.client_past_projects_rows = [
+        {"client_id": "c-1", "url": "https://acme.example/project-1", "sort_order": 0},
+        {"client_id": "c-1", "url": "https://acme.example/project-2", "sort_order": 1},
+    ]
+
+    resp = client.get("/work/client/c-1", headers=_auth())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+
+    assert body["client_id"] == "c-1"
+    assert body["slug"] == "acme-roofing"
+    assert body["name"] == "Acme Roofing"
+    assert body["service_type"] == "roofing"
+    assert body["brand_colors"] == {"primary": "#0a3d62", "accent": "#fa983a"}
+    # Full typed profile passed through verbatim.
+    assert body["profile"]["years_in_business"] == 25
+    assert body["profile"]["google_rating"] == 4.9
+    assert body["profile"]["raw_profile"] == {"source": "file"}
+    # Offers carry offer_text + active (all of them, active flag preserved).
+    assert body["offers"] == [
+        {"offer_text": "$99 roof inspection", "active": True},
+        {"offer_text": "$0 down financing", "active": True},
+        {"offer_text": "old promo", "active": False},
+    ]
+    # Constraints are flat text, in sort order.
+    assert body["offer_constraints"] == [
+        "no 'guaranteed approval'",
+        "no price claims without '+tax'",
+    ]
+    assert body["services"] == ["roof replacement", "storm repair"]
+    # Value props split by kind.
+    assert body["value_props"] == {
+        "usps": ["family-owned 25 yrs", "4.9 stars on 700+ reviews"],
+        "differentiators": ["owner on every job"],
+    }
+    assert body["assets"] == [
+        {
+            "kind": "logo",
+            "source": "drive",
+            "ref": "drive-id-123",
+            "formats": "1x1",
+            "label": "primary logo",
+        }
+    ]
+    assert body["past_projects"] == [
+        "https://acme.example/project-1",
+        "https://acme.example/project-2",
+    ]
+
+
+def test_client_read_null_profile_and_empty_children(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """Client row present but profile unfilled + no child rows → degrades."""
+    tools_sb.client_row = {
+        "id": "c-2",
+        "slug": "newco",
+        "name": "NewCo",
+        "service_type": "remodeling",
+        "brand_colors": None,
+    }
+    tools_sb.client_profile_row = None
+
+    resp = client.get("/work/client/c-2", headers=_auth())
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["profile"] is None
+    assert body["offers"] == []
+    assert body["offer_constraints"] == []
+    assert body["services"] == []
+    assert body["value_props"] == {"usps": [], "differentiators": []}
+    assert body["assets"] == []
+    assert body["past_projects"] == []
 
 
 # ===========================================================================

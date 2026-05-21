@@ -632,6 +632,7 @@ OPERATOR_POLICY_PATH = (
 #: The gate matches these by exact equality.
 RENDER = "mcp_pipeline_operator_pipeline_operator_render"
 READ = "mcp_pipeline_operator_pipeline_operator_read"
+CLIENT_READ = "mcp_pipeline_operator_pipeline_operator_client_read"
 BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
 
 
@@ -788,13 +789,18 @@ def test_overlay_allowlists_read_and_brief(
     env: None,
     _operator_policy_env: None,
 ) -> None:
-    """read/brief are allowlisted under the operator overlay → no worker hit."""
+    """read/client_read/brief are allowlisted under the operator overlay → no
+    worker hit."""
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("allowlisted operator tool must not round-trip")
 
     _ctx, hook, _client = _register_with_mock(handler)
     assert (
         hook(READ, {"pipeline_id": "p"}, "t")
+        is None
+    )
+    assert (
+        hook(CLIENT_READ, {"client_id": "c"}, "t")
         is None
     )
     assert (
