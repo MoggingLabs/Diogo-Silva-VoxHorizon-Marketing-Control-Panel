@@ -1,13 +1,28 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Bot, Loader2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { kickoffOperatorPipeline } from "@/lib/pipeline/client";
+import { fetchClients, type ClientOption } from "@/lib/realtime/client-data";
+
+/**
+ * Sentinel value for the "no client" option. Radix `Select` items can't use an
+ * empty-string value, so we use a non-uuid token and map it back to "no
+ * client" (omitted from the POST body) when the manager keeps the default.
+ */
+const NO_CLIENT = "__none__";
 
 /**
  * Operator-driven kickoff affordance for the supervision cockpit.
@@ -29,6 +44,32 @@ export function OperatorKickoffForm() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Optional client picker. The operator picks up the chosen client's brand
+  // voice / offers / do-not-say constraints; leaving it on "No client" runs a
+  // generic pipeline. Fetched on mount via the service-role `/api/clients`
+  // route (the anon browser key can't read `clients` after the RLS lockdown).
+  const [clientId, setClientId] = useState<string>(NO_CLIENT);
+  const [clients, setClients] = useState<ClientOption[]>([]);
+  const [clientsLoading, setClientsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchClients();
+        if (!cancelled) setClients(data);
+      } catch {
+        // Soft-fail: the client picker is optional, so a load failure just
+        // leaves it empty/disabled — the manager can still kick off generically.
+      } finally {
+        if (!cancelled) setClientsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const trimmed = instruction.trim();
   const canSubmit = trimmed.length > 0 && !submitting;
 
@@ -37,7 +78,10 @@ export function OperatorKickoffForm() {
     setSubmitting(true);
     setError(null);
     try {
-      const pipeline = await kickoffOperatorPipeline({ instruction: trimmed });
+      const pipeline = await kickoffOperatorPipeline({
+        instruction: trimmed,
+        ...(clientId !== NO_CLIENT ? { client_id: clientId } : {}),
+      });
       router.push(`/pipeline/${pipeline.id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to start the operator.");
@@ -45,7 +89,7 @@ export function OperatorKickoffForm() {
     }
     // On success we navigate away, so we deliberately leave `submitting` true
     // to keep the button disabled through the transition.
-  }, [router, submitting, trimmed]);
+  }, [clientId, router, submitting, trimmed]);
 
   return (
     <section
@@ -80,6 +124,32 @@ export function OperatorKickoffForm() {
             }
           }}
         />
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="operator-client">Client (optional)</Label>
+        <Select value={clientId} onValueChange={setClientId} disabled={submitting}>
+          <SelectTrigger
+            id="operator-client"
+            data-testid="operator-client"
+            aria-label="Client (optional)"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value={NO_CLIENT}>No client / generic</SelectItem>
+            {clients.map((c) => (
+              <SelectItem key={c.id} value={c.id}>
+                {c.name} <span className="text-muted-foreground">({c.slug})</span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          {clientsLoading
+            ? "Loading clients…"
+            : "Pick a client to give the operator its brand voice, offers, and do-not-say rules."}
+        </p>
       </div>
 
       {error ? (
