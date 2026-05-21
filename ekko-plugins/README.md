@@ -18,8 +18,11 @@ ekko-plugins/
     ├── plugin.yaml
     ├── __init__.py
     ├── policy.py
-    ├── policy.yaml
+    ├── policy.yaml           # Ekko's overlay (ships empty)
+    ├── policy.operator.yaml  # operator agent's profile (gates the render spend tool)
+    ├── policy_overlay.py     # opt-in loader that applies a policy.yaml overlay
     ├── client.py
+    ├── mode.py
     ├── audit.py
     ├── tests/
     └── README.md
@@ -27,15 +30,15 @@ ekko-plugins/
 
 ## Conventions
 
-* **Pure policy modules** keep I/O out of the hot path. Performance
+- **Pure policy modules** keep I/O out of the hot path. Performance
   budgets (e.g. `<1ms` for the approvals gate) are asserted in tests.
-* **Fail-closed**. Anything that prevents reaching a definitive
+- **Fail-closed**. Anything that prevents reaching a definitive
   authorisation outcome becomes `{"action": "block", ...}` rather than
   a silent allow.
-* **JSONL audit logs** under `/opt/data/logs/<plugin>.jsonl` (one row
+- **JSONL audit logs** under `/opt/data/logs/<plugin>.jsonl` (one row
   per decision). Args themselves are NEVER recorded — only their
   digests — so the log can be retained without exposing secrets.
-* **Env vars** are listed in each plugin's `plugin.yaml::requires_env`
+- **Env vars** are listed in each plugin's `plugin.yaml::requires_env`
   so the operator can validate config at install time.
 
 ## Adding a plugin
@@ -51,6 +54,6 @@ ekko-plugins/
 
 ## Related repos
 
-* `silva-1337/ekko` — the upstream Ekko/Hermes runtime. This directory
+- `silva-1337/ekko` — the upstream Ekko/Hermes runtime. This directory
   is intentionally NOT a submodule of that repo; we ship the plugin
   with the dashboard's release artifacts and copy it onto the VPS.
