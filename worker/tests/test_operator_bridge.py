@@ -105,6 +105,8 @@ def test_build_argv_ignores_session_id() -> None:
         "chat",
         "-q",
         "do it",
+        "--max-turns",
+        "40",
     ]
 
 
@@ -114,6 +116,8 @@ def test_build_argv_without_session() -> None:
         "chat",
         "-q",
         "do it",
+        "--max-turns",
+        "40",
     ]
 
 
@@ -136,6 +140,8 @@ async def test_dispatch_creates_exec_and_drains() -> None:
         "chat",
         "-q",
         "render finals for p-9",
+        "--max-turns",
+        "40",
     ]
     assert kwargs == {"stdout": True, "stderr": True, "tty": False}
     client.api.exec_start.assert_called_once_with("exec-1", stream=True)

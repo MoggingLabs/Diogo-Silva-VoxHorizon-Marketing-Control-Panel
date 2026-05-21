@@ -38,6 +38,13 @@ log = structlog.get_logger(__name__)
 DEFAULT_OPERATOR_CONTAINER = "hermes-agent-operator"
 """Default container name. Overridable via ``OPERATOR_CONTAINER_NAME``."""
 
+OPERATOR_MAX_TURNS = 40
+"""Agentic turn budget for one dispatch. The operator's per-stage workflow
+(view skills -> read state -> author -> call the render/brief tool -> narrate)
+takes many turns; the one-shot CLI default is too low and silently cuts the run
+off after the first tool call (observed: it read state then stopped without
+authoring the brief). 40 gives comfortable headroom for the longest stage."""
+
 
 class OperatorBridgeError(RuntimeError):
     """Raised when the bridge can't start the operator exec.
@@ -88,7 +95,14 @@ class OperatorBridge:
         errors with "unrecognized arguments". ``session_id`` is retained on the
         signature for call-site clarity + logging.)
         """
-        return ["hermes", "chat", "-q", instruction]
+        return [
+            "hermes",
+            "chat",
+            "-q",
+            instruction,
+            "--max-turns",
+            str(OPERATOR_MAX_TURNS),
+        ]
 
     async def dispatch(self, instruction: str, session_id: str) -> None:
         """Run ``hermes chat`` in the operator container, draining stdout.

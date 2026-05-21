@@ -772,6 +772,8 @@ def test_dispatch_builds_argv_and_returns_immediately(
         "chat",
         "-q",
         "author concepts for pipeline p-42",
+        "--max-turns",
+        "40",
     ]
     assert kwargs == {"stdout": True, "stderr": True, "tty": False}
     # stdout was drained to completion.
