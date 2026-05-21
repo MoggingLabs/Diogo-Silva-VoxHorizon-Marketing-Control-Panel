@@ -195,6 +195,50 @@ describe("POST /api/pipelines/:id/advance", () => {
       expect(currentSupabase._spies.from).toHaveBeenCalledWith("pipeline_events");
     });
 
+    it("advances an operator pipeline whose payload fails the strict form schema", async () => {
+      // The operator authors a looser, extras-bearing image_payload (validated
+      // by the worker, not the form's BriefPayload). The advance must NOT
+      // re-validate it (no "image_payload invalid" 422) and must keep the
+      // operator's already-authored image_brief_id.
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: {
+              single: {
+                data: {
+                  id,
+                  status: "configuration",
+                  format_choice: "image",
+                  client_id: clientId,
+                  image_brief_id: "op-brief-1",
+                  config_draft: {
+                    operator_driven: true,
+                    image_payload: { offer_text: "x", extras: { foo: "bar" } },
+                  },
+                  advanced_at: {},
+                },
+                error: null,
+              },
+            },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.error).toBeUndefined();
+      expect(body.image_brief_id).toBe("op-brief-1");
+      await new Promise((r) => setTimeout(r, 5));
+      expect(dispatchOperator).toHaveBeenCalledTimes(1);
+    });
+
     it("does not block the advance when the operator dispatch rejects", async () => {
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
       dispatchOperator.mockRejectedValueOnce(new Error("operator worker down"));
