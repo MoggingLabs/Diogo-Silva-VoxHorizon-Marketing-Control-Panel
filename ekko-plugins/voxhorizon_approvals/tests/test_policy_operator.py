@@ -110,7 +110,16 @@ def test_shipped_operator_policy_contents() -> None:
     overlay = load_overlay(OPERATOR_POLICY_PATH)
     assert overlay.extra_requires_approval == frozenset({RENDER})
     assert overlay.allowlist == frozenset({READ, BRIEF})
-    assert overlay.blocklist == frozenset()
+    assert overlay.blocklist == frozenset({"execute_code", "terminal", "shell"})
+
+
+def test_operator_overlay_blocks_shell_tools() -> None:
+    """The shell/code tools are hard-blocked so the operator can't shell out to
+    run helper.py (which would hit the spend-gate long-poll and hang); it must
+    author payloads directly and persist them via the MCP pipeline tools."""
+    overlay = load_overlay(OPERATOR_POLICY_PATH)
+    for tool in ("execute_code", "terminal", "shell"):
+        assert overlay.evaluate(tool, {}).action == "block"
 
 
 # ---------------------------------------------------------------------------

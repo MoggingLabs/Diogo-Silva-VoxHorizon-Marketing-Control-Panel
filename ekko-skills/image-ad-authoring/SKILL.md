@@ -23,14 +23,16 @@ it, and act? You author three things, in order:
 2. **N distinct concepts** — each a different _reason to believe_,
 3. a **photoreal generation prompt** per concept — built to survive the model.
 
-`helper.py` is the mechanical scaffolding (assemble + validate briefs and
-prompts, enforce distinctness, lint on-image text). This file is the
-judgment. Use both: think with this, assemble with the helper so nothing
-malformed reaches a paid render.
+`helper.py` documents the exact structure — the brief/concept fields, the
+closed `ANGLES` vocabulary, the distinctness rule, and the baseline negative
+cues. This file is the judgment.
 
-> Run it: `python3 -c "import sys; sys.path.insert(0, '<skill dir>'); from helper import build_image_brief, build_concept, assert_distinct_concepts"`
-> Pure functions, no env, no network — the `pipeline-operator` skill turns
-> the dicts you build here into `render` calls.
+> IMPORTANT — you have NO shell. Do NOT run `helper.py`, `python`, or any
+> terminal/code tool (they are blocked). Author the brief and concept objects
+> DIRECTLY as JSON, in the exact structures shown below, and pass them to the
+> `pipeline_operator_brief` / `pipeline_operator_render` MCP tools. The code
+> blocks below are the shape to PRODUCE, not code to run — the worker validates
+> every payload server-side, so nothing malformed reaches a paid render.
 
 ---
 
