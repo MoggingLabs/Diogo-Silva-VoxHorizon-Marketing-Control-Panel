@@ -107,6 +107,57 @@ async function advanceFromConfiguration(
     return NextResponse.json({ error: gate.reason, missing: gate.missing ?? [] }, { status: 422 });
   }
 
+  // 1b. Operator-driven pipelines: the Hermes operator already authored the
+  //     brief (the worker validated it; pipeline.image_brief_id is set) and it
+  //     re-reads live state on each dispatch. Skip the deterministic
+  //     validate-and-insert path below — running it would re-check the
+  //     operator's looser, extras-bearing payload against the strict form
+  //     schema (the "image_payload invalid" 422 the manager hit) and mint a
+  //     duplicate brief. Just advance the stage and re-task the operator to
+  //     author the concept previews (its render call is the spend gate).
+  if (isOperatorDriven(pipeline.config_draft)) {
+    const nowOp = new Date().toISOString();
+    const prevAdvancedAt =
+      pipeline.advanced_at &&
+      typeof pipeline.advanced_at === "object" &&
+      !Array.isArray(pipeline.advanced_at)
+        ? (pipeline.advanced_at as Record<string, string>)
+        : {};
+    const opUpdate: PipelineUpdate = {
+      status: "ideation",
+      advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
+    };
+    const { data: opUpdated, error: opErr } = await supabase
+      .from("pipelines")
+      .update(opUpdate)
+      .eq("id", pipeline.id)
+      .eq("status", "configuration")
+      .select()
+      .single();
+    if (opErr || !opUpdated) {
+      return NextResponse.json(
+        { error: opErr?.message ?? "pipeline advance failed" },
+        { status: 500 },
+      );
+    }
+    const opEvent: PipelineEventInsert = {
+      pipeline_id: pipeline.id,
+      kind: "stage_advanced",
+      stage: "ideation",
+      payload: { image_brief_id: pipeline.image_brief_id } as Json,
+    };
+    const { error: opEvErr } = await supabase.from("pipeline_events").insert(opEvent);
+    if (opEvErr) {
+      console.warn(`[pipelines.advance] event insert failed: ${opEvErr.message}`);
+    }
+    void retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+    return NextResponse.json({
+      pipeline: opUpdated,
+      image_brief_id: pipeline.image_brief_id,
+      video_brief_id: pipeline.video_brief_id,
+    });
+  }
+
   // 2. Pull the typed brief payloads out of the draft. zod-parse them now —
   //    the autosave route accepts loose shapes (so the operator can save
   //    incomplete drafts mid-form), but the advance gate is the spot where
