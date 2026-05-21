@@ -30,6 +30,14 @@ In-code defaults always WIN over a *softening* override:
   (this is how the operator profile allowlists ``pipeline_operator_read``).
 * everything else             → delegate to :func:`policy.evaluate`.
 
+Tool-name matching is **exact equality** (``tool_name in entries``). Hermes
+presents an MCP tool to the ``pre_tool_call`` hook as ``mcp_<server>_<tool>``
+with *single* underscores (verified live on the VPS), so the policy files list
+the exact full names (e.g. ``mcp_pipeline_operator_pipeline_operator_render``)
+and we match them as-is. There is intentionally **no** fuzzy/suffix matching —
+a short name like ``pipeline_operator_render`` would otherwise false-match a
+longer live name, which is unsafe for a spend gate.
+
 No hard PyYAML dependency: the policy files are a tiny YAML subset
 (``key: []`` or ``key:`` followed by ``- item`` lines), so we parse that
 subset ourselves and only use PyYAML if it happens to be installed.
@@ -57,30 +65,6 @@ _OVERLAY_RISK_DEFAULT = "spend"
 #: The three recognised keys (kept in lock-step with ``policy.yaml`` docs).
 _RECOGNISED_KEYS = ("allowlist", "extra_requires_approval", "blocklist")
 
-#: Separator MCP hosts use to namespace a tool: ``mcp__<server>__<tool>``.
-_MCP_SEP = "__"
-
-
-def _matches(tool_name: str, entries: frozenset[str]) -> bool:
-    """Match a (possibly MCP-namespaced) tool name against a policy entry set.
-
-    Hermes may present an MCP tool to the ``pre_tool_call`` hook either *bare*
-    (``pipeline_operator_render``) or *namespaced* with the server name
-    (``mcp__pipeline-operator__pipeline_operator_render``). The policy files
-    list tools by their short (bare) name, so we match if the live name either:
-
-    * EQUALS a policy entry, or
-    * ENDS WITH ``__<entry>`` — the trailing segment after MCP's ``__``
-      namespacing.
-
-    The suffix is anchored on ``__`` so ``pipeline_operator_render`` does not
-    spuriously match an entry ``render`` (``..._render`` has no ``__render``
-    boundary), keeping the match precise to whole namespaced segments.
-    """
-    if tool_name in entries:
-        return True
-    return any(tool_name.endswith(_MCP_SEP + entry) for entry in entries)
-
 
 @dataclass(frozen=True)
 class PolicyOverlay:
@@ -102,9 +86,8 @@ class PolicyOverlay:
 
         Order encodes the precedence rules in the module docstring.
         """
-        # 1. Hard blocklist — highest precedence, no prompt. Matching is
-        #    robust to MCP namespacing (bare OR ``mcp__server__<entry>``).
-        if _matches(tool_name, self.blocklist):
+        # 1. Hard blocklist — highest precedence, no prompt. Exact name match.
+        if tool_name in self.blocklist:
             return Decision(
                 action="block",
                 reason=f"{tool_name} is blocklisted by policy overlay",
@@ -122,8 +105,8 @@ class PolicyOverlay:
         # 3. Operator-added approval requirement (e.g. the render spend tool).
         #    This wins over the overlay allowlist for the same tool, matching
         #    the "in-code defaults win over softening; gating wins over
-        #    allowing" intent. Matches bare OR MCP-namespaced names.
-        if _matches(tool_name, self.extra_requires_approval):
+        #    allowing" intent. Exact full-name match.
+        if tool_name in self.extra_requires_approval:
             return Decision(
                 action="ask_operator",
                 reason=f"{tool_name} requires operator approval (policy overlay)",
@@ -131,8 +114,8 @@ class PolicyOverlay:
             )
 
         # 4. Operator-added allowlist (e.g. the read tool). Only reached when
-        #    the tool isn't otherwise gated above. Matches bare OR namespaced.
-        if _matches(tool_name, self.allowlist):
+        #    the tool isn't otherwise gated above. Exact full-name match.
+        if tool_name in self.allowlist:
             return Decision(
                 action="allow",
                 reason=f"{tool_name} is allowlisted by policy overlay",

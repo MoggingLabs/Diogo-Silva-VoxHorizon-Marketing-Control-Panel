@@ -8,22 +8,24 @@
 # It maps one-for-one to the pipeline-operator skill's MCP tools
 # (ekko-skills/pipeline-operator/mcp_server.py, which delegates to helper.py).
 # The approval plugin gates by tool name, so these keys reference the tools'
-# exact SHORT names.
+# EXACT FULL names as Hermes presents them to the pre_tool_call hook.
 #
-# MCP namespacing: Hermes may present these tools to the pre_tool_call hook
-# either bare (pipeline_operator_render) or namespaced with the server name
-# (mcp__pipeline-operator__pipeline_operator_render). List the SHORT name here;
-# policy_overlay matches both forms (exact name OR a `__<short-name>` suffix),
-# so this file does not need the namespaced variant.
+# MCP namespacing (verified live on the VPS): Hermes presents an MCP tool to
+# the pre_tool_call hook as `mcp_<server>_<tool>` with SINGLE underscores. The
+# server name "pipeline-operator" is normalized to "pipeline_operator", and the
+# tool functions are already named `pipeline_operator_<verb>`, so the live names
+# are doubled: e.g. `mcp_pipeline_operator_pipeline_operator_render`. List those
+# EXACT FULL names here — policy_overlay matches by exact equality (no fuzzy
+# suffix matching), so a short name like `pipeline_operator_render` is NOT gated.
 #
 # Merge semantics (see policy_overlay.py / the plugin README): in-code
 # defaults always win over a softening override; gating wins over allowing.
 
-# pipeline_operator_render is THE spend tool — every call renders paid Kie
-# images. Gating it here makes the manager approve the spend in the dashboard
+# The render tool is THE spend tool — every call renders paid Kie images.
+# Gating it here makes the manager approve the spend in the dashboard
 # (long-poll) before the worker runs. This is the operator's spend gate.
 extra_requires_approval:
-  - pipeline_operator_render
+  - mcp_pipeline_operator_pipeline_operator_render
 
 # The read tool is a pure GET of pipeline state (no spend, no side effects),
 # and the brief tool is a free Supabase write the manager reviews via the
@@ -31,8 +33,8 @@ extra_requires_approval:
 # operator's read-state-then-author loop running without pestering the manager
 # for non-spend actions.
 allowlist:
-  - pipeline_operator_read
-  - pipeline_operator_brief
+  - mcp_pipeline_operator_pipeline_operator_read
+  - mcp_pipeline_operator_pipeline_operator_brief
 
 # No hard blocks for the operator profile. (A blocklisted tool is rejected
 # outright with no operator prompt — reserved for known-bad tools.)

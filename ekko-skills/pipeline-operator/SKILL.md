@@ -46,11 +46,11 @@ Tool signatures:
   `{ok, renders, total_cost_usd, errors}`.
 
 The MCP server reads `WORKER_BASE_URL` / `WORKER_SHARED_SECRET` from the
-operator container env on your behalf — you never handle the secret. Hermes may
-present these tools to the approval gate either bare
-(`pipeline_operator_render`) or namespaced
-(`mcp__pipeline-operator__pipeline_operator_render`); the gate matches both, so
-just call the tools by name.
+operator container env on your behalf — you never handle the secret. Hermes
+presents these tools to the approval gate as `mcp_<server>_<tool>` with single
+underscores — e.g. `pipeline_operator_render` becomes
+`mcp_pipeline_operator_pipeline_operator_render` — and the gate keys on that
+exact full name; you just call the tools by their normal name.
 
 ---
 

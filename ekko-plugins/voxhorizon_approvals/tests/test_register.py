@@ -638,6 +638,13 @@ OPERATOR_POLICY_PATH = (
     Path(__file__).resolve().parent.parent / "policy.operator.yaml"
 )
 
+#: Exact full tool names as Hermes presents them to the pre_tool_call hook:
+#: ``mcp_<server>_<tool>`` with single underscores (verified live on the VPS).
+#: The gate matches these by exact equality.
+RENDER = "mcp_pipeline_operator_pipeline_operator_render"
+READ = "mcp_pipeline_operator_pipeline_operator_read"
+BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
+
 
 @pytest.fixture
 def _no_policy_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -691,8 +698,8 @@ def test_resolve_evaluate_loads_overlay_when_set(
     decide = _resolve_evaluate()
     assert decide is not plain_evaluate
     # The overlay gates render and allowlists read.
-    assert decide("pipeline_operator_render", {}).action == "ask_operator"
-    assert decide("pipeline_operator_read", {}).action == "allow"
+    assert decide(RENDER, {}).action == "ask_operator"
+    assert decide(READ, {}).action == "allow"
 
 
 @pytest.mark.asyncio
@@ -705,7 +712,7 @@ async def test_env_unset_render_behaves_like_plain_engine(
     engine — it round-trips the operator like any unknown tool. This is the
     byte-identical 'Ekko safe' path: the plugin doesn't special-case it."""
     # Sanity: the base engine treats it as unknown → ask_operator.
-    assert plain_evaluate("pipeline_operator_render", {}).action == "ask_operator"
+    assert plain_evaluate(RENDER, {}).action == "ask_operator"
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -714,7 +721,7 @@ async def test_env_unset_render_behaves_like_plain_engine(
 
     _ctx, hook, _client = _register_with_mock(handler)
     result = await hook(
-        "pipeline_operator_render",
+        RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
         session_id="sess-1",
@@ -754,7 +761,7 @@ async def test_overlay_gates_render_returns_ask_then_block(
 
     _ctx, hook, _client = _register_with_mock(handler)
     result = await hook(
-        "pipeline_operator_render",
+        RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
         session_id="sess-1",
@@ -766,12 +773,12 @@ async def test_overlay_gates_render_returns_ask_then_block(
 
 
 @pytest.mark.asyncio
-async def test_overlay_gates_namespaced_render(
+async def test_overlay_gates_render_round_trips_operator(
     env: None,
     _operator_policy_env: None,
     _always_ask_mode: None,
 ) -> None:
-    """The MCP-namespaced render tool name is gated too."""
+    """The exact full render tool name is gated and round-trips the operator."""
     seen = {"count": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -782,7 +789,7 @@ async def test_overlay_gates_namespaced_render(
 
     _ctx, hook, _client = _register_with_mock(handler)
     result = await hook(
-        "mcp__pipeline-operator__pipeline_operator_render",
+        RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
         session_id="sess-1",
@@ -803,12 +810,12 @@ async def test_overlay_allowlists_read_and_brief(
 
     _ctx, hook, _client = _register_with_mock(handler)
     assert (
-        await hook("pipeline_operator_read", {"pipeline_id": "p"}, "t")
+        await hook(READ, {"pipeline_id": "p"}, "t")
         is None
     )
     assert (
         await hook(
-            "mcp__pipeline-operator__pipeline_operator_brief",
+            BRIEF,
             {"pipeline_id": "p", "image_payload": {}},
             "t",
         )

@@ -4,14 +4,21 @@
 Mirrors the style of ``test_policy.py``: import the loader, build the overlay,
 and assert decisions per tool. The contract under test:
 
-* ``pipeline_operator_render`` (the SPEND tool) is GATED (``ask_operator``).
-* ``pipeline_operator_read`` / ``pipeline_operator_brief`` are ALLOWLISTED.
+* The render tool (the SPEND tool) is GATED (``ask_operator``).
+* The read / brief tools are ALLOWLISTED.
 * In-code defaults still WIN over the overlay (you can't allowlist away a
   baked-in gate; ``rm -rf`` still asks; ``kie_generate`` still asks).
 * The shipped ``policy.operator.yaml`` parses to exactly those sets.
 * An EMPTY overlay is a pure pass-through to ``policy.evaluate`` — proof that
   loading the overlay doesn't change Ekko's behavior when its (empty) policy
   is in place.
+
+Tool names are the EXACT FULL names Hermes presents to the ``pre_tool_call``
+hook: ``mcp_<server>_<tool>`` with single underscores (verified live on the
+VPS). The server "pipeline-operator" normalizes to "pipeline_operator", and the
+tool functions are already ``pipeline_operator_<verb>``, so the live names are
+doubled (e.g. ``mcp_pipeline_operator_pipeline_operator_render``). Matching is
+exact equality — there is no fuzzy/suffix matching.
 """
 
 from __future__ import annotations
@@ -28,6 +35,11 @@ OPERATOR_POLICY_PATH = (
     Path(__file__).resolve().parent.parent / "policy.operator.yaml"
 )
 
+#: Exact full tool names as Hermes presents them (single-underscore namespacing).
+RENDER = "mcp_pipeline_operator_pipeline_operator_render"
+READ = "mcp_pipeline_operator_pipeline_operator_read"
+BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
+
 
 @pytest.fixture
 def operator_overlay() -> PolicyOverlay:
@@ -41,17 +53,17 @@ def operator_overlay() -> PolicyOverlay:
 
 def test_render_tool_is_gated(operator_overlay: PolicyOverlay) -> None:
     """The spend tool requires operator approval under the operator policy."""
-    decision = operator_overlay.evaluate("pipeline_operator_render", {})
+    decision = operator_overlay.evaluate(RENDER, {})
     assert decision.action == "ask_operator"
     assert decision.risk_class == "spend"
-    assert "pipeline_operator_render" in decision.reason
+    assert RENDER in decision.reason
 
 
 def test_render_tool_gated_regardless_of_args(
     operator_overlay: PolicyOverlay,
 ) -> None:
     decision = operator_overlay.evaluate(
-        "pipeline_operator_render",
+        RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
     )
     assert decision.action == "ask_operator"
@@ -59,104 +71,34 @@ def test_render_tool_gated_regardless_of_args(
 
 def test_read_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
     """The read tool is allowed without an operator round-trip."""
-    decision = operator_overlay.evaluate("pipeline_operator_read", {})
+    decision = operator_overlay.evaluate(READ, {})
     assert decision.action == "allow"
     assert "allowlist" in decision.reason
 
 
 def test_brief_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
     """The brief tool (free write, reviewed via the stage gate) is allowed."""
-    decision = operator_overlay.evaluate("pipeline_operator_brief", {})
+    decision = operator_overlay.evaluate(BRIEF, {})
     assert decision.action == "allow"
 
 
 # ---------------------------------------------------------------------------
-# MCP tool-name namespacing — match bare AND mcp__server__<entry>
+# Matching is exact full-name equality — short names do NOT match
 # ---------------------------------------------------------------------------
-#
-# Hermes may present an MCP tool to the hook either bare
-# (``pipeline_operator_render``) or namespaced with the server name
-# (``mcp__pipeline-operator__pipeline_operator_render``). The overlay must gate
-# either form so the spend gate fires regardless of which the live runtime uses.
-
-#: The MCP server name (matches mcp_server.py's ``SERVER_NAME``).
-_NS = "mcp__pipeline-operator__"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "pipeline_operator_render",  # bare
-        _NS + "pipeline_operator_render",  # namespaced
-    ],
-)
-def test_render_gated_bare_and_namespaced(
-    operator_overlay: PolicyOverlay, name: str
+def test_bare_short_render_name_is_not_gated_by_overlay(
+    operator_overlay: PolicyOverlay,
 ) -> None:
-    decision = operator_overlay.evaluate(name, {})
-    assert decision.action == "ask_operator"
-    assert decision.risk_class == "spend"
+    """A bare short name must NOT be gated by the overlay.
 
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "pipeline_operator_read",
-        _NS + "pipeline_operator_read",
-        "pipeline_operator_brief",
-        _NS + "pipeline_operator_brief",
-    ],
-)
-def test_read_brief_allowlisted_bare_and_namespaced(
-    operator_overlay: PolicyOverlay, name: str
-) -> None:
-    decision = operator_overlay.evaluate(name, {})
-    assert decision.action == "allow"
-
-
-def test_blocklist_matches_namespaced_form() -> None:
-    overlay = PolicyOverlay(
-        allowlist=frozenset(),
-        extra_requires_approval=frozenset(),
-        blocklist=frozenset({"danger_tool"}),
-    )
-    bare = overlay.evaluate("danger_tool", {})
-    namespaced = overlay.evaluate("mcp__some-server__danger_tool", {})
-    assert bare.action == "block"
-    assert namespaced.action == "block"
-
-
-def test_namespace_match_is_anchored_on_double_underscore() -> None:
-    """A suffix that is not a whole ``__``-delimited segment must NOT match.
-
-    Entry ``render`` must NOT gate ``pipeline_operator_render`` (there is no
-    ``__render`` boundary), so the match stays precise to namespaced segments.
+    Proves the overlay relies on the exact full live name, not loose/suffix
+    matching: ``pipeline_operator_render`` is not the live name Hermes presents,
+    so it must fall through to the base engine rather than the overlay's spend
+    gate.
     """
-    overlay = PolicyOverlay(
-        allowlist=frozenset(),
-        extra_requires_approval=frozenset({"render"}),
-        blocklist=frozenset(),
-    )
-    decision = overlay.evaluate("pipeline_operator_render", {})
-    # Not gated by the overlay → falls through to the base engine, which treats
-    # this unknown tool as risky (ask), but NOT because of the ``render`` entry.
+    decision = operator_overlay.evaluate("pipeline_operator_render", {})
     assert "policy overlay" not in decision.reason
-
-
-def test_matches_helper_bare_and_namespaced() -> None:
-    from voxhorizon_approvals.policy_overlay import _matches
-
-    entries = frozenset({"pipeline_operator_render"})
-    assert _matches("pipeline_operator_render", entries) is True
-    assert (
-        _matches(
-            "mcp__pipeline-operator__pipeline_operator_render", entries
-        )
-        is True
-    )
-    assert _matches("pipeline_operator_read", entries) is False
-    # Precise boundary: a non-``__`` suffix is not a match.
-    assert _matches("xpipeline_operator_render", entries) is False
 
 
 # ---------------------------------------------------------------------------
@@ -166,12 +108,8 @@ def test_matches_helper_bare_and_namespaced() -> None:
 
 def test_shipped_operator_policy_contents() -> None:
     overlay = load_overlay(OPERATOR_POLICY_PATH)
-    assert overlay.extra_requires_approval == frozenset(
-        {"pipeline_operator_render"}
-    )
-    assert overlay.allowlist == frozenset(
-        {"pipeline_operator_read", "pipeline_operator_brief"}
-    )
+    assert overlay.extra_requires_approval == frozenset({RENDER})
+    assert overlay.allowlist == frozenset({READ, BRIEF})
     assert overlay.blocklist == frozenset()
 
 
@@ -207,11 +145,11 @@ def test_overlay_cannot_allowlist_away_destructive_shell() -> None:
 def test_overlay_gating_wins_over_overlay_allowlist() -> None:
     """If a tool is in BOTH overlay sets, gating wins (safer)."""
     overlay = PolicyOverlay(
-        allowlist=frozenset({"pipeline_operator_render"}),
-        extra_requires_approval=frozenset({"pipeline_operator_render"}),
+        allowlist=frozenset({RENDER}),
+        extra_requires_approval=frozenset({RENDER}),
         blocklist=frozenset(),
     )
-    decision = overlay.evaluate("pipeline_operator_render", {})
+    decision = overlay.evaluate(RENDER, {})
     assert decision.action == "ask_operator"
 
 
@@ -268,7 +206,7 @@ def test_overlay_unknown_tool_fails_closed(
         ("delete_file", {"path": "/x"}),
         ("send_email", {"to": "x"}),
         ("totally_made_up", {}),
-        ("pipeline_operator_render", {}),  # unknown to the base engine → asks
+        (RENDER, {}),  # unknown to the base engine → asks
     ],
 )
 def test_empty_overlay_matches_plain_evaluate(tool: str, args: dict) -> None:
@@ -296,18 +234,15 @@ def test_subset_parser_block_and_inline(tmp_path: Path) -> None:
     text = (
         "# a comment\n"
         "extra_requires_approval:\n"
-        "  - pipeline_operator_render  # gate spend\n"
+        f"  - {RENDER}  # gate spend\n"
         "allowlist:\n"
-        "  - pipeline_operator_read\n"
-        "  - 'pipeline_operator_brief'\n"
+        f"  - {READ}\n"
+        f"  - '{BRIEF}'\n"
         "blocklist: []\n"
     )
     parsed = _parse_policy_subset(text)
-    assert parsed["extra_requires_approval"] == ["pipeline_operator_render"]
-    assert parsed["allowlist"] == [
-        "pipeline_operator_read",
-        "pipeline_operator_brief",
-    ]
+    assert parsed["extra_requires_approval"] == [RENDER]
+    assert parsed["allowlist"] == [READ, BRIEF]
     assert parsed["blocklist"] == []
 
 

@@ -100,16 +100,18 @@ spend gate.
 
 ### MCP tool-name namespacing
 
-Hermes may present an MCP tool to the `pre_tool_call` hook either **bare**
-(`pipeline_operator_render`) or **namespaced** with the server name
-(`mcp__pipeline-operator__pipeline_operator_render`). The overlay matches both:
-a policy entry matches if the live tool name **equals** it OR **ends with**
-`__<entry>` (the trailing `__`-delimited MCP segment). The `__` boundary keeps
-the match precise — an entry `render` does **not** match
-`pipeline_operator_render`, only a whole namespaced segment does. List tools by
-their **short name** in the policy files; both forms are gated. (The exact live
-name is confirmed on the VPS; because matching covers both, the policy file
-does not need adjusting if Hermes turns out to namespace.)
+Hermes presents an MCP tool to the `pre_tool_call` hook as
+`mcp_<server>_<tool>` with **single** underscores (verified live on the VPS).
+The server name `pipeline-operator` is normalized to `pipeline_operator`, and
+the tool functions are already named `pipeline_operator_<verb>`, so the live
+names are doubled — e.g. `mcp_pipeline_operator_pipeline_operator_render`.
+
+The overlay matches by **exact equality** (`tool_name in entries`): list the
+**exact full names** in the policy files. There is intentionally **no**
+fuzzy/suffix matching — suffix-matching a short name like `render` or
+`pipeline_operator_render` against the full live name would be ambiguous and
+unsafe for a spend gate (`render` would false-match `pipeline_operator_render`),
+so we rely on the exact full names only.
 
 ## Operator policy profile (`policy.operator.yaml`)
 
@@ -123,20 +125,20 @@ dropped in as the operator container's `policy.yaml` at deploy time. It does
 It maps one-for-one to the `pipeline-operator` MCP tools
 (`ekko-skills/pipeline-operator/mcp_server.py`, which delegates to
 `helper.py`) — the plugin gates **by tool name**, so the keys are the exact
-tool short-names (namespaced forms are matched too; see above):
+full live names (`mcp_<server>_<tool>`, single underscores; see above):
 
-| Policy key                | Tool                       | Effect                                                                |
-| ------------------------- | -------------------------- | --------------------------------------------------------------------- |
-| `extra_requires_approval` | `pipeline_operator_render` | **spend gate** — manager approves every render batch in the dashboard |
-| `allowlist`               | `pipeline_operator_read`   | read pipeline state without a prompt                                  |
-| `allowlist`               | `pipeline_operator_brief`  | author the brief (free write; reviewed via the dashboard stage gate)  |
+| Policy key                | Tool                                                | Effect                                                                |
+| ------------------------- | --------------------------------------------------- | --------------------------------------------------------------------- |
+| `extra_requires_approval` | `mcp_pipeline_operator_pipeline_operator_render`    | **spend gate** — manager approves every render batch in the dashboard |
+| `allowlist`               | `mcp_pipeline_operator_pipeline_operator_read`      | read pipeline state without a prompt                                  |
+| `allowlist`               | `mcp_pipeline_operator_pipeline_operator_brief`     | author the brief (free write; reviewed via the dashboard stage gate)  |
 
-Because gating uses the tool name, the spend gate is wired to the helper's
-`pipeline_operator_render` function: every call to it round-trips the manager
-for spend approval. The operator sends all concept previews in a single
-`render` call, so the manager approves the whole ideation batch once rather
-than per concept. **Do not rename `pipeline_operator_render`** without updating
-this file in lock-step.
+Because gating uses the exact tool name, the spend gate is wired to the helper's
+render tool (`mcp_pipeline_operator_pipeline_operator_render`): every call to it
+round-trips the manager for spend approval. The operator sends all concept
+previews in a single render call, so the manager approves the whole ideation
+batch once rather than per concept. **Do not rename the render tool** (or change
+the MCP server name) without updating this file in lock-step.
 
 Deploy it as the operator's policy (do not overwrite Ekko's):
 

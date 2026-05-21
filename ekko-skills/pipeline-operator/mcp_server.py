@@ -46,8 +46,10 @@ if _SKILL_DIR not in sys.path:
 import helper  # noqa: E402  (path tweak must run before this import)
 
 #: The MCP server name. Hermes namespaces tools by this when it advertises
-#: them (e.g. ``mcp__pipeline-operator__pipeline_operator_render``); the
-#: approval overlay's matching is robust to that namespacing.
+#: them, presenting ``mcp_<server>_<tool>`` with single underscores — the
+#: hyphen is normalized to ``_`` — e.g.
+#: ``mcp_pipeline_operator_pipeline_operator_render``. The approval overlay
+#: keys on that exact full name (see policy.operator.yaml).
 SERVER_NAME = "pipeline-operator"
 
 mcp = FastMCP(SERVER_NAME)

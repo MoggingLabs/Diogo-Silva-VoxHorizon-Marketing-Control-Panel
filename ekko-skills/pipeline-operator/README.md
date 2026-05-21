@@ -42,9 +42,10 @@ the operator policy can reference them one-for-one:
 | `pipeline_operator_brief`  | `POST /work/pipeline/tools/brief`  | allowlist (free write)        |
 | `pipeline_operator_render` | `POST /work/pipeline/tools/render` | **requires approval (spend)** |
 
-Hermes may present these to the gate either bare or namespaced
-(`mcp__pipeline-operator__pipeline_operator_render`); the overlay matches both.
-**Do not rename `pipeline_operator_render`** without updating
+Hermes presents these to the gate as `mcp_<server>_<tool>` with single
+underscores — e.g. `mcp_pipeline_operator_pipeline_operator_render` — and the
+overlay keys on that exact full name (no fuzzy matching). **Do not rename
+`pipeline_operator_render`** (or the MCP server name) without updating
 `ekko-plugins/voxhorizon_approvals/policy.operator.yaml` — the spend gate keys
 on this exact name.
 
