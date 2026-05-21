@@ -70,6 +70,14 @@ export interface Approval {
   cache_for_session: boolean | null;
   cache_for_minutes: number | null;
   worker_received_at: string | null;
+  /**
+   * Enrichment attached by `GET /api/approvals` (not a DB column). Resolved
+   * from the approval's pipeline id -> `pipelines.client_id` -> `clients.name`.
+   * `null` when the approval has no pipeline or the client can't be resolved.
+   */
+  client_name?: string | null;
+  /** The pipeline id pulled from `tool_args`/`context`, when present. */
+  pipeline_id?: string | null;
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { Approval, ApprovalDecision } from "@/lib/approvals/types";
+import { approvalTitle } from "@/lib/approvals/describe";
 import { formatDate } from "@/lib/format-time";
 import { cn } from "@/lib/utils";
 
@@ -154,7 +155,7 @@ export function ApprovalModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <AlertTriangle className="h-5 w-5 text-amber-500" aria-hidden="true" />
-            Tool-call approval required
+            {approval ? approvalTitle(approval) : "Tool-call approval required"}
           </DialogTitle>
           <DialogDescription>
             Review the call before allowing Hermes / Ekko to proceed.

@@ -139,7 +139,7 @@ describe("ApprovalQueue", () => {
     render(<ApprovalQueue autoOpenOnInsert={false} />);
     const user = userEvent.setup();
     await user.click(screen.getByTestId("approval-queue-toggle"));
-    await user.click(screen.getByTestId("approval-card-x"));
+    await user.click(screen.getByTestId("approval-card-body-x"));
     expect(screen.getByTestId("approval-modal")).toBeInTheDocument();
   });
 

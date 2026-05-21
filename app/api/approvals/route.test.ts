@@ -33,7 +33,9 @@ describe("GET /api/approvals", () => {
     const res = await GET(makeRequest("http://localhost/api/approvals"));
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.approvals).toEqual([{ id: "a1", status: "pending" }]);
+    expect(body.approvals).toEqual([
+      { id: "a1", status: "pending", pipeline_id: null, client_name: null },
+    ]);
   });
 
   it("returns 422 on an invalid status value", async () => {
@@ -103,5 +105,81 @@ describe("GET /api/approvals", () => {
       ReturnType<typeof vi.fn>
     >;
     expect(chain.eq).toHaveBeenCalledWith("status", "pending");
+  });
+
+  it("enriches approvals with client_name via pipeline -> client resolution", async () => {
+    currentSupabase = mockSupabaseClient({
+      approvals: {
+        select: {
+          data: [
+            {
+              id: "a1",
+              status: "pending",
+              tool_name: "mcp_pipeline_operator_pipeline_operator_render",
+              tool_args: { pipeline_id: "p1", kind: "concept_preview", items: [1] },
+              context: null,
+            },
+            {
+              id: "a2",
+              status: "pending",
+              tool_name: "kie_generate",
+              tool_args: { prompt: "x" },
+              context: { pipeline_id: "p1" },
+            },
+            {
+              id: "a3",
+              status: "pending",
+              tool_name: "shell_exec",
+              tool_args: {},
+              context: null,
+            },
+          ],
+          error: null,
+        },
+      },
+      pipelines: { select: { data: [{ id: "p1", client_id: "c1" }], error: null } },
+      clients: { select: { data: [{ id: "c1", name: "Acme Co" }], error: null } },
+    });
+
+    const res = await GET(makeRequest("http://localhost/api/approvals"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+
+    type Enriched = { id: string; client_name: string | null; pipeline_id: string | null };
+    const rows = body.approvals as Enriched[];
+    const byId = (id: string): Enriched => {
+      const found = rows.find((a) => a.id === id);
+      if (!found) throw new Error(`missing approval ${id}`);
+      return found;
+    };
+    expect(byId("a1").client_name).toBe("Acme Co");
+    expect(byId("a1").pipeline_id).toBe("p1");
+    expect(byId("a2").client_name).toBe("Acme Co");
+    expect(byId("a2").pipeline_id).toBe("p1");
+    // No pipeline -> null client.
+    expect(byId("a3").client_name).toBeNull();
+    expect(byId("a3").pipeline_id).toBeNull();
+
+    // Exactly three `from` calls: approvals, pipelines, clients (no N+1).
+    const tables = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
+    expect(tables).toEqual(["approvals", "pipelines", "clients"]);
+  });
+
+  it("attaches client_name=null when no approval carries a pipeline id", async () => {
+    currentSupabase = mockSupabaseClient({
+      approvals: {
+        select: {
+          data: [{ id: "a1", status: "pending", tool_name: "shell_exec", tool_args: {}, context: null }],
+          error: null,
+        },
+      },
+    });
+
+    const res = await GET(makeRequest("http://localhost/api/approvals"));
+    const body = await res.json();
+    expect(body.approvals[0].client_name).toBeNull();
+    // Only the approvals query runs — no pipeline/client lookups.
+    const tables = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
+    expect(tables).toEqual(["approvals"]);
   });
 });

@@ -109,6 +109,16 @@ export function ApprovalQueue({ autoOpenOnInsert = true, className }: ApprovalQu
     setOpen(false);
   }, []);
 
+  // After an inline Approve/Reject on a card, revalidate the queue so the
+  // resolved row drops out — same as the modal's success path.
+  const onCardDecided = useCallback(
+    async (a: Approval) => {
+      setActive((current) => (current && current.id === a.id ? null : current));
+      await refresh();
+    },
+    [refresh],
+  );
+
   return (
     <div className={cn("relative", className)} data-testid="approval-queue">
       <button
@@ -171,6 +181,7 @@ export function ApprovalQueue({ autoOpenOnInsert = true, className }: ApprovalQu
                   approval={approval}
                   active={active?.id === approval.id}
                   onSelect={openModalFor}
+                  onDecided={onCardDecided}
                 />
               ))
             )}
