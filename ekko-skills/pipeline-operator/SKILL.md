@@ -46,16 +46,31 @@ names matter: the spend gate keys on them.
 > (the codex path reports `total_cost_usd: 0`). Finals' 9:16 is a TRUE 9:16
 > (864x1536) on the codex backend.
 
+> **The deterministic render contract (READ THIS).** You author all N concepts
+> ONCE, at brief time, and PERSIST them via `pipeline_operator_brief(..., concepts=[...])`.
+> Then you render a whole stage with a SINGLE call that carries **no items**:
+> `pipeline_operator_render(pipeline_id, "concept_preview")`. The worker fans out
+> over the persisted plan and renders ALL N concepts in one deterministic pass —
+> you are NOT in the per-image loop, you do NOT re-author prompts at render time,
+> and you do NOT loop the render tool. If a render was interrupted, just call it
+> again: already-rendered concepts are skipped and only the remainder renders
+> (the result's `skipped` lists them). This is what guarantees all N concepts
+> land. Finals work the same way: after picks, call
+> `pipeline_operator_render(pipeline_id, "final")` with no items and the worker
+> renders one final (1:1 + 9:16) per pick, threading the parent automatically.
+
 Tool signatures:
 
 - `pipeline_operator_read(pipeline_id)` — returns the state object below.
 - `pipeline_operator_client_read(client_id)` — returns the client context
   object (brand, profile, offers, offer_constraints, value_props, …); see
   "Read the client context" below.
-- `pipeline_operator_brief(pipeline_id, image_payload, notes=None)` — upserts
-  the brief; `{ok, brief_id}`.
-- `pipeline_operator_render(pipeline_id, kind, items)` — **the spend tool**;
-  `{ok, renders, total_cost_usd, errors}`.
+- `pipeline_operator_brief(pipeline_id, image_payload, notes=None, concepts=None)`
+  — upserts the brief AND persists the full N concept specs (`concepts`);
+  `{ok, brief_id}`.
+- `pipeline_operator_render(pipeline_id, kind, items=None)` — **the spend tool**;
+  `{ok, renders, total_cost_usd, errors, skipped}`. **OMIT `items`** to render
+  the persisted plan deterministically (the prescribed path).
 
 The MCP server reads `WORKER_BASE_URL` / `WORKER_SHARED_SECRET` from the
 operator container env on your behalf — you never handle the secret. Hermes
@@ -194,79 +209,77 @@ Goal: produce a brief the manager can review. **No spend.**
    the client's do-not-say constraints in `extras.must_avoid`. If the offer is
    weak, sharpen it (see image-ad-authoring's "offer is the ad" rule) — but
    only ever to one of the client's REAL offers — and say what you changed.
-4. Call `pipeline_operator_brief(pipeline_id=..., image_payload=..., notes=...)`.
-   This upserts the brief and is idempotent — if a brief already exists it
-   updates it.
-5. **Narrate**: summarize the market, the offer, the chosen angles, and any
-   judgment calls (note when you pulled the offer / market / proof from the
-   client context). End with: _"Brief is ready for your review — approve it in
-   the dashboard and I'll author the concepts."_
-6. **Stop.** Do not render anything. The manager approves the brief at the
+4. **Author all N concepts NOW and persist them.** Build the N distinct concepts
+   with `build_concept(...)`, run `assert_distinct_concepts(...)`, and pass the
+   whole list to the brief as `concepts`. This is what makes the later ideation
+   render a single deterministic pass — the concept prompts live in the brief,
+   not in your head across a render. Default N = the number of angles (4).
+5. Call `pipeline_operator_brief(pipeline_id=..., image_payload=..., notes=...,
+   concepts=<all N>)`. This upserts the brief, persists the plan, and is
+   idempotent — re-authoring updates both.
+6. **Narrate**: summarize the market, the offer, the chosen angles, the N
+   concepts you authored, and any judgment calls (note when you pulled the offer
+   / market / proof from the client context). End with: _"Brief and N concepts
+   are ready for your review — approve it in the dashboard and I'll render the
+   previews."_
+7. **Stop.** Do not render anything. The manager approves the brief at the
    stage gate.
 
-Call the MCP tool (image-ad-authoring built `payload`):
+Call the MCP tool (image-ad-authoring built `payload` + `concepts`):
 
 ```
+concepts = [build_concept(...), build_concept(...), ...]   # all N, distinct
+assert_distinct_concepts(concepts)
 pipeline_operator_brief(
     pipeline_id=<pipeline_id>,
     image_payload=<payload>,
     notes="Sharpened the offer to a concrete $99 inspection; 4 angles.",
+    concepts=concepts,         # PERSIST the whole plan
 )
 ```
 
 ---
 
-## Stage: `ideation` → render 4 distinct concept previews (ONE spend gate)
+## Stage: `ideation` → render ALL N concept previews (ONE deterministic call)
 
-Goal: give the manager real choices to pick from. **This spends** — but as a
-_single_ approval for the whole batch.
+Goal: render the N concepts the manager approved in the brief. **This spends** —
+but as a _single_ approval, and the worker renders ALL N in one deterministic
+pass (you are not in the loop).
 
-1. Read state; pull the approved brief from `brief.payload`. If the read
-   returned a `client`, call `pipeline_operator_client_read(client["client_id"])`
-   and AUTHOR the concepts from it.
-2. Use **`image-ad-authoring`** to author **4 distinct concepts** — different
-   angles, not variations of one idea — grounded in the client context:
-   - the brand **tone**/voice sets the mood and wording of every concept;
-   - `offer_text` on each concept comes from the client's active `offers`;
-   - STRICTLY honor `offer_constraints` (do-not-say) — pass them as
-     `must_avoid` / `extra_negatives`; never author copy or on-image text that
-     violates them;
-   - back `social_proof` / `authority` concepts with real proof points
-     (`years_in_business`, google reviews/rating, `warranty`, licensed/insured,
-     family-owned) from the profile;
-   - set the **setting** and audience from the client's locale/targeting
-     (`city` / `state` / `primary_city`, `targeting_detail`), not a stock place.
-   Assemble each with `build_concept(...)` and run
-   `assert_distinct_concepts(...)` so you never spend on a set that isn't a
-   real choice.
-3. Call `pipeline_operator_render(pipeline_id=..., kind="concept_preview",
-items=<all 4>)` — **all items in ONE call**. That is one spend approval for
-   the manager, not four. (Previews render 1:1 @ 1K.)
-4. The render tool is gated: the manager will see a single spend-approval
-   prompt in the dashboard. When approved, the worker runs and returns the
-   rendered concepts. If the manager rejects, the call is blocked — narrate
-   that the spend was declined and stop.
+1. Read state. The concepts you authored at brief time are PERSISTED (the read's
+   `config_draft.concepts` / `brief.payload.concepts`). You do NOT re-author
+   them — the plan is already stored. (If, exceptionally, the brief was authored
+   without `concepts`, author them now and pass them as `items`; otherwise omit
+   `items`.)
+2. Call `pipeline_operator_render(pipeline_id=..., kind="concept_preview")` with
+   **no `items`**. The worker renders every persisted concept (1:1 @ 1K) in one
+   pass and returns `{ok, renders, total_cost_usd, errors, skipped}`.
+3. The render tool is gated: the manager sees a single spend-approval prompt.
+   When approved, the worker renders all N. If the manager rejects, the call is
+   blocked — narrate that the spend was declined and stop.
+4. **If a previous render was interrupted** (you see fewer than N concepts in
+   state), just call the same render again — already-rendered concepts are
+   `skipped` and only the remainder renders. Never loop the tool per image.
 5. **Narrate** each concept by its angle and idea (e.g. _"#2 owner_led_trust:
-   the owner shaking hands on a finished roof"_) and report `total_cost_usd`.
-   End with: _"Four concepts are in for your review — pick the one(s) to
-   finalize and I'll render the production versions."_
+   the owner shaking hands on a finished roof"_) and report `total_cost_usd`
+   (0 on codex). End with: _"All concepts are in for your review — pick the
+   one(s) to finalize and I'll render the production versions."_
 6. **Stop.** The manager picks at the review gate.
 
-Call the MCP tool (image-ad-authoring built `concepts`, a list of 4 distinct
-`{concept, prompt}`):
+Call the MCP tool — no items, the worker fans out over the persisted plan:
 
 ```
 pipeline_operator_render(
     pipeline_id=<pipeline_id>,
-    kind="concept_preview",
-    items=<concepts>,          # ALL of them — one call, one spend gate
+    kind="concept_preview",      # NO items — render ALL persisted concepts
 )
-# -> {ok, renders:[...], total_cost_usd, errors:[...]}
+# -> {ok, renders:[...], total_cost_usd, errors:[...], skipped:[...]}
 ```
 
-Why one call: each `pipeline_operator_render` is one spend approval. Batching
-the ideation concepts means the manager approves "render these 4 concepts"
-once, instead of being pestered four times.
+Why no items / one call: each `pipeline_operator_render` is one spend approval,
+and the deterministic worker pass renders every persisted concept at once — so
+the manager approves "render the concepts" once, all N land in one pass, and a
+retry resumes the remainder instead of re-rendering or stopping at one.
 
 ---
 
@@ -275,40 +288,25 @@ once, instead of being pestered four times.
 Goal: produce the production renders for what the manager chose. **This
 spends.**
 
-1. Read state; take `picks.image` (the chosen `creative_id`s) and find each in
-   `concepts` to recover its `concept` label and the prompt you used.
-2. For each picked concept, build a final item with the **same concept** and
-   **`parent_creative_id` = the picked creative_id** (finals are children of
-   the chosen preview). Re-use / refine the concept's prompt; finals render
-   1:1 + 9:16 @ 2K.
-3. Call `pipeline_operator_render(pipeline_id=..., kind="final", items=...)`.
-   You may render all picked finals in one call (one spend gate for the
-   production batch), or one per pick if you want per-creative approvals — one
-   call for the batch is the default. `parent_creative_id` is **required** on
-   every final item (the render tool rejects finals without it).
+1. Read state to confirm `picks.image` is populated (the chosen `creative_id`s).
+2. Call `pipeline_operator_render(pipeline_id=..., kind="final")` with **no
+   `items`**. The worker resolves one final per pick from the persisted plan,
+   threads `parent_creative_id` automatically (finals are children of the chosen
+   preview), and renders 1:1 + 9:16 @ 2K for each — all in one deterministic
+   pass. (You only pass explicit `items` if you need to refine a final's prompt
+   away from the persisted one; then `parent_creative_id` is required per item.)
+3. **If interrupted**, call it again — picks already finalized are `skipped`.
 4. **Narrate** the finals rendered and the cost. End with: _"Finals are
    rendered for your picks — the pipeline will finish automatically."_
 5. **Stop.** Do NOT advance to `done`. A database trigger auto-advances
    generation → done when the final render events land; your job ends at
    narration.
 
-Read state with the MCP tool, then render the finals with the MCP tool:
+Render the finals with one deterministic MCP call (no items needed):
 
 ```
-state = pipeline_operator_read(<pipeline_id>)
-picked_ids = state["picks"]["image"]
-by_id = {c["creative_id"]: c for c in state["concepts"]}
-
-finals = [
-    {
-        "concept": by_id[cid]["concept"],
-        "prompt": "<final prompt — refine the preview's prompt>",
-        "parent_creative_id": cid,        # REQUIRED for finals
-    }
-    for cid in picked_ids
-]
-
-pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final", items=finals)
+pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final")
+# worker renders one final (1:1 + 9:16) per pick, parent threaded automatically
 ```
 
 ---
@@ -332,9 +330,12 @@ pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final", items=finals)
    that bypasses the approval gate, which keys on the tool call.
 3. **One stage of work per dispatch, then stop.** Never advance the stage.
    Never chain into the next stage's work.
-4. **One spend per render batch.** Send all concepts in one
-   `concept_preview` call; the spend gate fires once. Do not loop the render
-   tool to render concepts one at a time.
+4. **One deterministic render per stage.** Persist all N concepts in the brief,
+   then trigger the stage with a SINGLE `pipeline_operator_render(pipeline_id,
+   kind)` call with NO `items`; the worker renders the whole persisted plan in
+   one pass and the spend gate fires once. NEVER author items at render time and
+   NEVER loop the render tool to render concepts one at a time. If a render was
+   interrupted, call it again — it resumes the remainder.
 5. **The spend gate is the manager's, not yours.** When `pipeline_operator_render`
    is blocked (manager declined or no approval), narrate the decline plainly
    and stop. Never try to route around the gate.

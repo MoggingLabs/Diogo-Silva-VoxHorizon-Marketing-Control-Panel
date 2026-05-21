@@ -748,6 +748,44 @@ def test_brief_updates_when_already_linked(
     assert brief_updates[0]["payload"]["market"] == "Dallas, TX"
 
 
+def test_brief_persists_concepts(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """concepts ride along on the brief payload + config_draft for the
+    deterministic render to fan out over later."""
+    tools_sb.pipeline_row = _pipeline_row(image_brief_id="ib-existing")
+
+    concepts = [
+        {"concept": "before_after__a", "prompt": "pa", "offer_text": "$99"},
+        {"concept": "savings__b", "prompt": "pb"},
+    ]
+    resp = client.post(
+        "/work/pipeline/tools/brief",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "image_payload": {
+                "market": "Austin, TX",
+                "offer_text": "$99 inspection",
+                "angles": ["before_after", "savings"],
+            },
+            "concepts": concepts,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+
+    # Persisted on the brief payload.
+    brief_updates = [d for n, d in tools_sb.updates if n == "briefs"]
+    assert brief_updates[0]["payload"]["concepts"] == concepts
+    # Mirrored onto config_draft for the read/deterministic render.
+    pipe_updates = [d for n, d in tools_sb.updates if n == "pipelines"]
+    assert pipe_updates[0]["config_draft"]["concepts"] == concepts
+    # Event records the count.
+    events = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
+    authored = [e for e in events if e["kind"] == "brief_authored"]
+    assert authored[0]["payload"]["concept_count"] == 2
+
+
 def test_brief_404_when_pipeline_missing(
     client: TestClient, tools_sb: _ToolsSupabase
 ) -> None:
@@ -984,6 +1022,158 @@ def test_render_400_when_no_brief(
         },
     )
     assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Deterministic render (items omitted → fan out over the persisted plan)
+# ---------------------------------------------------------------------------
+
+
+def _use_stub_kie(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline_tools
+
+    monkeypatch.setattr(pipeline_tools, "KieClient", _StubKieClient)
+
+
+def test_render_deterministic_concept_preview_renders_all_persisted(
+    client: TestClient,
+    tools_sb: _ToolsSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """items omitted → render EVERY persisted concept in ONE pass."""
+    tools_sb.pipeline_row = _pipeline_row(
+        config_draft={
+            "concepts": [
+                {"concept": "before_after__a", "prompt": "pa", "offer_text": "$99"},
+                {"concept": "owner_led_trust__b", "prompt": "pb"},
+                {"concept": "savings__c", "prompt": "pc"},
+                {"concept": "authority__d", "prompt": "pd"},
+            ]
+        }
+    )
+    _use_stub_kie(monkeypatch)
+
+    resp = client.post(
+        "/work/pipeline/tools/render",
+        headers=_auth(),
+        json={"pipeline_id": "p-1", "kind": "concept_preview"},  # NO items
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["renders"]) == 4  # all 4 persisted concepts (1x1 each)
+    assert body["skipped"] == []
+    creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
+    assert {c["concept"] for c in creatives} == {
+        "before_after__a",
+        "owner_led_trust__b",
+        "savings__c",
+        "authority__d",
+    }
+    assert all(c["version"] == "v0.ideation" for c in creatives)
+
+
+def test_render_deterministic_skips_already_rendered(
+    client: TestClient,
+    tools_sb: _ToolsSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A retry renders only the REMAINDER — the stuck-at-1/N production fix."""
+    tools_sb.pipeline_row = _pipeline_row(
+        config_draft={
+            "concepts": [
+                {"concept": "before_after__a", "prompt": "pa"},
+                {"concept": "savings__c", "prompt": "pc"},
+            ]
+        }
+    )
+    # one concept already landed at v0.ideation (the stuck state)
+    tools_sb.creatives_rows = [
+        {
+            "id": "cr-a",
+            "brief_id": "ib-1",
+            "concept": "before_after__a",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "file_path_supabase": "ib-1/a.png",
+        }
+    ]
+    _use_stub_kie(monkeypatch)
+
+    resp = client.post(
+        "/work/pipeline/tools/render",
+        headers=_auth(),
+        json={"pipeline_id": "p-1", "kind": "concept_preview"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert len(body["renders"]) == 1
+    assert body["skipped"] == ["before_after__a"]
+    creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
+    assert [c["concept"] for c in creatives] == ["savings__c"]
+
+
+def test_render_deterministic_empty_plan_is_clean_noop(
+    client: TestClient,
+    tools_sb: _ToolsSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(config_draft={})
+    _use_stub_kie(monkeypatch)
+    resp = client.post(
+        "/work/pipeline/tools/render",
+        headers=_auth(),
+        json={"pipeline_id": "p-1", "kind": "concept_preview"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["renders"] == []
+    assert not [d for n, d in tools_sb.inserts if n == "creatives"]
+
+
+def test_render_deterministic_final_from_picks(
+    client: TestClient,
+    tools_sb: _ToolsSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """items omitted, kind=final → one final per pick, parent threaded."""
+    tools_sb.pipeline_row = _pipeline_row(
+        status="generation",
+        picks={"image": ["cr-pick"], "video": []},
+        config_draft={
+            "concepts": [
+                {"concept": "savings__c", "prompt": "pc", "offer_text": "$99"}
+            ]
+        },
+    )
+    tools_sb.creatives_rows = [
+        {
+            "id": "cr-pick",
+            "brief_id": "ib-1",
+            "concept": "savings__c",
+            "ratio": "1x1",
+            "version": "v0.ideation",
+            "file_path_supabase": "ib-1/c.png",
+        }
+    ]
+    _use_stub_kie(monkeypatch)
+
+    resp = client.post(
+        "/work/pipeline/tools/render",
+        headers=_auth(),
+        json={"pipeline_id": "p-1", "kind": "final"},  # NO items
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert sorted(r["ratio"] for r in body["renders"]) == ["1x1", "9x16"]
+    creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
+    assert len(creatives) == 2
+    for c in creatives:
+        assert c["version"] == "v1.0"
+        assert c["prompt_used"]["parent_creative_id"] == "cr-pick"
 
 
 # ===========================================================================

@@ -523,12 +523,39 @@ class BriefImagePayload(BaseModel):
     service_type: str | None = None
 
 
+class ConceptSpec(BaseModel):
+    """One persisted concept spec authored at brief time.
+
+    The operator authors all N concepts up front (with the
+    ``image-ad-authoring`` skill) and persists them here so the ideation render
+    can be a single DETERMINISTIC, worker-driven pass over the stored specs —
+    the LLM never holds the prompts through a long synchronous render, and a
+    retried render resumes from the persisted plan instead of re-authoring.
+
+    Shape mirrors an ``image-ad-authoring`` ``build_concept`` result
+    (``{concept, prompt, offer_text?}``); extra keys are allowed so the author
+    can enrich a concept without a schema bump.
+    """
+
+    model_config = {"extra": "allow"}
+
+    concept: str = Field(..., min_length=1)
+    prompt: str = Field(..., min_length=1)
+    offer_text: str | None = None
+
+
 class BriefInput(BaseModel):
     """POST body for ``/work/pipeline/tools/brief``."""
 
     pipeline_id: str = Field(..., min_length=1)
     image_payload: BriefImagePayload
     notes: str | None = None
+    # The full N concept specs, persisted so ``/render`` (and the operator's
+    # codex render) can run ALL concepts deterministically in one pass without
+    # the operator re-supplying them per call. Optional for back-compat: a brief
+    # may be authored before the concepts exist; the render then falls back to
+    # whatever ``items`` the caller supplies.
+    concepts: list[ConceptSpec] | None = None
 
 
 # The briefs.payload CHECK constraint (migration 0001) requires the keys
@@ -609,6 +636,17 @@ async def author_brief(body: BriefInput) -> dict[str, Any]:
     # by the default. The manager still refines budget/service at the gate.
     if authored.get("service_type"):
         payload["service"] = authored["service_type"]
+    # Persist the full concept specs (when supplied) on the brief payload so the
+    # deterministic ideation render can fan out over them with no LLM in the
+    # loop. Stored under a dedicated `concepts` key so it never collides with
+    # the required market/offer_text/angles keys.
+    concept_specs: list[dict[str, Any]] = (
+        [c.model_dump(exclude_none=True) for c in body.concepts]
+        if body.concepts
+        else []
+    )
+    if concept_specs:
+        payload["concepts"] = concept_specs
     existing_brief_id = pipeline.get("image_brief_id")
 
     if existing_brief_id:
@@ -638,6 +676,10 @@ async def author_brief(body: BriefInput) -> dict[str, Any]:
         "image_payload": payload,
         "notes": body.notes,
     }
+    # Mirror the concept plan onto config_draft so the operator read surfaces it
+    # directly (the read returns config_draft) for the deterministic render.
+    if concept_specs:
+        merged_draft["concepts"] = concept_specs
     sb.table("pipelines").update(
         {"image_brief_id": brief_id, "config_draft": merged_draft}
     ).eq("id", body.pipeline_id).execute()
@@ -646,7 +688,11 @@ async def author_brief(body: BriefInput) -> dict[str, Any]:
         pipeline_id=body.pipeline_id,
         kind="brief_authored",
         stage="configuration",
-        payload={"brief_id": brief_id, "notes": body.notes},
+        payload={
+            "brief_id": brief_id,
+            "notes": body.notes,
+            "concept_count": len(concept_specs),
+        },
     )
 
     log.info(
@@ -673,11 +719,140 @@ class RenderItem(BaseModel):
 
 
 class RenderInput(BaseModel):
-    """POST body for ``/work/pipeline/tools/render``."""
+    """POST body for ``/work/pipeline/tools/render``.
+
+    ``items`` is OPTIONAL. When omitted (the deterministic path), the worker
+    resolves the items from the persisted brief/state itself: ``concept_preview``
+    renders ALL persisted concept specs; ``final`` renders one item per picked
+    creative, threading ``parent_creative_id``. This removes the operator (an
+    LLM) from the per-image loop — it triggers the stage render and the worker
+    fans out deterministically over the persisted plan.
+    """
 
     pipeline_id: str = Field(..., min_length=1)
     kind: Literal["concept_preview", "final"]
-    items: list[RenderItem] = Field(..., min_length=1)
+    items: list[RenderItem] | None = None
+
+
+def _persisted_concept_specs(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull the persisted concept specs authored at brief time.
+
+    The brief endpoint mirrors them onto ``config_draft.concepts`` (and the
+    brief payload). Prefer config_draft (the read surfaces it directly); fall
+    back to the linked brief payload's ``concepts`` for robustness.
+    """
+    config_draft = pipeline.get("config_draft")
+    if isinstance(config_draft, dict):
+        specs = config_draft.get("concepts")
+        if isinstance(specs, list) and specs:
+            return [s for s in specs if isinstance(s, dict)]
+        payload = config_draft.get("image_payload")
+        if isinstance(payload, dict):
+            specs = payload.get("concepts")
+            if isinstance(specs, list) and specs:
+                return [s for s in specs if isinstance(s, dict)]
+    brief_id = pipeline.get("image_brief_id")
+    if brief_id:
+        brief = _fetch_brief_for_read(str(brief_id))
+        if brief and isinstance(brief.get("payload"), dict):
+            specs = brief["payload"].get("concepts")
+            if isinstance(specs, list) and specs:
+                return [s for s in specs if isinstance(s, dict)]
+    return []
+
+
+def _already_rendered_concepts(brief_id: str, *, version_prefix: str) -> set[str]:
+    """Concept labels already stored at a given version (for idempotent resume).
+
+    A render that timed out partway leaves some concepts stored; resolving the
+    deterministic batch skips those so a retry completes the REMAINDER instead
+    of re-rendering — the exact production fix (pipeline stuck at 1/N concepts).
+    """
+    done: set[str] = set()
+    for row in _fetch_brief_creatives(brief_id):
+        version = str(row.get("version") or "")
+        if version.startswith(version_prefix):
+            concept = row.get("concept")
+            if concept:
+                done.add(str(concept))
+    return done
+
+
+def _resolve_render_items(
+    pipeline: dict[str, Any], kind: str, brief_id: str
+) -> tuple[list[RenderItem], list[str]]:
+    """Build the deterministic render batch from the persisted plan.
+
+    Returns ``(items, skipped)`` where ``skipped`` are concept labels already
+    rendered (so the caller can report a clean idempotent no-op vs. an empty
+    plan). For ``concept_preview`` the items are every persisted concept spec
+    not yet stored at ``v0.ideation``; for ``final`` they are one item per
+    picked creative (parent_creative_id threaded) not yet stored at ``v1``.
+    """
+    specs = _persisted_concept_specs(pipeline)
+    if kind == "concept_preview":
+        done = _already_rendered_concepts(brief_id, version_prefix="v0.ideation")
+        items: list[RenderItem] = []
+        skipped: list[str] = []
+        for spec in specs:
+            concept = str(spec.get("concept") or "").strip()
+            prompt = str(spec.get("prompt") or "").strip()
+            if not concept or not prompt:
+                continue
+            if concept in done:
+                skipped.append(concept)
+                continue
+            items.append(
+                RenderItem(
+                    concept=concept,
+                    prompt=prompt,
+                    offer_text=spec.get("offer_text"),
+                )
+            )
+        return items, skipped
+
+    # final: one item per pick, parent = the picked creative; recover the
+    # concept label + prompt from the picked creative and the persisted plan.
+    picks = pipeline.get("picks")
+    picked_ids = (
+        picks.get("image", []) if isinstance(picks, dict) else []
+    ) or []
+    specs_by_concept = {
+        str(s.get("concept")): s for s in specs if s.get("concept")
+    }
+    creatives = _fetch_brief_creatives(brief_id)
+    by_id = {str(r.get("id")): r for r in creatives}
+    done = _already_rendered_concepts(brief_id, version_prefix="v1")
+    items = []
+    skipped = []
+    for cid in picked_ids:
+        row = by_id.get(str(cid))
+        if not row:
+            continue
+        concept = str(row.get("concept") or "").strip()
+        if not concept:
+            continue
+        if concept in done:
+            skipped.append(concept)
+            continue
+        spec = specs_by_concept.get(concept)
+        prompt = (
+            str(spec.get("prompt")).strip()
+            if spec and spec.get("prompt")
+            else None
+        )
+        if not prompt:
+            # No persisted prompt for this pick — can't render deterministically.
+            continue
+        items.append(
+            RenderItem(
+                concept=concept,
+                prompt=prompt,
+                offer_text=(spec or {}).get("offer_text"),
+                parent_creative_id=str(cid),
+            )
+        )
+    return items, skipped
 
 
 async def _render_one(
@@ -833,8 +1008,27 @@ async def render(body: RenderInput) -> dict[str, Any]:
     params = _CONCEPT_PREVIEW if body.kind == "concept_preview" else _FINAL
     stage = params["stage"]
 
+    # Resolve the deterministic batch. When the caller supplies items we honour
+    # them (back-compat); when omitted we fan out over the PERSISTED plan so the
+    # operator never has to author/loop items at render time.
+    skipped: list[str] = []
+    if body.items is not None:
+        items = body.items
+    else:
+        items, skipped = _resolve_render_items(pipeline, body.kind, brief_id)
+        if not items:
+            # Nothing left to render: either the plan is empty or everything is
+            # already done (idempotent resume). Return cleanly, not a 4xx.
+            return {
+                "ok": True,
+                "renders": [],
+                "total_cost_usd": 0.0,
+                "errors": [],
+                "skipped": skipped,
+            }
+
     if body.kind == "final":
-        missing = [it.concept for it in body.items if not it.parent_creative_id]
+        missing = [it.concept for it in items if not it.parent_creative_id]
         if missing:
             raise HTTPException(
                 status_code=400,
@@ -859,7 +1053,7 @@ async def render(body: RenderInput) -> dict[str, Any]:
     # Serialize all Kie work for this brief behind the per-brief lock, same
     # as the existing producers. Different briefs can still interleave.
     async with queue.acquire(brief_id):
-        for item in body.items:
+        for item in items:
             for ratio in params["ratios"]:
                 try:
                     descriptor = await _render_one(
@@ -910,6 +1104,7 @@ async def render(body: RenderInput) -> dict[str, Any]:
         kind=body.kind,
         rendered=len(renders),
         errors=len(errors),
+        skipped=len(skipped),
         total_cost_usd=total_cost_usd,
     )
     return {
@@ -917,6 +1112,7 @@ async def render(body: RenderInput) -> dict[str, Any]:
         "renders": renders,
         "total_cost_usd": round(total_cost_usd, 4),
         "errors": errors,
+        "skipped": skipped,
     }
 
 
@@ -1196,6 +1392,7 @@ __all__ = [
     "router",
     "BriefInput",
     "BriefImagePayload",
+    "ConceptSpec",
     "RenderInput",
     "RenderItem",
     "StoreCreativeInput",

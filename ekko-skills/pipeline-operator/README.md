@@ -52,6 +52,36 @@ codex, against `api="openai-codex"`), and the same creative/iteration rows — s
 the dashboard, the auto-advance trigger, and the cost aggregator behave
 identically. Only the bill changes.
 
+## Deterministic render (the all-N-concepts contract)
+
+The operator authors all N concepts ONCE, at brief time, and persists them via
+`pipeline_operator_brief(pipeline_id, image_payload, concepts=[...])`. The
+worker stores the plan on the brief payload (`payload.concepts`) and mirrors it
+onto `config_draft.concepts`. The render then runs as a single DETERMINISTIC
+pass with **no items**:
+
+```python
+pipeline_operator_brief(pipeline_id, payload, concepts=[...])     # persist plan
+pipeline_operator_render(pipeline_id, "concept_preview")          # render ALL N
+```
+
+- `pipeline_operator_render(pipeline_id, kind)` with `items=None` reads the
+  persisted plan and renders **every** concept (`concept_preview`) or **one
+  final per pick** (`final`, `parent_creative_id` threaded automatically) in one
+  pass — the LLM is never in the per-image loop and never re-authors prompts at
+  render time, so a slow render can't collapse to "only one concept landed".
+- It is **idempotent / resumable**: concepts already rendered (by version
+  prefix — `v0.ideation` for previews, `v1` for finals) are skipped and reported
+  in the result's `skipped` list, so a retry after an interruption renders only
+  the remainder. This is the fix for pipelines that got stuck at 1/N concepts.
+- The Kie backend resolves the same persisted plan worker-side
+  (`POST /work/pipeline/tools/render` with no `items`).
+- Passing explicit `items` still works (back-compat / one-off / prompt refine).
+
+The worker's `RenderItem.items` is optional; `BriefInput.concepts` is optional
+(a brief may be authored before the concepts exist, then the render falls back
+to whatever `items` the caller supplies).
+
 **True 9:16:** finals' 9:16 renders are a TRUE 9:16 (864x1536), not 2:3. The
 codex renderer calls the plugin's lower-level helper with an explicit pixel
 `size="864x1536"` (gpt-image-2 supports up to 3:1; the Codex backend honors the

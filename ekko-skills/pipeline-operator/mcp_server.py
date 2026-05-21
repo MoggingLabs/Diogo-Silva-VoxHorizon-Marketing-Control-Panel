@@ -91,19 +91,31 @@ def pipeline_operator_brief(
     pipeline_id: str,
     image_payload: dict[str, Any],
     notes: Optional[str] = None,
+    concepts: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Author or upsert the image brief for the pipeline.
 
     Use this in the ``configuration`` stage to record the brief the manager
     will review. ``image_payload`` must carry ``market``, ``offer_text``, and
-    ``angles`` (build it with the ``image-ad-authoring`` skill). This is a free
-    Supabase write — no paid API — so it is not spend-gated; the manager
-    reviews the brief via the dashboard stage gate. Returns ``{ok, brief_id}``.
+    ``angles`` (build it with the ``image-ad-authoring`` skill).
+
+    PASS ``concepts`` — the full set of N concept specs (each
+    ``{concept, prompt, offer_text?}`` from ``build_concept``) — so the brief
+    PERSISTS the whole concept plan. That lets the ideation render run as a
+    single deterministic, worker-driven pass over the stored plan: you then call
+    ``pipeline_operator_render(pipeline_id, "concept_preview")`` with NO items
+    and the worker renders ALL persisted concepts at once, with no LLM in the
+    per-image loop. Author all N concepts up front and pass them here.
+
+    This is a free Supabase write — no paid API — so it is not spend-gated; the
+    manager reviews the brief via the dashboard stage gate. Returns
+    ``{ok, brief_id}``.
     """
     return helper.pipeline_operator_brief(
         pipeline_id=pipeline_id,
         image_payload=image_payload,
         notes=notes,
+        concepts=concepts,
     )
 
 
@@ -111,22 +123,33 @@ def pipeline_operator_brief(
 def pipeline_operator_render(
     pipeline_id: str,
     kind: str,
-    items: list[dict[str, Any]],
+    items: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Render a batch of concepts or finals — THE SPEND-GATED TOOL.
+    """Render a stage's images in ONE deterministic pass — THE SPEND-GATED TOOL.
 
-    Use ``kind="concept_preview"`` in the ``ideation`` stage (send ALL concepts
-    in ONE call so the manager approves the batch once) and ``kind="final"`` in
-    the ``generation`` stage (each item needs ``parent_creative_id``, the picked
-    concept it derives from; 9:16 finals come back as a true 864x1536).
+    PREFERRED: OMIT ``items``. The worker then renders the PERSISTED plan —
+    every concept spec you stored via ``pipeline_operator_brief(concepts=...)``
+    for ``kind="concept_preview"``, or one final per pick for ``kind="final"`` —
+    ALL in one pass. You just trigger the stage; you do NOT author or loop items
+    at render time, so a slow render can never collapse to "only one concept
+    landed". A retried render resumes the remainder (already-rendered concepts
+    are skipped). This is the path the SKILL prescribes.
+
+    Legacy: pass ``items`` (``{concept, prompt, offer_text?,
+    parent_creative_id?}``) to render exactly those — kept for back-compat.
+
+    Use ``kind="concept_preview"`` in the ``ideation`` stage and ``kind="final"``
+    in the ``generation`` stage (finals need ``parent_creative_id``; the
+    deterministic path threads it from the picks; 9:16 finals come back as a true
+    864x1536).
 
     The backend is chosen by the operator container's ``RENDER_BACKEND`` env: by
     default (``openai-codex``) the image is generated in-container on the
     manager's ChatGPT/Codex subscription ($0) and uploaded to the worker;
     ``kie`` restores the legacy paid path. Either way the approval plugin gates
     this call by name — the manager approves in the dashboard before any render
-    runs. Returns ``{ok, renders, total_cost_usd, errors}`` (``total_cost_usd``
-    is 0 on the codex backend).
+    runs. Returns ``{ok, renders, total_cost_usd, errors, skipped}``
+    (``total_cost_usd`` is 0 on the codex backend).
     """
     return helper.pipeline_operator_render(
         pipeline_id=pipeline_id,

@@ -247,14 +247,24 @@ def pipeline_operator_brief(
     pipeline_id: str,
     image_payload: dict[str, Any],
     notes: Optional[str] = None,
+    concepts: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Author / upsert the image brief for the pipeline.
 
     Calls ``POST {WORKER_BASE_URL}/work/pipeline/tools/brief`` with
-    ``{pipeline_id, image_payload, notes?}``. ``image_payload`` must carry the
-    worker-required keys ``market``, ``offer_text``, ``angles`` — build it with
-    the ``image-ad-authoring`` skill's ``build_image_brief`` so it is valid
-    before it leaves the agent.
+    ``{pipeline_id, image_payload, notes?, concepts?}``. ``image_payload`` must
+    carry the worker-required keys ``market``, ``offer_text``, ``angles`` —
+    build it with the ``image-ad-authoring`` skill's ``build_image_brief`` so it
+    is valid before it leaves the agent.
+
+    ``concepts`` is the full set of N concept specs (each
+    ``{concept, prompt, offer_text?}`` — build them with ``build_concept`` and
+    ``assert_distinct_concepts``). Persisting them HERE, at brief time, is what
+    lets the ideation render run as a single DETERMINISTIC, worker-driven pass
+    over the stored plan: ``pipeline_operator_render(pipeline_id, "concept_preview")``
+    then renders ALL persisted concepts with no LLM in the per-image loop, and a
+    retried render resumes the remainder instead of re-authoring. Author every
+    concept up front and pass them all here.
 
     This is a free database write (no paid API), so the operator policy does
     not gate it for spend; the manager reviews the brief through the dashboard
@@ -279,7 +289,50 @@ def pipeline_operator_brief(
         if not isinstance(notes, str):
             raise PipelineOperatorError("notes must be a string or None")
         body["notes"] = notes
+    if concepts is not None:
+        body["concepts"] = _normalize_concept_specs(concepts)
     return _request("POST", f"{_TOOLS_PREFIX}/brief", json_body=body)
+
+
+def _normalize_concept_specs(
+    concepts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Validate + normalize the persisted concept specs for the brief body.
+
+    Each must be ``{concept, prompt}`` (+ optional ``offer_text`` /
+    ``parent_creative_id`` passthrough). Mirrors the per-item validation in
+    :func:`pipeline_operator_render` so a malformed plan fails loudly at brief
+    time rather than producing a broken deterministic render later.
+    """
+    if not isinstance(concepts, list) or not concepts:
+        raise PipelineOperatorError("concepts must be a non-empty list")
+    out: list[dict[str, Any]] = []
+    for idx, spec in enumerate(concepts):
+        if not isinstance(spec, dict):
+            raise PipelineOperatorError(f"concepts[{idx}] must be a dict")
+        concept = spec.get("concept")
+        prompt = spec.get("prompt")
+        if not isinstance(concept, str) or not concept.strip():
+            raise PipelineOperatorError(
+                f"concepts[{idx}].concept must be a non-empty string"
+            )
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise PipelineOperatorError(
+                f"concepts[{idx}].prompt must be a non-empty string"
+            )
+        norm: dict[str, Any] = {
+            "concept": concept.strip(),
+            "prompt": prompt.strip(),
+        }
+        offer_text = spec.get("offer_text")
+        if offer_text is not None:
+            if not isinstance(offer_text, str):
+                raise PipelineOperatorError(
+                    f"concepts[{idx}].offer_text must be a string"
+                )
+            norm["offer_text"] = offer_text
+        out.append(norm)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -291,19 +344,30 @@ def pipeline_operator_render(
     *,
     pipeline_id: str,
     kind: str,
-    items: list[dict[str, Any]],
+    items: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Render a batch of concepts — THE SPEND-GATED TOOL.
+    """Render a stage's images in ONE deterministic pass — THE SPEND-GATED TOOL.
 
-    Each item is ``{concept, prompt, offer_text?, parent_creative_id?}`` (build
-    them with the ``image-ad-authoring`` skill).
+    **Preferred (deterministic) usage: omit ``items``.** The worker/helper then
+    fans out over the PERSISTED plan — every concept spec authored at brief time
+    (``concept_preview``) or one final per pick (``final``) — and renders ALL of
+    them in a single pass. The operator just triggers the stage; it does NOT
+    author or loop items at render time, so a slow render can never collapse to
+    "only one concept landed". A retried render resumes the remainder
+    idempotently (already-rendered concepts are skipped). This is the path the
+    SKILL prescribes — persist all N concepts via ``pipeline_operator_brief`` and
+    then call ``pipeline_operator_render(pipeline_id, kind)``.
 
-    * ``kind="concept_preview"`` renders 1:1 previews (ideation). Send ALL
-      concepts in ONE call so the manager sees a single approval for the whole
-      ideation batch.
+    Legacy / explicit usage: pass ``items`` (``{concept, prompt, offer_text?,
+    parent_creative_id?}``) to render exactly those. Kept for back-compat and
+    one-off renders.
+
+    * ``kind="concept_preview"`` renders 1:1 previews (ideation). The
+      deterministic path renders ALL persisted concepts in one approval.
     * ``kind="final"`` renders 1:1 + 9:16 finals (generation). Each item MUST
-      carry ``parent_creative_id`` (the picked concept it derives from). 9:16 is
-      a TRUE 9:16 (864x1536) on the codex backend.
+      carry ``parent_creative_id`` (the picked concept it derives from); the
+      deterministic path threads it from the picks automatically. 9:16 is a TRUE
+      9:16 (864x1536) on the codex backend.
 
     **Backend (env ``RENDER_BACKEND``, default ``openai-codex``):**
 
@@ -334,6 +398,27 @@ def pipeline_operator_render(
         raise PipelineOperatorError(
             f"kind must be one of {sorted(RENDER_KINDS)}, got {kind!r}"
         )
+
+    backend = _resolve_render_backend()
+
+    # Deterministic path: no items supplied → render the persisted plan.
+    if items is None:
+        if backend == BACKEND_KIE:
+            # The worker resolves the persisted plan itself for the Kie path.
+            body = {"pipeline_id": pid, "kind": kind}
+            return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
+        resolved = _resolve_deterministic_items(pid, kind)
+        if not resolved:
+            # Nothing to render — empty plan or everything already done.
+            return {
+                "ok": True,
+                "renders": [],
+                "total_cost_usd": 0,
+                "errors": [],
+                "skipped": [],
+            }
+        return _render_via_codex(pipeline_id=pid, kind=kind, items=resolved)
+
     if not isinstance(items, list) or not items:
         raise PipelineOperatorError("items must be a non-empty list")
 
@@ -380,11 +465,115 @@ def pipeline_operator_render(
             out["parent_creative_id"] = parent
         normalized.append(out)
 
-    backend = _resolve_render_backend()
     if backend == BACKEND_KIE:
         body = {"pipeline_id": pid, "kind": kind, "items": normalized}
         return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
     return _render_via_codex(pipeline_id=pid, kind=kind, items=normalized)
+
+
+def _resolve_deterministic_items(
+    pipeline_id: str, kind: str
+) -> list[dict[str, Any]]:
+    """Build the codex render batch from the PERSISTED plan (no items supplied).
+
+    Reads pipeline state and, for ``concept_preview``, returns every persisted
+    concept spec not yet stored at ``v0.ideation``; for ``final``, returns one
+    item per picked creative (``parent_creative_id`` threaded) not yet stored at
+    ``v1``. The already-rendered skip makes a retried render resume the
+    remainder — the exact fix for a pipeline stuck at 1/N concepts.
+
+    This keeps the LLM out of the per-image loop entirely: the operator triggers
+    the stage, and the deterministic plan comes from the brief it already
+    authored, not from prompts re-held across a long synchronous render.
+    """
+    state = pipeline_operator_read(pipeline_id)
+    specs = _persisted_concepts_from_state(state)
+
+    if kind == "concept_preview":
+        done = {
+            c.get("concept")
+            for c in (state.get("concepts") or [])
+            if isinstance(c, dict) and c.get("concept")
+        }
+        out: list[dict[str, Any]] = []
+        for spec in specs:
+            concept = str(spec.get("concept") or "").strip()
+            prompt = str(spec.get("prompt") or "").strip()
+            if not concept or not prompt or concept in done:
+                continue
+            item: dict[str, Any] = {"concept": concept, "prompt": prompt}
+            if spec.get("offer_text"):
+                item["offer_text"] = spec["offer_text"]
+            out.append(item)
+        return out
+
+    # final: one item per pick; recover concept + prompt from the picked
+    # creative and the persisted plan, thread parent_creative_id.
+    picks = state.get("picks")
+    picked_ids = (picks.get("image", []) if isinstance(picks, dict) else []) or []
+    specs_by_concept = {
+        str(s.get("concept")): s for s in specs if s.get("concept")
+    }
+    by_id = {
+        c.get("creative_id"): c
+        for c in (state.get("concepts") or [])
+        if isinstance(c, dict)
+    }
+    done = {
+        f.get("concept")
+        for f in (state.get("finals") or [])
+        if isinstance(f, dict) and f.get("concept")
+    }
+    out = []
+    for cid in picked_ids:
+        row = by_id.get(cid)
+        if not isinstance(row, dict):
+            continue
+        concept = str(row.get("concept") or "").strip()
+        if not concept or concept in done:
+            continue
+        spec = specs_by_concept.get(concept)
+        prompt = (
+            str(spec.get("prompt")).strip()
+            if spec and spec.get("prompt")
+            else None
+        )
+        if not prompt:
+            continue
+        item = {
+            "concept": concept,
+            "prompt": prompt,
+            "parent_creative_id": str(cid),
+        }
+        if spec and spec.get("offer_text"):
+            item["offer_text"] = spec["offer_text"]
+        out.append(item)
+    return out
+
+
+def _persisted_concepts_from_state(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Pull the persisted concept specs out of a pipeline read response.
+
+    The brief endpoint mirrors them onto ``config_draft.concepts`` (and the
+    brief payload's ``concepts`` key); prefer config_draft, fall back to the
+    brief payload.
+    """
+    config_draft = state.get("config_draft")
+    if isinstance(config_draft, dict):
+        specs = config_draft.get("concepts")
+        if isinstance(specs, list) and specs:
+            return [s for s in specs if isinstance(s, dict)]
+        payload = config_draft.get("image_payload")
+        if isinstance(payload, dict):
+            specs = payload.get("concepts")
+            if isinstance(specs, list) and specs:
+                return [s for s in specs if isinstance(s, dict)]
+    brief = state.get("brief")
+    if isinstance(brief, dict) and isinstance(brief.get("payload"), dict):
+        specs = brief["payload"].get("concepts")
+        if isinstance(specs, list) and specs:
+            return [s for s in specs if isinstance(s, dict)]
+    return []
 
 
 # ---------------------------------------------------------------------------
