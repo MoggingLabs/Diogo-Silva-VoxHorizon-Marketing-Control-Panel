@@ -440,7 +440,15 @@ def test_read_enriches_compact_client_block(
         "service_type": "roofing",
         "brand_colors": {"primary": "#0a3d62"},
     }
-    tools_sb.client_profile_row = {"client_id": "c-1", "tone": "warm, expert"}
+    tools_sb.client_profile_row = {
+        "client_id": "c-1",
+        "tone": "warm, expert",
+        "targeting": "Within 150 miles from ZIP 91405",
+        "targeting_address": "14431 Valerio Street #203, Van Nuys, CA 91405",
+        "targeting_zip": "91405",
+        "targeting_radius_miles": 150,
+        "targeting_type": "radius",
+    }
     tools_sb.client_offers_rows = [
         {"client_id": "c-1", "offer_text": "$99 inspection", "active": True, "sort_order": 0},
         {"client_id": "c-1", "offer_text": "free quote", "active": False, "sort_order": 1},
@@ -475,6 +483,14 @@ def test_read_enriches_compact_client_block(
         "4.9 stars",
         "lifetime warranty",
     ]
+    # Structured geo-targeting block rides along on the compact read.
+    assert block["targeting"] == {
+        "address": "14431 Valerio Street #203, Van Nuys, CA 91405",
+        "zip": "91405",
+        "radius_miles": 150,
+        "type": "radius",
+        "description": "Within 150 miles from ZIP 91405",
+    }
 
 
 # ===========================================================================
@@ -513,6 +529,11 @@ def test_client_read_returns_full_shape(
         "warranty": "lifetime workmanship",
         "primary_city": "Austin",
         "state": "TX",
+        "targeting": "Within 150 miles from ZIP 91405",
+        "targeting_address": "14431 Valerio Street #203, Van Nuys, CA 91405",
+        "targeting_zip": "91405",
+        "targeting_radius_miles": 150,
+        "targeting_type": "radius",
         "needs_input": [],
         "raw_profile": {"source": "file"},
     }
@@ -563,6 +584,14 @@ def test_client_read_returns_full_shape(
     assert body["profile"]["years_in_business"] == 25
     assert body["profile"]["google_rating"] == 4.9
     assert body["profile"]["raw_profile"] == {"source": "file"}
+    # Clean structured geo-targeting block (description = the free-text prose).
+    assert body["targeting"] == {
+        "address": "14431 Valerio Street #203, Van Nuys, CA 91405",
+        "zip": "91405",
+        "radius_miles": 150,
+        "type": "radius",
+        "description": "Within 150 miles from ZIP 91405",
+    }
     # Offers carry offer_text + active (all of them, active flag preserved).
     assert body["offers"] == [
         {"offer_text": "$99 roof inspection", "active": True},
@@ -612,6 +641,8 @@ def test_client_read_null_profile_and_empty_children(
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["profile"] is None
+    # No profile row -> no structured targeting block.
+    assert body["targeting"] is None
     assert body["offers"] == []
     assert body["offer_constraints"] == []
     assert body["services"] == []
