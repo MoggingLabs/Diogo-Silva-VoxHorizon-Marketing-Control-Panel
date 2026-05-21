@@ -122,6 +122,10 @@ COLUMN_TO_PATH = {
     "primary_zip": "location.primary_zip",
     "targeting": "location.targeting",
     "targeting_detail": "location.targeting_detail",
+    # Structured targeting (migration 0013) round-trips into a dedicated
+    # `targeting` object (address/zip/radius_miles/type) so DB-canonical edits
+    # propagate to the files without colliding with the free-text
+    # `location.targeting` prose. See COLUMN_TO_TARGETING below.
     "timezone": "location.timezone",
     "crm": "lead_handling.crm",
     "integration": "lead_handling.integration",
@@ -147,6 +151,20 @@ COLUMN_TO_PATH = {
 }
 
 
+# Structured geo-targeting (migration 0013) -> a dedicated top-level
+# ``targeting`` object so the operator + geo automation read it cleanly.
+# ``type`` mirrors ``campaign.targeting_type`` (already overlaid via
+# COLUMN_TO_PATH) and ``description`` mirrors the free-text
+# ``location.targeting`` prose, so the block is self-describing in the file.
+COLUMN_TO_TARGETING = {
+    "targeting_address": "address",
+    "targeting_zip": "zip",
+    "targeting_radius_miles": "radius_miles",
+    "targeting_type": "type",
+    "targeting": "description",
+}
+
+
 def reconstruct(client, profile_row, children):
     """Rebuild a single client's nested JSON. DB edits overlay raw_profile."""
     raw = profile_row.get("raw_profile") or {}
@@ -167,6 +185,16 @@ def reconstruct(client, profile_row, children):
     # overlay every normalized profile column at its dotted path
     for col, path in COLUMN_TO_PATH.items():
         _set(out, path, profile_row.get(col))
+
+    # structured targeting object (0013): build only the keys that are set so
+    # an all-null profile doesn't leave an empty `targeting` block behind.
+    targeting_obj = {}
+    for col, key in COLUMN_TO_TARGETING.items():
+        value = profile_row.get(col)
+        if value is not None:
+            targeting_obj[key] = value
+    if targeting_obj:
+        out["targeting"] = targeting_obj
 
     # top-level snapshot fields
     _set(out, "monthly_budget", profile_row.get("monthly_budget"))

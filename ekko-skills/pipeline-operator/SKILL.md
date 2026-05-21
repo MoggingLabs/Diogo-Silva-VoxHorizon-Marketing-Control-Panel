@@ -125,6 +125,7 @@ It returns (allowlisted, no spend):
   profile: { tone, tagline, voice_note, years_in_business, google_reviews,
              google_rating, warranty, financing, city, state, primary_city,
              targeting, targeting_detail, business_hours, ... } | null,
+  targeting: { address, zip, radius_miles, type, description } | null,
   offers:           [{offer_text, active}],
   offer_constraints:["do-not-say rule", ...],
   services:         ["service name", ...],
@@ -151,7 +152,15 @@ It returns (allowlisted, no spend):
   reviews"). Only use proof that is actually present in the profile.
 - **Locale/targeting** — use `city` / `state` / `primary_city` and
   `targeting` / `targeting_detail` so the setting, market wording, and audience
-  reflect the client's real service area, not a stock location.
+  reflect the client's real service area, not a stock location. When the
+  structured `targeting` block is present (`{address, zip, radius_miles, type,
+  description}`), pass it through to `image-ad-authoring`: the ad's
+  `setting`/locale should reflect the targeted area — anchor it to the
+  address/zip city, and let `radius_miles` set how broad the geo framing feels
+  (a tight radius reads as one neighborhood; a wide radius as a whole
+  metro/region). When `radius_miles` is null (a gap, tracked in needs_input),
+  don't invent a distance — frame from the `description` prose and the
+  city/state instead.
 
 If `client` is null (no client linked), author from `config_draft` + the
 dispatch instruction as before. If `pipeline_operator_client_read` 404s,

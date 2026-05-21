@@ -21,12 +21,65 @@ See scripts/clients/README.md for the exact, safe invocation.
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
 
 NEEDS_INPUT = "NEEDS_INPUT"
+
+# A US ZIP is 5 digits (we ignore the optional +4). Used to pull a ZIP out of a
+# free-text address when no explicit primary_zip is present.
+_ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+# Geo-targeting radius phrasings seen in the source targeting prose, e.g.
+# "150 miles", "150-mile radius", "within 150 mi", "150mi". We capture the
+# leading number (int or decimal) and require a miles unit so a stray "150"
+# (e.g. a street number) is never mistaken for a radius.
+_RADIUS_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*-?\s*(?:miles?|mi)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_zip(*values):
+    """Return a 5-digit ZIP found across ``values`` (else None).
+
+    Each value may be a plain string (e.g. ``location.primary_zip`` or a full
+    address). Values are tried in order, so an explicit primary_zip wins over a
+    ZIP buried in an address. Within a single value we take the LAST 5-digit
+    match — in a US address the ZIP trails the city/state, so this avoids
+    grabbing a leading street number (e.g. "14431 Valerio St ... 91405" -> the
+    ZIP is 91405, not 14431). A trailing ``+4`` is ignored and leading zeros
+    are preserved (the ZIP is returned as a string).
+    """
+    for v in values:
+        if not v:
+            continue
+        matches = _ZIP_RE.findall(str(v))
+        if matches:
+            return matches[-1]
+    return None
+
+
+def parse_radius_miles(*values):
+    """Return the first radius-in-miles number parsed from ``values`` (else None).
+
+    Scans free-text targeting strings for patterns like "150 miles",
+    "150-mile radius", "within 150 mi". Returns a float (e.g. 150.0) or None
+    when no value carries an explicit miles radius — most clients have none.
+    """
+    for v in values:
+        if not v:
+            continue
+        m = _RADIUS_RE.search(str(v))
+        if m:
+            try:
+                return float(m.group(1))
+            except ValueError:
+                continue
+    return None
 
 # ---------------------------------------------------------------------------
 # service_type derivation
@@ -272,6 +325,35 @@ def build_profile_row(client_id, profile, col):
         if k.startswith("warranty_") and not _is_needs_input(v):
             warranty_details[k[len("warranty_"):]] = v
 
+    # Structured geo-targeting (migration 0013). Capture address + zip +
+    # radius_miles as discrete columns so the operator + geo automation use
+    # them cleanly instead of re-parsing the free-text `targeting` prose.
+    # `col.text` already records a NEEDS_INPUT path + returns None for the
+    # sentinel; for the derived fields we record the natural source path when
+    # the value ends up NULL so the gap is tracked in needs_input.
+    targeting_address = col.text("location.address")
+    if targeting_address is None and "location.address" not in col.needs_input:
+        col.needs_input.append("location.address")
+
+    targeting_zip = col.text("location.primary_zip")
+    if targeting_zip is None:
+        # Fall back to a 5-digit ZIP parsed out of the (raw) address.
+        targeting_zip = parse_zip(col.get("location.address"))
+    if targeting_zip is None and "location.primary_zip" not in col.needs_input:
+        col.needs_input.append("location.primary_zip")
+
+    targeting_radius_miles = parse_radius_miles(
+        col.get("location.targeting"),
+        col.get("location.targeting_detail"),
+        col.get("campaign.targeting_detail"),
+        col.get("campaign.targeting_type"),
+    )
+    if (
+        targeting_radius_miles is None
+        and "targeting_radius_miles" not in col.needs_input
+    ):
+        col.needs_input.append("targeting_radius_miles")
+
     row = {
         "client_id": client_id,
         # brand / voice
@@ -325,6 +407,10 @@ def build_profile_row(client_id, profile, col):
         "primary_zip": col.text("location.primary_zip"),
         "targeting": col.text("location.targeting"),
         "targeting_detail": col.text("location.targeting_detail"),
+        # structured targeting (0013): derived above, gaps tracked in needs_input
+        "targeting_address": targeting_address,
+        "targeting_zip": targeting_zip,
+        "targeting_radius_miles": targeting_radius_miles,
         "timezone": col.text("location.timezone"),
         # lead handling
         "crm": col.text("lead_handling.crm"),

@@ -15,9 +15,9 @@ Endpoints (all bearer-authed via :func:`verify_secret`):
       renders, and the tail of the event timeline so the agent can decide
       what to do next. When the pipeline is linked to a client, a compact
       ``client`` block (name, service_type, offers, offer_constraints, tone,
-      a few USPs) rides along so the operator gets brand + offers +
-      do-not-say on the first read; the FULL profile stays behind
-      ``/work/client/{id}``.
+      a few USPs, plus the structured ``targeting`` block) rides along so the
+      operator gets brand + offers + do-not-say + the targeted area on the
+      first read; the FULL profile stays behind ``/work/client/{id}``.
 
   GET  /work/client/{client_id}
       Operator CLIENT-CONTEXT path. Returns the client's brand / company /
@@ -248,6 +248,26 @@ async def read_pipeline_tools(pipeline_id: str) -> dict[str, Any]:
 _COMPACT_USP_LIMIT = 3
 
 
+def _targeting_block(profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Project the structured geo-targeting (migration 0013) into a clean block.
+
+    Returns ``{address, zip, radius_miles, type, description}`` where
+    ``description`` is the existing free-text ``targeting`` prose. Returns None
+    when the profile is missing so the route can fold it into the response as
+    ``targeting: null`` rather than emit an all-null object. Individual keys
+    stay None when the underlying gap is unfilled (tracked in needs_input).
+    """
+    if not isinstance(profile, dict):
+        return None
+    return {
+        "address": profile.get("targeting_address"),
+        "zip": profile.get("targeting_zip"),
+        "radius_miles": profile.get("targeting_radius_miles"),
+        "type": profile.get("targeting_type"),
+        "description": profile.get("targeting"),
+    }
+
+
 def _fetch_client_row(client_id: str) -> dict[str, Any] | None:
     """Pull the identity columns off ``clients``, or None if missing.
 
@@ -420,6 +440,9 @@ def _fetch_client_compact(client_id: str) -> dict[str, Any] | None:
         "offers": _fetch_client_offers(client_id),
         "offer_constraints": _fetch_client_offer_constraints(client_id),
         "top_usps": value_props["usps"][:_COMPACT_USP_LIMIT],
+        # Structured geo-targeting so the operator can frame the ad's setting to
+        # the targeted area (zip + radius reach) on its first read.
+        "targeting": _targeting_block(profile),
     }
 
 
@@ -439,13 +462,17 @@ async def read_client(client_id: str) -> dict[str, Any]:
             status_code=404, detail=f"client not found: {client_id}"
         )
 
+    profile = _fetch_client_profile(client_id)
     return {
         "client_id": client_row.get("id"),
         "slug": client_row.get("slug"),
         "name": client_row.get("name"),
         "service_type": client_row.get("service_type"),
         "brand_colors": client_row.get("brand_colors"),
-        "profile": _fetch_client_profile(client_id),
+        "profile": profile,
+        # Clean structured geo-targeting block ({address, zip, radius_miles,
+        # type, description}); the full typed values also live on `profile`.
+        "targeting": _targeting_block(profile),
         "offers": _fetch_client_offers(client_id),
         "offer_constraints": _fetch_client_offer_constraints(client_id),
         "services": _fetch_client_services(client_id),

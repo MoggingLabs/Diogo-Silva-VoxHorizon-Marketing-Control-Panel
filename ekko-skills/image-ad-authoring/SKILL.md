@@ -101,6 +101,17 @@ props). When it does, author from it instead of generic assumptions:
   market (`city` / `state` / `primary_city`, `targeting_detail`) — the mood,
   wording, and the house style of the shot should sound and look like _this_
   client in _their_ service area, not stock.
+- **Targeted area** — when the client context carries a structured `targeting`
+  block (`{address, zip, radius_miles, type, description}`), let the ad's
+  `setting`/locale reflect the targeted area: anchor the shot to the
+  address/zip city, and let `radius_miles` set how broad the geo framing
+  should feel. A tight radius (e.g. ~10-25 mi) reads like one neighborhood —
+  a specific local street, a recognizable nearby home style; a wide radius
+  (e.g. 150 mi) covers a whole metro/region, so keep the setting
+  regionally typical rather than hyper-local. When `radius_miles` is null
+  (a gap), don't invent a distance — fall back to the `description` prose and
+  the city/state cues. This is judgment you bake into the `setting` text you
+  author directly; there is nothing to run.
 - **Proof points** back the `social_proof` and `authority` angles: pull
   `years_in_business`, google reviews / rating, `warranty`, licensed/insured,
   family-owned, project counts from the profile — but only claim proof that is
