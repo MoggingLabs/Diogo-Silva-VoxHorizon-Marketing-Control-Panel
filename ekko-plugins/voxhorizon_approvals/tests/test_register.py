@@ -76,7 +76,7 @@ def _register_with_mock(
 
     # Swap the auto-built client with one wired to a mock transport.
     transport = httpx.MockTransport(handler)
-    http = httpx.AsyncClient(transport=transport)
+    http = httpx.Client(transport=transport)
     mock_client = ApprovalClient(
         worker_url="http://worker.test:8000",
         token="test-token",
@@ -125,8 +125,7 @@ def test_register_only_wires_one_hook(env: None) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_allowlisted_tool_is_passthrough(
+def test_allowlisted_tool_is_passthrough(
     env: None, audit_path: Path
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -135,7 +134,7 @@ async def test_allowlisted_tool_is_passthrough(
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook("read_file", {"path": "/etc/hosts"}, "task-1")
+    result = hook("read_file", {"path": "/etc/hosts"}, "task-1")
     assert result is None
 
     # Audit row should be present with decision=allow.
@@ -149,13 +148,12 @@ async def test_allowlisted_tool_is_passthrough(
     assert "latency_ms" in rows[0]
 
 
-@pytest.mark.asyncio
-async def test_safe_shell_command_is_passthrough(env: None) -> None:
+def test_safe_shell_command_is_passthrough(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("safe shell must not reach the worker")
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "shell_command",
         {"command": "git status"},
         "task-1",
@@ -164,8 +162,7 @@ async def test_safe_shell_command_is_passthrough(env: None) -> None:
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_operator_approves_is_passthrough_and_caches(
+def test_operator_approves_is_passthrough_and_caches(
     env: None, audit_path: Path
 ) -> None:
     calls = {"count": 0}
@@ -179,7 +176,7 @@ async def test_operator_approves_is_passthrough_and_caches(
     _ctx, hook, client = _register_with_mock(handler)
 
     # First call hits the worker.
-    result1 = await hook(
+    result1 = hook(
         "kie_generate",
         {"prompt": "x"},
         "task-1",
@@ -190,7 +187,7 @@ async def test_operator_approves_is_passthrough_and_caches(
     assert calls["count"] == 1
 
     # Second identical call hits the cache.
-    result2 = await hook(
+    result2 = hook(
         "kie_generate",
         {"prompt": "x"},
         "task-2",
@@ -215,8 +212,7 @@ async def test_operator_approves_is_passthrough_and_caches(
     assert "cached" in rows[1]["reason"]
 
 
-@pytest.mark.asyncio
-async def test_operator_rejects_returns_block(
+def test_operator_rejects_returns_block(
     env: None, audit_path: Path
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -225,7 +221,7 @@ async def test_operator_rejects_returns_block(
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -245,15 +241,14 @@ async def test_operator_rejects_returns_block(
     assert "spend cap" in rows[0]["reason"]
 
 
-@pytest.mark.asyncio
-async def test_operator_rejects_without_notes(env: None) -> None:
+def test_operator_rejects_without_notes(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "rejected", "notes": None}
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "send_email", {"to": "x"}, "task-1", session_id="sess-1"
     )
     assert result is not None
@@ -261,15 +256,14 @@ async def test_operator_rejects_without_notes(env: None) -> None:
     assert "no reason given" in result["message"]
 
 
-@pytest.mark.asyncio
-async def test_worker_unreachable_fails_closed(
+def test_worker_unreachable_fails_closed(
     env: None, audit_path: Path
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("dns failure", request=request)
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -288,8 +282,7 @@ async def test_worker_unreachable_fails_closed(
     assert "plugin error" in rows[0]["reason"]
 
 
-@pytest.mark.asyncio
-async def test_destructive_shell_asks_operator(env: None) -> None:
+def test_destructive_shell_asks_operator(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         # rm -rf goes through the operator even if shell_command is wired.
         return httpx.Response(
@@ -297,7 +290,7 @@ async def test_destructive_shell_asks_operator(env: None) -> None:
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "shell_command",
         {"command": "rm -rf /opt"},
         "task-1",
@@ -307,8 +300,7 @@ async def test_destructive_shell_asks_operator(env: None) -> None:
     assert result["action"] == "block"
 
 
-@pytest.mark.asyncio
-async def test_unknown_tool_asks_operator(env: None) -> None:
+def test_unknown_tool_asks_operator(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -316,7 +308,7 @@ async def test_unknown_tool_asks_operator(env: None) -> None:
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "totally_made_up_tool",
         {"foo": "bar"},
         "task-1",
@@ -325,8 +317,7 @@ async def test_unknown_tool_asks_operator(env: None) -> None:
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_approved_with_caveat_is_passthrough(env: None) -> None:
+def test_approved_with_caveat_is_passthrough(env: None) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -337,7 +328,7 @@ async def test_approved_with_caveat_is_passthrough(env: None) -> None:
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         "kie_generate",
         {"prompt": "ok"},
         "task-1",
@@ -346,8 +337,7 @@ async def test_approved_with_caveat_is_passthrough(env: None) -> None:
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_kwargs_fallback_to_task_id(env: None) -> None:
+def test_kwargs_fallback_to_task_id(env: None) -> None:
     """When session_id/tool_call_id aren't passed, the hook falls back."""
     captured: dict = {}
 
@@ -358,13 +348,12 @@ async def test_kwargs_fallback_to_task_id(env: None) -> None:
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    await hook("kie_generate", {}, "task-99")
+    hook("kie_generate", {}, "task-99")
     assert captured["body"]["ekko_session_id"] == "default"
     assert captured["body"]["ekko_tool_call_id"] == "task-99"
 
 
-@pytest.mark.asyncio
-async def test_missing_env_var_fails_closed(
+def test_missing_env_var_fails_closed(
     monkeypatch: pytest.MonkeyPatch, audit_path: Path
 ) -> None:
     """No mock transport — the missing env raises at resolve-time."""
@@ -375,17 +364,22 @@ async def test_missing_env_var_fails_closed(
     register(ctx)
     hook = ctx.hooks["pre_tool_call"]
 
-    result = await hook("kie_generate", {}, "task-1", session_id="sess-1")
+    result = hook("kie_generate", {}, "task-1", session_id="sess-1")
     assert result is not None
     assert result["action"] == "block"
     assert "fail-closed" in result["message"]
 
 
-def test_register_handler_is_a_coroutine_function(env: None) -> None:
-    """Hermes requires an async handler for pre_tool_call."""
+def test_register_handler_is_sync(env: None) -> None:
+    """Hermes calls pre_tool_call synchronously (it uses the return value
+    directly, it does NOT await), so the handler MUST be a plain function —
+    an async handler would return an un-awaited coroutine that Hermes
+    silently ignores, bypassing the gate."""
     ctx = FakeCtx()
     register(ctx)
-    assert asyncio.iscoroutinefunction(ctx.hooks["pre_tool_call"])
+    handler = ctx.hooks["pre_tool_call"]
+    assert not asyncio.iscoroutinefunction(handler)
+    assert callable(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -403,8 +397,7 @@ def _reset_mode_cache() -> None:
     mode_module.clear_cache()
 
 
-@pytest.mark.asyncio
-async def test_mode_auto_approve_short_circuits_to_allow(
+def test_mode_auto_approve_short_circuits_to_allow(
     env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When mode == AUTO_APPROVE the hook allows without round-tripping."""
@@ -429,7 +422,7 @@ async def test_mode_auto_approve_short_circuits_to_allow(
         datetime.now(timezone.utc) + timedelta(hours=4)
     ).isoformat()
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         return mode_module.ModeState(
             mode="AUTO_APPROVE",
             expires_at=deadline,
@@ -442,7 +435,7 @@ async def test_mode_auto_approve_short_circuits_to_allow(
         "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
     )
 
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -463,8 +456,7 @@ async def test_mode_auto_approve_short_circuits_to_allow(
     )
 
 
-@pytest.mark.asyncio
-async def test_mode_halt_short_circuits_to_block(
+def test_mode_halt_short_circuits_to_block(
     env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When mode == HALT the hook blocks without round-tripping."""
@@ -479,7 +471,7 @@ async def test_mode_halt_short_circuits_to_block(
 
     _ctx, hook, _client = _register_with_mock(handler)
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         return mode_module.ModeState(
             mode="HALT",
             expires_at=None,
@@ -492,7 +484,7 @@ async def test_mode_halt_short_circuits_to_block(
         "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
     )
 
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -514,8 +506,7 @@ async def test_mode_halt_short_circuits_to_block(
     )
 
 
-@pytest.mark.asyncio
-async def test_mode_ask_falls_through_to_operator_round_trip(
+def test_mode_ask_falls_through_to_operator_round_trip(
     env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With mode == ASK the existing long-poll path is exercised."""
@@ -528,7 +519,7 @@ async def test_mode_ask_falls_through_to_operator_round_trip(
 
     _ctx, hook, _client = _register_with_mock(handler)
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         return mode_module.ModeState(
             mode="ASK",
             expires_at=None,
@@ -541,7 +532,7 @@ async def test_mode_ask_falls_through_to_operator_round_trip(
         "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
     )
 
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -551,8 +542,7 @@ async def test_mode_ask_falls_through_to_operator_round_trip(
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_mode_fetch_error_falls_back_to_ask(
+def test_mode_fetch_error_falls_back_to_ask(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """If fetch_mode raises, hook degrades to ASK (operator round-trip)."""
@@ -564,14 +554,14 @@ async def test_mode_fetch_error_falls_back_to_ask(
 
     _ctx, hook, _client = _register_with_mock(handler)
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         raise RuntimeError("fetch broke")
 
     monkeypatch.setattr(
         "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
     )
 
-    result = await hook(
+    result = hook(
         "send_email",
         {"to": "x"},
         "task-1",
@@ -582,8 +572,7 @@ async def test_mode_fetch_error_falls_back_to_ask(
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_mode_allowlisted_tool_skips_mode_check(
+def test_mode_allowlisted_tool_skips_mode_check(
     env: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Allowlisted tools must not even read the mode (cheap path stays cheap)."""
@@ -597,7 +586,7 @@ async def test_mode_allowlisted_tool_skips_mode_check(
 
     _ctx, hook, _client = _register_with_mock(handler)
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         calls["count"] += 1
         from voxhorizon_approvals import mode as mode_module
 
@@ -613,7 +602,7 @@ async def test_mode_allowlisted_tool_skips_mode_check(
         "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
     )
 
-    result = await hook(
+    result = hook(
         "read_file", {"path": "/x"}, "task-1", session_id="sess-1"
     )
     # Even though mode=HALT, the allowlisted tool is allowed without
@@ -661,7 +650,7 @@ def _always_ask_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the operator mode to ASK so gated tools take the long-poll path."""
     from voxhorizon_approvals import mode as mode_module
 
-    async def _fake_fetch_mode(**_kwargs):
+    def _fake_fetch_mode(**_kwargs):
         return mode_module.ModeState(
             mode="ASK",
             expires_at=None,
@@ -702,8 +691,7 @@ def test_resolve_evaluate_loads_overlay_when_set(
     assert decide(READ, {}).action == "allow"
 
 
-@pytest.mark.asyncio
-async def test_env_unset_render_behaves_like_plain_engine(
+def test_env_unset_render_behaves_like_plain_engine(
     env: None,
     _no_policy_env: None,
     _always_ask_mode: None,
@@ -720,7 +708,7 @@ async def test_env_unset_render_behaves_like_plain_engine(
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
@@ -731,8 +719,7 @@ async def test_env_unset_render_behaves_like_plain_engine(
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_env_unset_is_byte_identical_for_core_tools(
+def test_env_unset_is_byte_identical_for_core_tools(
     env: None,
     _no_policy_env: None,
 ) -> None:
@@ -742,11 +729,10 @@ async def test_env_unset_is_byte_identical_for_core_tools(
         raise AssertionError("allowlisted tool must not reach the worker")
 
     _ctx, hook, _client = _register_with_mock(handler)
-    assert await hook("read_file", {"path": "/x"}, "t") is None
+    assert hook("read_file", {"path": "/x"}, "t") is None
 
 
-@pytest.mark.asyncio
-async def test_overlay_gates_render_returns_ask_then_block(
+def test_overlay_gates_render_returns_ask_then_block(
     env: None,
     audit_path: Path,
     _operator_policy_env: None,
@@ -760,7 +746,7 @@ async def test_overlay_gates_render_returns_ask_then_block(
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
@@ -772,8 +758,7 @@ async def test_overlay_gates_render_returns_ask_then_block(
     assert "no budget" in result["message"]
 
 
-@pytest.mark.asyncio
-async def test_overlay_gates_render_round_trips_operator(
+def test_overlay_gates_render_round_trips_operator(
     env: None,
     _operator_policy_env: None,
     _always_ask_mode: None,
@@ -788,7 +773,7 @@ async def test_overlay_gates_render_round_trips_operator(
         )
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook(
+    result = hook(
         RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
         "task-1",
@@ -799,8 +784,7 @@ async def test_overlay_gates_render_round_trips_operator(
     assert seen["count"] == 1  # it actually round-tripped the operator
 
 
-@pytest.mark.asyncio
-async def test_overlay_allowlists_read_and_brief(
+def test_overlay_allowlists_read_and_brief(
     env: None,
     _operator_policy_env: None,
 ) -> None:
@@ -810,11 +794,11 @@ async def test_overlay_allowlists_read_and_brief(
 
     _ctx, hook, _client = _register_with_mock(handler)
     assert (
-        await hook(READ, {"pipeline_id": "p"}, "t")
+        hook(READ, {"pipeline_id": "p"}, "t")
         is None
     )
     assert (
-        await hook(
+        hook(
             BRIEF,
             {"pipeline_id": "p", "image_payload": {}},
             "t",
@@ -823,8 +807,7 @@ async def test_overlay_allowlists_read_and_brief(
     )
 
 
-@pytest.mark.asyncio
-async def test_overlay_blocklist_short_circuits(
+def test_overlay_blocklist_short_circuits(
     env: None,
     audit_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -839,7 +822,7 @@ async def test_overlay_blocklist_short_circuits(
         raise AssertionError("blocklisted tool must not reach the worker")
 
     _ctx, hook, _client = _register_with_mock(handler)
-    result = await hook("danger_tool", {}, "task-1", session_id="sess-1")
+    result = hook("danger_tool", {}, "task-1", session_id="sess-1")
     assert result is not None
     assert result["action"] == "block"
     assert "policy" in result["message"].lower()

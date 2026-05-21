@@ -142,12 +142,15 @@ def clear_cache() -> None:
     _cache.clear()
 
 
-async def fetch_mode(
+def fetch_mode(
     *,
     timeout: float = DEFAULT_FETCH_TIMEOUT_S,
-    http_client: httpx.AsyncClient | None = None,
+    http_client: httpx.Client | None = None,
 ) -> ModeState:
     """Return the current mode, hitting the worker at most once per 5s.
+
+    Synchronous — Hermes invokes the ``pre_tool_call`` hook (which calls
+    this) without awaiting, so a blocking probe is the correct contract.
 
     Args:
         timeout: HTTP read timeout. Default 300ms; the worker is local
@@ -184,12 +187,12 @@ async def fetch_mode(
     }
 
     owns_client = http_client is None
-    client = http_client or httpx.AsyncClient(
+    client = http_client or httpx.Client(
         timeout=httpx.Timeout(timeout)
     )
     try:
         try:
-            response = await client.get(url, headers=headers, timeout=timeout)
+            response = client.get(url, headers=headers, timeout=timeout)
         except (
             httpx.TimeoutException,
             httpx.HTTPError,
@@ -217,7 +220,7 @@ async def fetch_mode(
             return _DEFAULT_ASK
     finally:
         if owns_client:
-            await client.aclose()
+            client.close()
 
     if not isinstance(payload, dict):
         return _DEFAULT_ASK

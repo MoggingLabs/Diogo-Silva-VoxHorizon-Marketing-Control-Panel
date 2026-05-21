@@ -1,4 +1,4 @@
-"""Unit tests for :mod:`client` — async HTTP + in-process cache.
+"""Unit tests for :mod:`client` — synchronous HTTP + in-process cache.
 
 Strategy: use httpx's :class:`httpx.MockTransport` to drive the
 ``ApprovalClient`` end-to-end without a real network. That gives us
@@ -8,8 +8,8 @@ keeping the test deterministic.
 
 from __future__ import annotations
 
-import asyncio
 import json
+import time
 
 import httpx
 import pytest
@@ -38,7 +38,7 @@ def _make_client(
 ) -> ApprovalClient:
     """Build an ``ApprovalClient`` backed by an httpx ``MockTransport``."""
     transport = httpx.MockTransport(handler)
-    http = httpx.AsyncClient(transport=transport)
+    http = httpx.Client(transport=transport)
     return ApprovalClient(
         worker_url=worker_url,
         token=token,
@@ -53,8 +53,7 @@ def _make_client(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_request_approval_happy_path_approved() -> None:
+def test_request_approval_happy_path_approved() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -67,7 +66,7 @@ async def test_request_approval_happy_path_approved() -> None:
         )
 
     client = _make_client(handler=handler)
-    verdict = await client.request_approval(
+    verdict = client.request_approval(
         tool_name="kie_generate",
         args={"prompt": "hi"},
         session_id="sess-1",
@@ -94,8 +93,7 @@ async def test_request_approval_happy_path_approved() -> None:
     assert body["approval_id"] == _approval_id_from_tool_call("tc-1")
 
 
-@pytest.mark.asyncio
-async def test_request_approval_approved_with_caveat_is_cached() -> None:
+def test_request_approval_approved_with_caveat_is_cached() -> None:
     """approved_with_caveat is treated as approved for cache purposes."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -105,7 +103,7 @@ async def test_request_approval_approved_with_caveat_is_cached() -> None:
         )
 
     client = _make_client(handler=handler)
-    verdict = await client.request_approval(
+    verdict = client.request_approval(
         tool_name="elevenlabs_tts",
         args={"text": "x"},
         session_id="sess-1",
@@ -115,8 +113,7 @@ async def test_request_approval_approved_with_caveat_is_cached() -> None:
     assert client.cache_get("sess-1", "elevenlabs_tts", {"text": "x"}) == verdict
 
 
-@pytest.mark.asyncio
-async def test_request_approval_rejected_is_not_cached() -> None:
+def test_request_approval_rejected_is_not_cached() -> None:
     """Rejections must not be cached — operator can change their mind."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -125,7 +122,7 @@ async def test_request_approval_rejected_is_not_cached() -> None:
         )
 
     client = _make_client(handler=handler)
-    verdict = await client.request_approval(
+    verdict = client.request_approval(
         tool_name="send_email",
         args={"to": "x@example.com"},
         session_id="sess-1",
@@ -135,8 +132,7 @@ async def test_request_approval_rejected_is_not_cached() -> None:
     assert client.cache_get("sess-1", "send_email", {"to": "x@example.com"}) is None
 
 
-@pytest.mark.asyncio
-async def test_request_approval_respects_timeout_override() -> None:
+def test_request_approval_respects_timeout_override() -> None:
     captured: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -144,7 +140,7 @@ async def test_request_approval_respects_timeout_override() -> None:
         return httpx.Response(200, json={"decision": "approved", "notes": None})
 
     client = _make_client(handler=handler, timeout_s=30)
-    await client.request_approval(
+    client.request_approval(
         tool_name="post_slack",
         args={},
         session_id="sess-1",
@@ -159,14 +155,13 @@ async def test_request_approval_respects_timeout_override() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_request_approval_timeout_is_fail_closed() -> None:
+def test_request_approval_timeout_is_fail_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ReadTimeout("read timed out", request=request)
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="timed out"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -174,14 +169,13 @@ async def test_request_approval_timeout_is_fail_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_connect_error_is_fail_closed() -> None:
+def test_request_approval_connect_error_is_fail_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("dns failure", request=request)
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="unreachable"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -189,14 +183,13 @@ async def test_request_approval_connect_error_is_fail_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_5xx_is_fail_closed() -> None:
+def test_request_approval_5xx_is_fail_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, text="overloaded")
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="503"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -204,14 +197,13 @@ async def test_request_approval_5xx_is_fail_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_401_surfaces_status() -> None:
+def test_request_approval_401_surfaces_status() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="bad token")
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="401"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -219,8 +211,7 @@ async def test_request_approval_401_surfaces_status() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_non_json_body_fails_closed() -> None:
+def test_request_approval_non_json_body_fails_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
@@ -230,7 +221,7 @@ async def test_request_approval_non_json_body_fails_closed() -> None:
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="non-JSON"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -238,14 +229,13 @@ async def test_request_approval_non_json_body_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_missing_decision_fails_closed() -> None:
+def test_request_approval_missing_decision_fails_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"notes": "lol no decision"})
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="invalid decision"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -253,14 +243,13 @@ async def test_request_approval_missing_decision_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_non_string_decision_fails_closed() -> None:
+def test_request_approval_non_string_decision_fails_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"decision": 42, "notes": None})
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="invalid decision"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -268,8 +257,7 @@ async def test_request_approval_non_string_decision_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_non_string_notes_fails_closed() -> None:
+def test_request_approval_non_string_notes_fails_closed() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "approved", "notes": ["array"]}
@@ -277,7 +265,7 @@ async def test_request_approval_non_string_notes_fails_closed() -> None:
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="non-string notes"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -285,8 +273,7 @@ async def test_request_approval_non_string_notes_fails_closed() -> None:
         )
 
 
-@pytest.mark.asyncio
-async def test_request_approval_non_object_body_fails_closed() -> None:
+def test_request_approval_non_object_body_fails_closed() -> None:
     """A JSON array (not an object) violates the contract."""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -294,7 +281,7 @@ async def test_request_approval_non_object_body_fails_closed() -> None:
 
     client = _make_client(handler=handler)
     with pytest.raises(ApprovalClientError, match="invalid decision"):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="sess-1",
@@ -307,8 +294,7 @@ async def test_request_approval_non_object_body_fails_closed() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_missing_worker_url_fails_closed(
+def test_missing_worker_url_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("VOXHORIZON_APPROVAL_WORKER_URL", raising=False)
@@ -317,7 +303,7 @@ async def test_missing_worker_url_fails_closed(
     with pytest.raises(
         ApprovalClientError, match="VOXHORIZON_APPROVAL_WORKER_URL"
     ):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="s",
@@ -325,8 +311,7 @@ async def test_missing_worker_url_fails_closed(
         )
 
 
-@pytest.mark.asyncio
-async def test_missing_token_fails_closed(
+def test_missing_token_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(
@@ -337,7 +322,7 @@ async def test_missing_token_fails_closed(
     with pytest.raises(
         ApprovalClientError, match="VOXHORIZON_APPROVAL_TOKEN"
     ):
-        await client.request_approval(
+        client.request_approval(
             tool_name="send_email",
             args={},
             session_id="s",
@@ -345,8 +330,7 @@ async def test_missing_token_fails_closed(
         )
 
 
-@pytest.mark.asyncio
-async def test_env_var_strips_whitespace_and_trailing_slash(
+def test_env_var_strips_whitespace_and_trailing_slash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict = {}
@@ -362,9 +346,9 @@ async def test_env_var_strips_whitespace_and_trailing_slash(
     )
     monkeypatch.setenv("VOXHORIZON_APPROVAL_TOKEN", "  tok  ")
     transport = httpx.MockTransport(handler)
-    http = httpx.AsyncClient(transport=transport)
+    http = httpx.Client(transport=transport)
     client = ApprovalClient(http_client=http)
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={},
         session_id="s",
@@ -379,15 +363,14 @@ async def test_env_var_strips_whitespace_and_trailing_slash(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_cache_isolated_per_session() -> None:
+def test_cache_isolated_per_session() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "approved", "notes": None}
         )
 
     client = _make_client(handler=handler)
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={"to": "a"},
         session_id="sess-A",
@@ -398,40 +381,38 @@ async def test_cache_isolated_per_session() -> None:
     assert client.cache_get("sess-B", "send_email", {"to": "a"}) is None
 
 
-@pytest.mark.asyncio
-async def test_cache_expires() -> None:
+def test_cache_expires() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "approved", "notes": None}
         )
 
     client = _make_client(handler=handler, cache_ttl_s=0.05)
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={"to": "a"},
         session_id="sess-A",
         tool_call_id="tc-1",
     )
     assert client.cache_get("sess-A", "send_email", {"to": "a"}) is not None
-    await asyncio.sleep(0.1)
+    time.sleep(0.1)
     assert client.cache_get("sess-A", "send_email", {"to": "a"}) is None
 
 
-@pytest.mark.asyncio
-async def test_cache_clear_single_session() -> None:
+def test_cache_clear_single_session() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "approved", "notes": None}
         )
 
     client = _make_client(handler=handler)
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={},
         session_id="sess-A",
         tool_call_id="t1",
     )
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={},
         session_id="sess-B",
@@ -442,15 +423,14 @@ async def test_cache_clear_single_session() -> None:
     assert client.cache_get("sess-B", "send_email", {}) is not None
 
 
-@pytest.mark.asyncio
-async def test_cache_clear_all() -> None:
+def test_cache_clear_all() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200, json={"decision": "approved", "notes": None}
         )
 
     client = _make_client(handler=handler)
-    await client.request_approval(
+    client.request_approval(
         tool_name="send_email",
         args={},
         session_id="sess-A",
@@ -475,8 +455,7 @@ def test_cache_put_and_get_directly() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_aclose_closes_owned_client() -> None:
+def test_close_closes_owned_client() -> None:
     """Closing the wrapper closes the lazily-built httpx client."""
     client = ApprovalClient(worker_url="http://x", token="t")
     # Force lazy build by hitting the resolver path; we don't need a
@@ -485,21 +464,20 @@ async def test_aclose_closes_owned_client() -> None:
     # don't have to mock a transport here.
     client._ensure_client(30)
     assert client._http_client is not None
-    await client.aclose()
+    client.close()
     assert client._http_client is None
 
 
-@pytest.mark.asyncio
-async def test_aclose_does_not_close_external_client() -> None:
+def test_close_does_not_close_external_client() -> None:
     """If the caller provided the http client, we don't own it."""
-    external = httpx.AsyncClient()
+    external = httpx.Client()
     client = ApprovalClient(
         worker_url="http://x", token="t", http_client=external
     )
-    await client.aclose()
+    client.close()
     # External still usable.
     assert not external.is_closed
-    await external.aclose()
+    external.close()
 
 
 def test_approval_id_is_deterministic_per_tool_call() -> None:
