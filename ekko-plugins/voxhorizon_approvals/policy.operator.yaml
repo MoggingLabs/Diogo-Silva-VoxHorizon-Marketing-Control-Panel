@@ -5,9 +5,16 @@
 # `policy.yaml`; it does NOT replace Ekko's own policy.yaml (Ekko keeps the
 # shipped empty overlay, so Ekko's behavior is unchanged).
 #
-# It maps one-for-one to the pipeline-operator skill's worker tools
-# (ekko-skills/pipeline-operator/helper.py). The approval plugin gates by
-# tool name, so these keys reference the helper's exact entrypoint names.
+# It maps one-for-one to the pipeline-operator skill's MCP tools
+# (ekko-skills/pipeline-operator/mcp_server.py, which delegates to helper.py).
+# The approval plugin gates by tool name, so these keys reference the tools'
+# exact SHORT names.
+#
+# MCP namespacing: Hermes may present these tools to the pre_tool_call hook
+# either bare (pipeline_operator_render) or namespaced with the server name
+# (mcp__pipeline-operator__pipeline_operator_render). List the SHORT name here;
+# policy_overlay matches both forms (exact name OR a `__<short-name>` suffix),
+# so this file does not need the namespaced variant.
 #
 # Merge semantics (see policy_overlay.py / the plugin README): in-code
 # defaults always win over a softening override; gating wins over allowing.

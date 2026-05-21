@@ -57,6 +57,30 @@ _OVERLAY_RISK_DEFAULT = "spend"
 #: The three recognised keys (kept in lock-step with ``policy.yaml`` docs).
 _RECOGNISED_KEYS = ("allowlist", "extra_requires_approval", "blocklist")
 
+#: Separator MCP hosts use to namespace a tool: ``mcp__<server>__<tool>``.
+_MCP_SEP = "__"
+
+
+def _matches(tool_name: str, entries: frozenset[str]) -> bool:
+    """Match a (possibly MCP-namespaced) tool name against a policy entry set.
+
+    Hermes may present an MCP tool to the ``pre_tool_call`` hook either *bare*
+    (``pipeline_operator_render``) or *namespaced* with the server name
+    (``mcp__pipeline-operator__pipeline_operator_render``). The policy files
+    list tools by their short (bare) name, so we match if the live name either:
+
+    * EQUALS a policy entry, or
+    * ENDS WITH ``__<entry>`` — the trailing segment after MCP's ``__``
+      namespacing.
+
+    The suffix is anchored on ``__`` so ``pipeline_operator_render`` does not
+    spuriously match an entry ``render`` (``..._render`` has no ``__render``
+    boundary), keeping the match precise to whole namespaced segments.
+    """
+    if tool_name in entries:
+        return True
+    return any(tool_name.endswith(_MCP_SEP + entry) for entry in entries)
+
 
 @dataclass(frozen=True)
 class PolicyOverlay:
@@ -78,8 +102,9 @@ class PolicyOverlay:
 
         Order encodes the precedence rules in the module docstring.
         """
-        # 1. Hard blocklist — highest precedence, no prompt.
-        if tool_name in self.blocklist:
+        # 1. Hard blocklist — highest precedence, no prompt. Matching is
+        #    robust to MCP namespacing (bare OR ``mcp__server__<entry>``).
+        if _matches(tool_name, self.blocklist):
             return Decision(
                 action="block",
                 reason=f"{tool_name} is blocklisted by policy overlay",
@@ -89,15 +114,16 @@ class PolicyOverlay:
         # 2. In-code baked-in gates win over a softening allowlist. If the
         #    tool is already gated in code (destructive pattern or
         #    REQUIRES_APPROVAL), defer to the engine so the overlay can't
-        #    allowlist it away.
+        #    allowlist it away. These are Ekko's own (non-MCP) tools, so an
+        #    exact name match against the engine's sets is correct.
         if tool_name in ALWAYS_ASK_PATTERNS or tool_name in REQUIRES_APPROVAL:
             return evaluate(tool_name, args, ctx)
 
         # 3. Operator-added approval requirement (e.g. the render spend tool).
         #    This wins over the overlay allowlist for the same tool, matching
         #    the "in-code defaults win over softening; gating wins over
-        #    allowing" intent.
-        if tool_name in self.extra_requires_approval:
+        #    allowing" intent. Matches bare OR MCP-namespaced names.
+        if _matches(tool_name, self.extra_requires_approval):
             return Decision(
                 action="ask_operator",
                 reason=f"{tool_name} requires operator approval (policy overlay)",
@@ -105,8 +131,8 @@ class PolicyOverlay:
             )
 
         # 4. Operator-added allowlist (e.g. the read tool). Only reached when
-        #    the tool isn't otherwise gated above.
-        if tool_name in self.allowlist:
+        #    the tool isn't otherwise gated above. Matches bare OR namespaced.
+        if _matches(tool_name, self.allowlist):
             return Decision(
                 action="allow",
                 reason=f"{tool_name} is allowlisted by policy overlay",

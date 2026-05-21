@@ -78,11 +78,38 @@ defense-in-depth is intentional: it means a malicious override of
 
 The overlay loader lives in `policy_overlay.py` (`load_overlay(path)` →
 `PolicyOverlay.evaluate(...)`, an `evaluate`-compatible decision function that
-applies the three keys with the precedence above). It is **opt-in**: Ekko's
-hot path calls `policy.evaluate` directly and is unchanged, and Ekko ships an
-empty `policy.yaml`, so loading the overlay against it is a pure pass-through.
-No PyYAML dependency is required — the loader parses the policy-file YAML
-subset itself (and uses PyYAML only if it happens to be installed).
+applies the three keys with the precedence above). No PyYAML dependency is
+required — the loader parses the policy-file YAML subset itself (and uses
+PyYAML only if it happens to be installed).
+
+### Opt-in wiring (`VOXHORIZON_APPROVAL_POLICY_PATH`)
+
+The overlay is **opt-in and env-gated** so Ekko is unchanged by default:
+
+| `VOXHORIZON_APPROVAL_POLICY_PATH`  | Decision function used                          |
+| ---------------------------------- | ----------------------------------------------- |
+| unset / empty / non-existent path  | plain in-code `policy.evaluate` (Ekko-safe)     |
+| set to an **existing** policy file | `load_overlay(path).evaluate` (overlay applied) |
+
+`register()` resolves this once at load time, so the hot path pays no per-call
+cost. With the env unset the hook is byte-identical to the pre-overlay plugin;
+Ekko ships an empty `policy.yaml` and does not set the env, so even if it did
+opt in the overlay would be a pure pass-through. Only the dedicated operator
+agent sets the env (pointing at its `policy.operator.yaml`) to turn on the
+spend gate.
+
+### MCP tool-name namespacing
+
+Hermes may present an MCP tool to the `pre_tool_call` hook either **bare**
+(`pipeline_operator_render`) or **namespaced** with the server name
+(`mcp__pipeline-operator__pipeline_operator_render`). The overlay matches both:
+a policy entry matches if the live tool name **equals** it OR **ends with**
+`__<entry>` (the trailing `__`-delimited MCP segment). The `__` boundary keeps
+the match precise — an entry `render` does **not** match
+`pipeline_operator_render`, only a whole namespaced segment does. List tools by
+their **short name** in the policy files; both forms are gated. (The exact live
+name is confirmed on the VPS; because matching covers both, the policy file
+does not need adjusting if Hermes turns out to namespace.)
 
 ## Operator policy profile (`policy.operator.yaml`)
 
@@ -93,9 +120,10 @@ The dedicated **operator** agent (`hermes-agent-operator`, running the
 dropped in as the operator container's `policy.yaml` at deploy time. It does
 **not** modify Ekko's `policy.yaml` or the in-code defaults.
 
-It maps one-for-one to the `pipeline-operator` helper's tool entrypoints
-(`ekko-skills/pipeline-operator/helper.py`) — the plugin gates **by tool
-name**, so the keys are the exact entrypoint names:
+It maps one-for-one to the `pipeline-operator` MCP tools
+(`ekko-skills/pipeline-operator/mcp_server.py`, which delegates to
+`helper.py`) — the plugin gates **by tool name**, so the keys are the exact
+tool short-names (namespaced forms are matched too; see above):
 
 | Policy key                | Tool                       | Effect                                                                |
 | ------------------------- | -------------------------- | --------------------------------------------------------------------- |

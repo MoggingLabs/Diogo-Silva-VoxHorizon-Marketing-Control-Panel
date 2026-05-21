@@ -27,26 +27,30 @@ Two skills, one loop:
 - **`image-ad-authoring`** — the creative craft (brief, concepts, prompts).
 - **`pipeline-operator`** (this) — the operational loop and the worker tools.
 
-`helper.py` gives you three worker tools. The names matter — the spend gate
-keys on them:
+You have three **MCP tools** (served by `mcp_server.py`, which delegates to the
+worker). Call them like any other tool — do NOT shell out to `helper.py`. The
+names matter: the spend gate keys on them.
 
-| Tool (entrypoint)          | What it does                  | Spend?  | Manager gate                       |
+| MCP tool                   | What it does                  | Spend?  | Manager gate                       |
 | -------------------------- | ----------------------------- | ------- | ---------------------------------- |
 | `pipeline_operator_read`   | Read pipeline state + stage   | no      | allowlisted (no prompt)            |
 | `pipeline_operator_brief`  | Author/upsert the image brief | no      | reviewed via the _stage_ gate      |
 | `pipeline_operator_render` | Render concepts/finals (Kie)  | **yes** | **requires approval** (spend gate) |
 
-```python
-import sys; sys.path.insert(0, "<this skill dir>")
-from helper import (
-    pipeline_operator_read,
-    pipeline_operator_brief,
-    pipeline_operator_render,
-)
-```
+Tool signatures:
 
-Env (already set in the operator container): `WORKER_BASE_URL`,
-`WORKER_SHARED_SECRET`.
+- `pipeline_operator_read(pipeline_id)` — returns the state object below.
+- `pipeline_operator_brief(pipeline_id, image_payload, notes=None)` — upserts
+  the brief; `{ok, brief_id}`.
+- `pipeline_operator_render(pipeline_id, kind, items)` — **the spend tool**;
+  `{ok, renders, total_cost_usd, errors}`.
+
+The MCP server reads `WORKER_BASE_URL` / `WORKER_SHARED_SECRET` from the
+operator container env on your behalf — you never handle the secret. Hermes may
+present these tools to the approval gate either bare
+(`pipeline_operator_render`) or namespaced
+(`mcp__pipeline-operator__pipeline_operator_render`); the gate matches both, so
+just call the tools by name.
 
 ---
 
@@ -111,12 +115,12 @@ Goal: produce a brief the manager can review. **No spend.**
 5. **Stop.** Do not render anything. The manager approves the brief at the
    stage gate.
 
-```python
-from helper import pipeline_operator_brief
-# image-ad-authoring built `payload`
+Call the MCP tool (image-ad-authoring built `payload`):
+
+```
 pipeline_operator_brief(
-    pipeline_id=pipeline_id,
-    image_payload=payload,
+    pipeline_id=<pipeline_id>,
+    image_payload=<payload>,
     notes="Sharpened the offer to a concrete $99 inspection; 4 angles.",
 )
 ```
@@ -146,15 +150,16 @@ items=<all 4>)` — **all items in ONE call**. That is one spend approval for
    finalize and I'll render the production versions."_
 6. **Stop.** The manager picks at the review gate.
 
-```python
-from helper import pipeline_operator_render
-# image-ad-authoring built `concepts` (a list of 4 distinct {concept, prompt})
-result = pipeline_operator_render(
-    pipeline_id=pipeline_id,
+Call the MCP tool (image-ad-authoring built `concepts`, a list of 4 distinct
+`{concept, prompt}`):
+
+```
+pipeline_operator_render(
+    pipeline_id=<pipeline_id>,
     kind="concept_preview",
-    items=concepts,            # ALL of them — one call, one spend gate
+    items=<concepts>,          # ALL of them — one call, one spend gate
 )
-# result -> {ok, renders:[...], total_cost_usd, errors:[...]}
+# -> {ok, renders:[...], total_cost_usd, errors:[...]}
 ```
 
 Why one call: each `pipeline_operator_render` is one spend approval. Batching
@@ -178,30 +183,30 @@ spends.**
    You may render all picked finals in one call (one spend gate for the
    production batch), or one per pick if you want per-creative approvals — one
    call for the batch is the default. `parent_creative_id` is **required** on
-   every final item (the helper enforces this).
+   every final item (the render tool rejects finals without it).
 4. **Narrate** the finals rendered and the cost. End with: _"Finals are
    rendered for your picks — the pipeline will finish automatically."_
 5. **Stop.** Do NOT advance to `done`. A database trigger auto-advances
    generation → done when the final render events land; your job ends at
    narration.
 
-```python
-from helper import pipeline_operator_read, pipeline_operator_render
+Read state with the MCP tool, then render the finals with the MCP tool:
 
-state = pipeline_operator_read(pipeline_id)
+```
+state = pipeline_operator_read(<pipeline_id>)
 picked_ids = state["picks"]["image"]
 by_id = {c["creative_id"]: c for c in state["concepts"]}
 
-finals = []
-for cid in picked_ids:
-    chosen = by_id[cid]
-    finals.append({
-        "concept": chosen["concept"],
+finals = [
+    {
+        "concept": by_id[cid]["concept"],
         "prompt": "<final prompt — refine the preview's prompt>",
         "parent_creative_id": cid,        # REQUIRED for finals
-    })
+    }
+    for cid in picked_ids
+]
 
-pipeline_operator_render(pipeline_id=pipeline_id, kind="final", items=finals)
+pipeline_operator_render(pipeline_id=<pipeline_id>, kind="final", items=finals)
 ```
 
 ---
@@ -220,27 +225,33 @@ pipeline_operator_render(pipeline_id=pipeline_id, kind="final", items=finals)
 ## Hard rules (the manager is watching)
 
 1. **Read before you act.** Every dispatch starts with `pipeline_operator_read`.
-2. **One stage of work per dispatch, then stop.** Never advance the stage.
+2. **Use the MCP tools, never the shell.** Call `pipeline_operator_read` /
+   `_brief` / `_render` as tools. Do NOT import or shell out to `helper.py` —
+   that bypasses the approval gate, which keys on the tool call.
+3. **One stage of work per dispatch, then stop.** Never advance the stage.
    Never chain into the next stage's work.
-3. **One spend per render batch.** Send all concepts in one
+4. **One spend per render batch.** Send all concepts in one
    `concept_preview` call; the spend gate fires once. Do not loop the render
    tool to render concepts one at a time.
-4. **The spend gate is the manager's, not yours.** When `pipeline_operator_render`
+5. **The spend gate is the manager's, not yours.** When `pipeline_operator_render`
    is blocked (manager declined or no approval), narrate the decline plainly
    and stop. Never try to route around the gate.
-5. **Be idempotent.** Use `events_tail` and the existing `brief`/`concepts`/
+6. **Be idempotent.** Use `events_tail` and the existing `brief`/`concepts`/
    `finals` to avoid redoing work that already happened.
-6. **Narrate in plain language.** No tool jargon dumps. The manager reads your
+7. **Narrate in plain language.** No tool jargon dumps. The manager reads your
    words to decide; tell them what you did, what it costs, and what you need.
-7. **Never invent state.** If a read fails or picks are empty when you expect
+8. **Never invent state.** If a read fails or picks are empty when you expect
    them, say so and stop — don't fabricate creative_ids or guess picks.
-8. **House style:** no em dashes in copy you write for the manager; keep the
+9. **House style:** no em dashes in copy you write for the manager; keep the
    offer concrete; never make claims the brief told you to avoid.
 
 ## Related
 
 - `image-ad-authoring` — where every brief, concept, and prompt is authored.
   This skill calls it; do not hand-roll prompts here.
+- `mcp_server.py` — the stdio MCP server that publishes the three tools you
+  call (`pipeline_operator_read` / `_brief` / `_render`); it delegates to
+  `helper.py`, which is the only thing that talks to the worker.
 - `voxhorizon-approvals` plugin (`policy.operator.yaml`) — the spend gate on
   `pipeline_operator_render` and the allowlist on `pipeline_operator_read`.
 - Worker endpoints (Wave A): `GET /work/pipeline/tools/{id}`,

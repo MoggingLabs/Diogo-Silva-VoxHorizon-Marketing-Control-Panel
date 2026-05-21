@@ -71,6 +71,95 @@ def test_brief_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
 
 
 # ---------------------------------------------------------------------------
+# MCP tool-name namespacing — match bare AND mcp__server__<entry>
+# ---------------------------------------------------------------------------
+#
+# Hermes may present an MCP tool to the hook either bare
+# (``pipeline_operator_render``) or namespaced with the server name
+# (``mcp__pipeline-operator__pipeline_operator_render``). The overlay must gate
+# either form so the spend gate fires regardless of which the live runtime uses.
+
+#: The MCP server name (matches mcp_server.py's ``SERVER_NAME``).
+_NS = "mcp__pipeline-operator__"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pipeline_operator_render",  # bare
+        _NS + "pipeline_operator_render",  # namespaced
+    ],
+)
+def test_render_gated_bare_and_namespaced(
+    operator_overlay: PolicyOverlay, name: str
+) -> None:
+    decision = operator_overlay.evaluate(name, {})
+    assert decision.action == "ask_operator"
+    assert decision.risk_class == "spend"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "pipeline_operator_read",
+        _NS + "pipeline_operator_read",
+        "pipeline_operator_brief",
+        _NS + "pipeline_operator_brief",
+    ],
+)
+def test_read_brief_allowlisted_bare_and_namespaced(
+    operator_overlay: PolicyOverlay, name: str
+) -> None:
+    decision = operator_overlay.evaluate(name, {})
+    assert decision.action == "allow"
+
+
+def test_blocklist_matches_namespaced_form() -> None:
+    overlay = PolicyOverlay(
+        allowlist=frozenset(),
+        extra_requires_approval=frozenset(),
+        blocklist=frozenset({"danger_tool"}),
+    )
+    bare = overlay.evaluate("danger_tool", {})
+    namespaced = overlay.evaluate("mcp__some-server__danger_tool", {})
+    assert bare.action == "block"
+    assert namespaced.action == "block"
+
+
+def test_namespace_match_is_anchored_on_double_underscore() -> None:
+    """A suffix that is not a whole ``__``-delimited segment must NOT match.
+
+    Entry ``render`` must NOT gate ``pipeline_operator_render`` (there is no
+    ``__render`` boundary), so the match stays precise to namespaced segments.
+    """
+    overlay = PolicyOverlay(
+        allowlist=frozenset(),
+        extra_requires_approval=frozenset({"render"}),
+        blocklist=frozenset(),
+    )
+    decision = overlay.evaluate("pipeline_operator_render", {})
+    # Not gated by the overlay → falls through to the base engine, which treats
+    # this unknown tool as risky (ask), but NOT because of the ``render`` entry.
+    assert "policy overlay" not in decision.reason
+
+
+def test_matches_helper_bare_and_namespaced() -> None:
+    from voxhorizon_approvals.policy_overlay import _matches
+
+    entries = frozenset({"pipeline_operator_render"})
+    assert _matches("pipeline_operator_render", entries) is True
+    assert (
+        _matches(
+            "mcp__pipeline-operator__pipeline_operator_render", entries
+        )
+        is True
+    )
+    assert _matches("pipeline_operator_read", entries) is False
+    # Precise boundary: a non-``__`` suffix is not a match.
+    assert _matches("xpipeline_operator_render", entries) is False
+
+
+# ---------------------------------------------------------------------------
 # The shipped file parses to exactly the intended sets
 # ---------------------------------------------------------------------------
 
