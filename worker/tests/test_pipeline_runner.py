@@ -71,6 +71,10 @@ class _FakeTable:
     def execute(self) -> SimpleNamespace:
         if self.parent.raise_on_execute:
             raise RuntimeError("supabase blew up")
+        if self.parent.execute_returns_none:
+            # supabase-py returns None (not a response) from
+            # maybe_single().execute() when no row matches.
+            return None  # type: ignore[return-value]
 
         if self._insert is not None:
             self.parent.inserts.append((self.name, dict(self._insert)))
@@ -106,6 +110,7 @@ class _FakeSupabase:
         self.pipeline_row: dict | None = None
         self.inserts: list[tuple[str, dict]] = []
         self.raise_on_execute: bool = False
+        self.execute_returns_none: bool = False
 
     def table(self, name: str) -> _FakeTable:
         return _FakeTable(name, self)
@@ -493,6 +498,16 @@ def test_fetch_pipeline_returns_none_when_data_is_list(
     helper must coerce non-dicts to ``None``."""
     fake_sb.pipeline_row = ["unexpected"]  # type: ignore[assignment]
     assert pr.fetch_pipeline("p-1") is None
+
+
+def test_fetch_pipeline_returns_none_when_execute_returns_none(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Regression: supabase-py returns None (not a response) from
+    ``maybe_single().execute()`` when no row matches; fetch_pipeline must
+    return None, not raise AttributeError (was a 500 on the operator read)."""
+    fake_sb.execute_returns_none = True
+    assert pr.fetch_pipeline("p-missing") is None
 
 
 def test_picks_from_pipeline_happy_path() -> None:
