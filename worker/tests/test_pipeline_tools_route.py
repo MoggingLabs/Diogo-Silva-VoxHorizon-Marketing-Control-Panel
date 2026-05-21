@@ -762,7 +762,9 @@ def test_dispatch_builds_argv_and_returns_immediately(
     assert resp.json() == {"ok": True, "dispatched": True}
 
     # The TestClient runs the BackgroundTask after the response, so the
-    # exec has been created by now with the right argv + session id.
+    # exec has been created by now. No --pass-session-id: it's a boolean flag
+    # on the Hermes CLI, and the operator is stateless per dispatch (the
+    # pipeline id rides in the instruction).
     args, kwargs = api.exec_create.call_args
     assert args[0] == "hermes-agent-operator"
     assert args[1] == [
@@ -770,8 +772,6 @@ def test_dispatch_builds_argv_and_returns_immediately(
         "chat",
         "-q",
         "author concepts for pipeline p-42",
-        "--pass-session-id",
-        "p-42",
     ]
     assert kwargs == {"stdout": True, "stderr": True, "tty": False}
     # stdout was drained to completion.
