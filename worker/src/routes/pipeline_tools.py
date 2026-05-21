@@ -116,7 +116,9 @@ def _fetch_brief_for_read(brief_id: str) -> dict[str, Any] | None:
         .maybe_single()
         .execute()
     )
-    return resp.data if isinstance(resp.data, dict) else None
+    # maybe_single().execute() returns None (not a response) when the brief is
+    # absent — guard it so the read tool degrades to "no brief" cleanly.
+    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
 
 
 def _fetch_brief_creatives(brief_id: str) -> list[dict[str, Any]]:
@@ -265,7 +267,7 @@ def _client_slug(pipeline: dict[str, Any]) -> str:
         )
     except Exception:  # noqa: BLE001 — slug is best-effort, not load-bearing
         return "pipeline"
-    row = resp.data
+    row = resp.data if resp is not None else None
     if isinstance(row, dict) and row.get("slug"):
         return str(row["slug"])
     return "pipeline"

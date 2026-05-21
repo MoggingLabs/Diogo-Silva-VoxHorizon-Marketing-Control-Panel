@@ -302,7 +302,10 @@ def fetch_pipeline(pipeline_id: str) -> dict[str, Any] | None:
         .maybe_single()
         .execute()
     )
-    row = resp.data
+    # supabase-py returns None from ``maybe_single().execute()`` when no row
+    # matches (rather than a response with ``data=None``); guard it so a
+    # missing pipeline resolves to None (→ route 404) instead of raising.
+    row = resp.data if resp is not None else None
     if isinstance(row, dict):
         return row
     return None
