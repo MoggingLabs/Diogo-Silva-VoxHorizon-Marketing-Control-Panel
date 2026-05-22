@@ -12,22 +12,13 @@ name: deploy-stack
 #   - this workflow itself changes (so a workflow fix can self-deploy)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "worker/**"
-      - "web/**"
-      - "app/**"
-      - "components/**"
-      - "lib/**"
-      - "hooks/**"
-      - "middleware.ts"
-      - "next.config.ts"
-      - "package.json"
-      - "pnpm-lock.yaml"
-      - "Caddyfile"
-      - "docker-compose.yml"
-      - ".github/workflows/deploy-stack.yml"
+  # Auto-deploy on push to main is DISABLED for the duration of the pipeline
+  # rebuild so CI-gated merges to main never touch the live VPS stack. Deploys
+  # are deliberate during the rebuild: trigger manually via the Actions
+  # "Run workflow" button (workflow_dispatch). Re-enable the push trigger
+  # below at the end of the rebuild (it watched worker/**, web/**, app/**,
+  # components/**, lib/**, hooks/**, middleware.ts, next.config.ts,
+  # package.json, pnpm-lock.yaml, Caddyfile, docker-compose.yml, and this file).
   workflow_dispatch:
 
 # One rollout at a time. Do NOT cancel a deploy mid-flight — that can
