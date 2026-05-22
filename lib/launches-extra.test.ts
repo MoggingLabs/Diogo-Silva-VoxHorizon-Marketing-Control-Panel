@@ -124,6 +124,7 @@ describe("readLaunchPayload / payloadToJson", () => {
     client: { id: "c", slug: "s", name: "n" },
     creative_ids: ["11111111-1111-4111-8111-111111111111"],
     copy_variant_ids: [],
+    asset_refs: [],
     issues: [],
     validation: { ok: true, via: "preflight" as const },
   };

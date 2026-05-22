@@ -117,6 +117,43 @@ function buildChain(verb: Verb, tableConfig: SupabaseTableConfig | undefined) {
 }
 
 /**
+ * Mock Supabase Storage surface. Covers the read/sign methods the routes use:
+ * `storage.from(bucket).createSignedUrl(path, ttl)` (singular, used by
+ * `lib/creatives.getSignedUrl`) and `createSignedUrls(paths, ttl)` (plural).
+ *
+ * The default signer mints a deterministic fake URL per path so a route that
+ * falls back to a Supabase asset reference resolves a non-null URL without the
+ * test having to wire storage explicitly. Tests can override via the
+ * `storageSign` option to simulate a sign failure.
+ */
+function buildStorage(signer: (path: string) => string | null): {
+  from: (bucket: string) => unknown;
+} {
+  return {
+    from: vi.fn((_bucket: string) => ({
+      createSignedUrl: vi.fn((path: string, _ttl: number) => {
+        const url = signer(path);
+        return Promise.resolve(
+          url
+            ? { data: { signedUrl: url }, error: null }
+            : { data: null, error: { message: "sign failed" } },
+        );
+      }),
+      createSignedUrls: vi.fn((paths: string[], _ttl: number) =>
+        Promise.resolve({
+          data: paths.map((path) => ({
+            path,
+            signedUrl: signer(path),
+            error: signer(path) ? null : "sign failed",
+          })),
+          error: null,
+        }),
+      ),
+    })),
+  };
+}
+
+/**
  * Mock realtime channel. `subscribe()` returns the channel itself (matching
  * the real client), and `unsubscribe()` is a no-op spy so cleanup hooks can
  * still verify they ran.
@@ -136,7 +173,11 @@ function buildChannel() {
  * the `_spies` escape hatch so tests can assert against the underlying
  * `vi.fn`s when they care.
  */
-export function mockSupabaseClient(config: SupabaseMockConfig = {}) {
+export function mockSupabaseClient(
+  config: SupabaseMockConfig = {},
+  options: { storageSign?: (path: string) => string | null } = {},
+) {
+  const signer = options.storageSign ?? ((path: string) => `https://signed.test/${path}`);
   const fromSpy = vi.fn((table: string) => {
     const tableConfig = config[table];
     const builder: Record<string | symbol, unknown> = {};
@@ -155,6 +196,7 @@ export function mockSupabaseClient(config: SupabaseMockConfig = {}) {
 
   return {
     from: fromSpy,
+    storage: buildStorage(signer),
     channel: channelSpy,
     removeChannel: removeChannelSpy,
     auth: {

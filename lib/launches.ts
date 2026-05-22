@@ -114,6 +114,21 @@ export type LaunchIssueT = z.infer<typeof LaunchIssue>;
  * Snapshot we write into ``launch_packages.payload``. Captures everything
  * needed to render the launch detail page without N+1 queries.
  */
+/**
+ * Per-creative asset reference resolved at build time. ``url`` is the Drive
+ * URL (legacy Ekko flow) when present, otherwise a freshly signed Supabase
+ * Storage URL (operator/codex flow, where finals live in Supabase and have no
+ * ``file_path_drive``). ``source`` records which backend the URL came from so
+ * the launch detail page can label it. ``url`` may be null if a Supabase-stored
+ * creative failed to sign (the preflight surfaces that as an issue).
+ */
+export const LaunchAssetRef = z.object({
+  creative_id: z.string().uuid(),
+  source: z.enum(["drive", "supabase"]),
+  url: z.string().nullable(),
+});
+export type LaunchAssetRefT = z.infer<typeof LaunchAssetRef>;
+
 export const LaunchPayload = z.object({
   brief_id_human: z.string(),
   client: z
@@ -125,6 +140,8 @@ export const LaunchPayload = z.object({
     .nullable(),
   creative_ids: z.array(z.string().uuid()),
   copy_variant_ids: z.array(z.string().uuid()),
+  /** Resolved asset URLs (Drive or signed Supabase) keyed by creative. */
+  asset_refs: z.array(LaunchAssetRef).default([]),
   issues: z.array(LaunchIssue).default([]),
   validation: z.object({
     ok: z.boolean(),
