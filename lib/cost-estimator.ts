@@ -33,6 +33,22 @@ export type EstimateInput = {
   estimated_broll_clips?: number;
   /** Total Claude chat iterations across the pipeline. Default 1. */
   estimated_chat_iterations?: number;
+  /**
+   * Operator-driven pipelines render image finals on the operator's
+   * ChatGPT/Codex subscription (`gpt-image-2`) and the operator itself runs on
+   * that same subscription — both are $0 marginal. When true, the image line is
+   * priced at the real finals backend (free unless `image_unit_cost` overrides
+   * it) and the Anthropic line is dropped (no Anthropic API is used).
+   */
+  operator_driven?: boolean;
+  /**
+   * Real per-image USD cost of the chosen finals backend. Defaults to the free
+   * codex price (0) for operator pipelines, or Kie's price otherwise. The
+   * finals-model picker passes the selected paid model's price here.
+   */
+  image_unit_cost?: number;
+  /** Display label for the image API line (e.g. "gpt-image-2 (free)"). */
+  image_api_label?: string;
 };
 
 /** Per-ratio multiplier for image generation (1:1 + 9:16). */
@@ -56,6 +72,9 @@ export function estimatePipelineCost(input: EstimateInput): Estimate {
     picked_video_count,
     estimated_script_chars = 800,
     estimated_chat_iterations = 1,
+    operator_driven = false,
+    image_unit_cost,
+    image_api_label,
   } = input;
 
   const tracks = activeTracks(format);
@@ -64,12 +83,15 @@ export function estimatePipelineCost(input: EstimateInput): Estimate {
 
   const items: EstimateItem[] = [];
 
-  // Kie.ai — image generation, 2 ratios per pick (1:1 + 9:16).
+  // Image generation — 2 ratios per pick (1:1 + 9:16). Priced at the real
+  // finals backend: free for the operator's codex subscription, Kie's price
+  // otherwise (or an explicit paid model price from the finals-model picker).
   if (imageActive && picked_image_count > 0) {
     const units = picked_image_count * IMAGE_RATIO_COUNT;
-    const unit_cost = PRICING.kie_ai.per_image;
+    const unit_cost = image_unit_cost ?? (operator_driven ? 0 : PRICING.kie_ai.per_image);
+    const api = image_api_label ?? (operator_driven ? "gpt-image-2 (free)" : "Kie.ai");
     items.push({
-      api: "Kie.ai",
+      api,
       unit_label: "image",
       units,
       unit_cost,
@@ -103,8 +125,10 @@ export function estimatePipelineCost(input: EstimateInput): Estimate {
     });
   }
 
-  // Anthropic — Claude chat iterations driving the pipeline.
-  if (estimated_chat_iterations > 0) {
+  // Anthropic — Claude chat iterations driving the pipeline. Operator-driven
+  // pipelines run on the ChatGPT/Codex subscription (free), so they never hit
+  // the Anthropic API — drop the line entirely rather than forecast phantom $.
+  if (!operator_driven && estimated_chat_iterations > 0) {
     const units = estimated_chat_iterations;
     const per_iter_cost =
       (ANTHROPIC_INPUT_TOKENS_PER_ITER / 1_000_000) * PRICING.anthropic.per_million_input +

@@ -117,4 +117,39 @@ describe("estimatePipelineCost", () => {
     expect(result.items.map((i) => i.api)).not.toContain("ElevenLabs");
     expect(result.items.map((i) => i.api)).not.toContain("Submagic");
   });
+
+  it("operator-driven image pipeline forecasts $0 (free codex render + free operator)", () => {
+    const result = estimatePipelineCost({
+      format: "image",
+      picked_image_count: 1,
+      picked_video_count: 0,
+      operator_driven: true,
+    });
+
+    // The image line shows the real free backend at $0...
+    expect(result.items.map((i) => i.api)).toEqual(["gpt-image-2 (free)"]);
+    const img = result.items[0];
+    expect(img.units).toBe(2); // 1 pick * 2 ratios (1:1 + 9:16)
+    expect(img.unit_cost).toBe(0);
+    expect(img.subtotal).toBe(0);
+    // ...and there is NO Anthropic line (operator runs on the subscription).
+    expect(result.items.map((i) => i.api)).not.toContain("Anthropic");
+    expect(result.total).toBe(0);
+  });
+
+  it("operator-driven with a paid finals model uses the real per-image cost", () => {
+    const result = estimatePipelineCost({
+      format: "image",
+      picked_image_count: 1,
+      picked_video_count: 0,
+      operator_driven: true,
+      image_api_label: "nano-banana-2 (Kie)",
+      image_unit_cost: 0.05,
+    });
+
+    expect(result.items.map((i) => i.api)).toEqual(["nano-banana-2 (Kie)"]);
+    expect(result.items[0].subtotal).toBeCloseTo(0.1, 4); // 2 images * $0.05
+    expect(result.items.map((i) => i.api)).not.toContain("Anthropic");
+    expect(result.total).toBeCloseTo(0.1, 4);
+  });
 });
