@@ -56,6 +56,11 @@ export default defineConfig({
             "hooks/**/*.{test,spec}.{ts,tsx}",
             "app/**/*.{test,spec}.{ts,tsx}",
             "middleware.{test,spec}.{ts,tsx}",
+            // Harness self-tests (T.3): exercise the shared API-route test
+            // helpers in `tests/unit/helpers/` without colocating a synthetic
+            // spec under app/. They invoke real route handlers, so they need
+            // the same jsdom-shaped `Request`/`Response` environment.
+            "tests/unit/**/*.{test,spec}.{ts,tsx}",
           ],
           exclude: ["node_modules/**", "tests/e2e/**", ".next/**"],
         },

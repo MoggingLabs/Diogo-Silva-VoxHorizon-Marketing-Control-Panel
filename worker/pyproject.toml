@@ -38,6 +38,9 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    # Coverage gate (T.2/#315): CI installs this group via `uv sync --extra dev`
+    # and `pytest` enforces `--cov-fail-under=90` (see [tool.pytest.ini_options]).
+    "pytest-cov>=5.0",
 ]
 
 [build-system]
@@ -51,14 +54,18 @@ packages = ["src"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+# Coverage gate (T.2/#315 DoD): the worker suite must hold >=90% line coverage.
+# `pytest` (plain) now enforces it, so CI's `uv run pytest` is the gate.
+addopts = "--cov=src --cov-report=term-missing --cov-fail-under=90"
 
-# Production coverage gate for the worker. Enforced in CI via
-# `uv run pytest --cov=src --cov-report=term-missing` (the report config below
-# applies fail_under). Line coverage floor is 90%; rebuild worker code
-# (P1-P5) is held to >=90% by the Definition of Done.
+# Production coverage gate for the worker. The gate is enforced by the
+# `addopts` above (plain `pytest` runs `--cov-fail-under=90`) and by CI's
+# `uv run pytest`. Line coverage floor is 90%; rebuild worker code (P1-P5)
+# is held to >=90% by the Definition of Done. `.venv*` test helpers and
+# generated dirs never count toward coverage.
 [tool.coverage.run]
 source = ["src"]
-omit = ["tests/*", "*/__pycache__/*"]
+omit = ["tests/*", "*/__pycache__/*", ".venv*/*"]
 
 [tool.coverage.report]
 show_missing = true

@@ -23,6 +23,7 @@ runs as a service and the env var is the single source of truth.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -97,6 +98,51 @@ _KIE_ASPECT_RATIO: dict[Ratio, str] = {
 Resolution = Literal["1K", "2K", "4K"]
 
 
+# Smallest valid PNG: a 1x1 transparent pixel. Used by FAKE_RENDER mode so the
+# stubbed render returns *real* decodable image bytes (the compositor / Pillow
+# steps downstream can open it) without any network call or generated content.
+# Deterministic by construction — the same bytes every time.
+_FAKE_PNG_1x1 = bytes(
+    [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,  # PNG signature
+        0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,  # IHDR chunk len + type
+        0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,  # 1x1
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,  # bit depth/color + CRC
+        0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41,  # IDAT chunk len + type
+        0x54, 0x78, 0x9C, 0x62, 0x00, 0x01, 0x00, 0x00,
+        0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,  # compressed pixel + CRC
+        0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,  # IEND chunk
+        0x42, 0x60, 0x82,
+    ]
+)
+
+
+def fake_generation_result(
+    prompt: str, ratio: Ratio, resolution: Resolution
+) -> "KieGenerationResult":
+    """Deterministic fake render for FAKE_RENDER mode.
+
+    Returns a valid 1x1 PNG plus stable provenance derived from the inputs,
+    so the same (prompt, ratio, resolution) always yields the same task id —
+    keeping downstream idempotency probes (skip-already-rendered) honest.
+    No network, no API key, no spend.
+    """
+    if ratio not in _KIE_ASPECT_RATIO:
+        raise KieError(f"Unsupported ratio: {ratio!r} (must be 1x1 or 9x16)")
+    aspect = _KIE_ASPECT_RATIO[ratio]
+    # Stable, collision-resistant-enough id from the inputs (not security).
+    digest = hashlib.sha256(
+        f"{prompt}|{aspect}|{resolution}".encode("utf-8")
+    ).hexdigest()[:16]
+    return KieGenerationResult(
+        image_bytes=_FAKE_PNG_1x1,
+        task_id=f"fake-{digest}",
+        source_url=f"https://fake.kie.local/{digest}.png",
+        aspect_ratio=aspect,
+        resolution=resolution,
+    )
+
+
 class KieError(RuntimeError):
     """Raised on any failure from Kie.ai — submit, poll, or download.
 
@@ -152,14 +198,19 @@ class KieClient:
         timeout_s: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        # Resolve at construction time so the failure mode is loud + early.
+        # FAKE_RENDER mode (T.4): the client never calls Kie, so it neither
+        # needs nor reads an API key. This is what lets the full pipeline run
+        # locally / in CI with zero render credentials and zero spend.
+        self.fake = get_settings().fake_render
+        # Resolve at construction time so the failure mode is loud + early —
+        # except in fake mode, where a missing key is expected.
         resolved = api_key or get_settings().kie_ai_api_key
-        if not resolved:
+        if not resolved and not self.fake:
             raise RuntimeError(
                 "KIE_AI_API_KEY not configured — set it in the worker .env "
                 "before calling /work/creative/generate."
             )
-        self.api_key = resolved
+        self.api_key = resolved or "fake-render-no-key"
         # The image model id. Defaults to nano-banana-2 (the legacy default) so
         # existing callers are unchanged; the finals-model picker passes the
         # chosen id (e.g. flux-2/pro-text-to-image, bytedance/seedream-v4-...).
@@ -204,6 +255,18 @@ class KieClient:
         Supabase can store them and the operator can trace a creative
         back to the exact Kie.ai task.
         """
+        # FAKE_RENDER short-circuit (T.4): deterministic bytes, no network.
+        if self.fake:
+            result = fake_generation_result(prompt, ratio, resolution)
+            log.info(
+                "kie_task_faked",
+                task_id=result.task_id,
+                aspect_ratio=result.aspect_ratio,
+                resolution=resolution,
+                byte_count=len(result.image_bytes),
+            )
+            return result
+
         if ratio not in _KIE_ASPECT_RATIO:
             raise KieError(f"Unsupported ratio: {ratio!r} (must be 1x1 or 9x16)")
 
