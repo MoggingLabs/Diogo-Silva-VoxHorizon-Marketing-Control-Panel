@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { getSignedUrl } from "@/lib/creatives";
 import {
   LaunchInput,
   LaunchPayload,
@@ -8,6 +9,7 @@ import {
   type LaunchPackageInsert,
   type LaunchPayloadT,
 } from "@/lib/launches";
+import { isOperatorDriven } from "@/lib/operator/dispatch";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { callWorker, WorkerError } from "@/lib/worker";
@@ -59,6 +61,14 @@ export async function POST(req: NextRequest) {
 
   const supabase = createAdminClient();
 
+  // Whether the originating pipeline is operator/codex-driven. This gates the
+  // operator-flow accommodations below (Supabase-stored finals with no Drive
+  // URL; copy variants optional / image-only) so the legacy Ekko (Drive) flow
+  // is left completely unchanged. Resolved from the linked pipeline's
+  // ``config_draft`` when a ``pipeline_id`` is supplied (the operator flow
+  // always passes one).
+  let operatorDriven = false;
+
   // If the operator handed us a ``pipeline_id``, validate it up-front so the
   // 422 surfaces before we burn the worker round-trip on validation. The
   // pipeline must (a) exist and (b) be in status ``done`` — linking from any
@@ -67,7 +77,7 @@ export async function POST(req: NextRequest) {
   if (pipeline_id) {
     const { data: pipelineRow, error: pipelineErr } = await supabase
       .from("pipelines")
-      .select("id, status, launch_package_id")
+      .select("id, status, launch_package_id, config_draft")
       .eq("id", pipeline_id)
       .maybeSingle();
     if (pipelineErr) {
@@ -86,6 +96,7 @@ export async function POST(req: NextRequest) {
         { status: 422 },
       );
     }
+    operatorDriven = isOperatorDriven(pipelineRow.config_draft);
   }
 
   // 1. Read brief + client.
@@ -138,19 +149,49 @@ export async function POST(req: NextRequest) {
   }
 
   // 4. Per-creative pre-flight.
+  //
+  // Asset reference: the legacy Ekko flow stores finals in Google Drive and
+  // requires ``file_path_drive``. The operator/codex flow stores finals in
+  // Supabase Storage (``file_path_supabase`` set, ``file_path_drive`` NULL).
+  // For a creative with no Drive URL we fall back to a freshly signed Supabase
+  // URL instead of raising the "missing Drive URL" error — so Supabase-stored
+  // creatives launch. A creative with NEITHER backend is still a hard error.
+  const assetRefs: LaunchPayloadT["asset_refs"] = [];
   for (const c of creativeRows) {
-    if (!c.file_path_drive) {
+    if (c.file_path_drive) {
+      assetRefs.push({ creative_id: c.id, source: "drive", url: c.file_path_drive });
+    } else if (c.file_path_supabase) {
+      // Sign the private Storage object so the launch package carries a usable
+      // URL. A sign failure is non-fatal here — the package still references the
+      // creative; we surface it as a warning so the operator can re-sign later.
+      const signed = await getSignedUrl(supabase, c.file_path_supabase);
+      assetRefs.push({ creative_id: c.id, source: "supabase", url: signed });
+      if (!signed) {
+        issues.push({
+          severity: "warning",
+          message: `Creative's Supabase asset could not be signed (will retry at post time).`,
+          ref_table: "creatives",
+          ref_id: c.id,
+        });
+      }
+    } else {
       issues.push({
         severity: "error",
-        message: `Creative is missing Drive URL (file_path_drive).`,
+        message: `Creative is missing both a Drive URL and a Supabase asset path.`,
         ref_table: "creatives",
         ref_id: c.id,
       });
     }
+
+    // Copy variants: required for the legacy flow. For operator-driven /
+    // image-only pipelines, copy authoring can come later — downgrade the
+    // missing-copy hard error to a warning so an image-only launch passes.
     if ((copyByCreative.get(c.id) ?? []).length === 0) {
       issues.push({
-        severity: "error",
-        message: `Creative has no paired copy variants.`,
+        severity: operatorDriven ? "warning" : "error",
+        message: operatorDriven
+          ? `Creative has no paired copy variants (optional for image-only operator launches).`
+          : `Creative has no paired copy variants.`,
         ref_table: "creatives",
         ref_id: c.id,
       });
@@ -180,6 +221,8 @@ export async function POST(req: NextRequest) {
           brief: brief.payload,
           creatives: creativeRows,
           copy_variants: copyVariants ?? [],
+          asset_refs: assetRefs,
+          operator_driven: operatorDriven,
         },
       }),
     });
@@ -214,6 +257,7 @@ export async function POST(req: NextRequest) {
       : null,
     creative_ids: creativeRows.map((c) => c.id),
     copy_variant_ids: (copyVariants ?? []).map((cv) => cv.id),
+    asset_refs: assetRefs,
     issues,
     validation,
   };

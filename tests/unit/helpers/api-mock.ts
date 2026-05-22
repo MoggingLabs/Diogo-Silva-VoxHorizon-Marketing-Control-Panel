@@ -65,12 +65,15 @@ function fillTable(table: LooseTableConfig): SupabaseTableConfig {
  * Wrapper around `mockSupabaseClient` that accepts a relaxed config where
  * `data` and `error` at the verb level default to `null` when omitted.
  */
-export function mockClient(config: Record<string, LooseTableConfig> = {}): SupabaseClientMock {
+export function mockClient(
+  config: Record<string, LooseTableConfig> = {},
+  options: { storageSign?: (path: string) => string | null } = {},
+): SupabaseClientMock {
   const filled: SupabaseMockConfig = {};
   for (const [table, t] of Object.entries(config)) {
     filled[table] = fillTable(t);
   }
-  return mockSupabaseClient(filled);
+  return mockSupabaseClient(filled, options);
 }
 
 /**

@@ -65,6 +65,7 @@ function payload(over: Partial<LaunchPayloadT> = {}): LaunchPayloadT {
     client: { id: "c1", slug: "acme", name: "Acme" },
     creative_ids: [],
     copy_variant_ids: [],
+    asset_refs: [],
     issues: [],
     validation: { ok: true, via: "preflight" },
     ...over,
