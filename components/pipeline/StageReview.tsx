@@ -89,6 +89,13 @@ export function StageReview({ pipeline }: StageReviewProps) {
     [pipeline.picks],
   );
 
+  // Operator-driven pipelines render on the free Codex subscription (image +
+  // operator both $0), so the forecast must reflect that — not the paid
+  // Kie/Anthropic defaults used by the deterministic (Ekko) flow.
+  const operatorDriven = Boolean(
+    (pipeline.config_draft as { operator_driven?: boolean } | null | undefined)?.operator_driven,
+  );
+
   // Estimate is pure & cheap — re-derive on each render rather than memoize
   // (the inputs are stable for any given pipeline snapshot).
   const estimate = estimatePipelineCost({
@@ -96,6 +103,7 @@ export function StageReview({ pipeline }: StageReviewProps) {
     picked_image_count: imagePickIds.length,
     picked_video_count: videoPickIds.length,
     estimated_chat_iterations: 1,
+    operator_driven: operatorDriven,
   });
 
   return (
