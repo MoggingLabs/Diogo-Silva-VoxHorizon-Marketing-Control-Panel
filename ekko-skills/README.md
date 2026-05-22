@@ -38,7 +38,13 @@ ekko-skills/
   dashboard-chat-publish/    ← publish chat messages → Supabase (HI-10, J)
   dashboard-task-result/     ← publish Hermes task results → Supabase (HI-11, K)
   image-ad-authoring/        ← author briefs + concepts + photoreal prompts
-  pipeline-operator/         ← operator playbook + worker-tool client (render is spend-gated)
+  pipeline-operator/         ← operator playbook (12-stage orchestration) + worker-tool client
+    templates/subagents/     ← copy/qa/compliance/monitor specialist contracts
+  copy-authoring/            ← `copy` stage: owner-voice variants + humanizer
+  creative-qa/               ← `creative_qa` stage: AI-defect + roofing-surface rubric
+  ad-compliance/             ← `compliance_review` HARD GATE: Meta/FTC ruleset (candidates only)
+  campaign-launch/           ← `launch_handoff` HARD GATE: PAUSED-first launch package
+  campaign-monitor/          ← `monitor` stage: kill/watch/keep/scale (GHL lead truth)
 ```
 
 Each skill's `README.md` is the canonical install + verify procedure for
