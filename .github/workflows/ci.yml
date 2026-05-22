@@ -48,8 +48,8 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      - name: Unit tests
-        run: pnpm test:unit
+      - name: Unit tests + coverage gate (>=90%)
+        run: pnpm test:coverage
 
       - name: Build
         run: pnpm build
@@ -77,8 +77,8 @@ jobs:
       - name: Install deps
         run: uv sync --frozen --extra dev
 
-      - name: Run tests
-        run: uv run pytest -q
+      - name: Run tests + coverage gate (>=90% lines)
+        run: uv run pytest --cov=src --cov-report=term-missing
 
   # ---------------------------------------------------------------------------
   # Workflow YAML lint — catches typos / misconfigured actions before merge.
