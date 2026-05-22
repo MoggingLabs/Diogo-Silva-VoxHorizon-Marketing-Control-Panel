@@ -15,15 +15,24 @@ Conventions match the sibling dashboard skills: synchronous ``httpx.Client``,
 a custom error type, lazy env reads (so importing is free and tests need no
 env), and a fresh client per call.
 
-Render backend (env ``RENDER_BACKEND``)
----------------------------------------
-``pipeline_operator_render`` is backend-selectable. The DEFAULT, ``openai-codex``,
-generates each image IN THE OPERATOR CONTAINER via Hermes' codex image-gen
-plugin (the operator's ChatGPT/Codex subscription — gpt-image-2, $0; see
-:mod:`codex_render`) and uploads the bytes to ``/store_creative``. Setting
-``RENDER_BACKEND=kie`` restores the legacy paid path that POSTs to ``/render``.
+Render routing (ideation always free; finals per-pipeline)
+----------------------------------------------------------
+``pipeline_operator_render`` routes by ``kind``, NOT by an env var:
+
+* IDEATION (``kind="concept_preview"``) is HARDWIRED to the FREE codex model
+  (gpt-image-2, LOW quality): each image is generated IN THE OPERATOR CONTAINER
+  via Hermes' codex image-gen plugin (the operator's ChatGPT/Codex subscription,
+  $0; see :mod:`codex_render`) and uploaded to ``/store_creative``. It is never
+  selectable to a paid model.
+* FINALS (``kind="final"``) use the manager's PER-PIPELINE "Finals model" choice,
+  persisted at kickoff on ``config_draft.finals_render_backend`` +
+  ``finals_render_model`` (default: the free codex model). The codex backend
+  renders in-container at HIGH quality; the ``kie`` backend POSTs the chosen Kie
+  model id (nano-banana-2 / Flux / Seedream) to ``/render``.
+
 Both backends produce identical worker-side rows / events / cost lines, so the
-dashboard and the spend gate are unaffected by the choice; only the bill is.
+dashboard is unaffected by the choice; only the bill is. The legacy
+``RENDER_BACKEND`` env is no longer consulted for routing.
 
 Tool-name surface (THE GATING CONTRACT)
 ---------------------------------------
@@ -79,12 +88,45 @@ RENDER_BACKENDS: frozenset[str] = frozenset({BACKEND_OPENAI_CODEX, BACKEND_KIE})
 #: Default backend: the operator's subscription-backed codex renderer (free).
 DEFAULT_RENDER_BACKEND = BACKEND_OPENAI_CODEX
 
+#: The FREE image model — codex/gpt-image-2. IDEATION (concept_preview) ALWAYS
+#: uses this, regardless of any per-pipeline finals choice; it is the default
+#: for finals too. Never selectable to a paid model for ideation.
+FREE_MODEL = "gpt-image-2"
+
+# ---------------------------------------------------------------------------
+# Finals model registry — the manager's per-pipeline "Finals model" choice.
+# ---------------------------------------------------------------------------
+#
+# Each entry maps a manager-facing label to the (backend, model) that renders
+# the FINALS (generation) stage for that pipeline. IDEATION is NOT in here — it
+# is hardwired to the free codex/gpt-image-2 model below. The label set here is
+# the single source of truth the dashboard mirrors in its dropdown.
+#
+# Verified Kie model ids (see worker/src/services/kie.py): nano-banana-2,
+# flux-2/pro-text-to-image (Flux), bytedance/seedream-v4-text-to-image (Seedream).
+FINALS_MODELS: dict[str, dict[str, str]] = {
+    "gpt-image-2 (free)": {"backend": BACKEND_OPENAI_CODEX, "model": FREE_MODEL},
+    "nano-banana-2": {"backend": BACKEND_KIE, "model": "nano-banana-2"},
+    "Flux": {"backend": BACKEND_KIE, "model": "flux-2/pro-text-to-image"},
+    "Seedream": {
+        "backend": BACKEND_KIE,
+        "model": "bytedance/seedream-v4-text-to-image",
+    },
+}
+#: Default finals model label — the FREE one.
+DEFAULT_FINALS_LABEL = "gpt-image-2 (free)"
+
 #: Per-kind render parameters for the codex backend, mirroring the worker's
 #: SOP (``pipeline_tools._CONCEPT_PREVIEW`` / ``_FINAL``): which ratios to
-#: render and the version string each creative is stamped with.
+#: render, the version string each creative is stamped with, and the codex image
+#: quality (ideation is LOW/cheap; finals are HIGH for production-grade output).
 _KIND_PARAMS: dict[str, dict[str, Any]] = {
-    "concept_preview": {"ratios": ("1x1",), "version": "v0.ideation"},
-    "final": {"ratios": ("1x1", "9x16"), "version": "v1.0"},
+    "concept_preview": {
+        "ratios": ("1x1",),
+        "version": "v0.ideation",
+        "quality": "low",
+    },
+    "final": {"ratios": ("1x1", "9x16"), "version": "v1.0", "quality": "high"},
 }
 
 
@@ -169,22 +211,26 @@ def _require_client_id(client_id: Any) -> str:
     return client_id.strip()
 
 
-def _resolve_render_backend() -> str:
-    """Resolve the active render backend from ``RENDER_BACKEND`` (env).
+def _resolve_finals_model(state: dict[str, Any]) -> tuple[str, str]:
+    """Resolve the per-pipeline FINALS (backend, model) from pipeline state.
 
-    Defaults to ``openai-codex`` (the operator's subscription-backed renderer).
-    An unset / empty value uses the default; an unrecognized value raises so a
-    typo in the container env fails loudly instead of silently spending on Kie.
+    The manager's "Finals model" choice is persisted at kickoff on
+    ``config_draft.finals_render_backend`` + ``finals_render_model``. When absent
+    or unrecognized we fall back to the FREE default (codex/gpt-image-2) so a
+    pipeline created before this feature, or with a stale value, still renders
+    finals for $0. IDEATION never calls this — it is hardwired to the free model.
     """
-    raw = os.environ.get(ENV_RENDER_BACKEND, "").strip().lower()
-    if not raw:
-        return DEFAULT_RENDER_BACKEND
-    if raw not in RENDER_BACKENDS:
-        raise PipelineOperatorError(
-            f"{ENV_RENDER_BACKEND} must be one of {sorted(RENDER_BACKENDS)}, "
-            f"got {raw!r}"
-        )
-    return raw
+    default = FINALS_MODELS[DEFAULT_FINALS_LABEL]
+    config_draft = state.get("config_draft")
+    if not isinstance(config_draft, dict):
+        return default["backend"], default["model"]
+    backend = config_draft.get("finals_render_backend")
+    model = config_draft.get("finals_render_model")
+    if not isinstance(backend, str) or backend not in RENDER_BACKENDS:
+        return default["backend"], default["model"]
+    if not isinstance(model, str) or not model.strip():
+        return default["backend"], default["model"]
+    return backend, model.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -362,21 +408,27 @@ def pipeline_operator_render(
     parent_creative_id?}``) to render exactly those. Kept for back-compat and
     one-off renders.
 
-    * ``kind="concept_preview"`` renders 1:1 previews (ideation). The
-      deterministic path renders ALL persisted concepts in one approval.
-    * ``kind="final"`` renders 1:1 + 9:16 finals (generation). Each item MUST
-      carry ``parent_creative_id`` (the picked concept it derives from); the
-      deterministic path threads it from the picks automatically. 9:16 is a TRUE
-      9:16 (864x1536) on the codex backend.
+    * ``kind="concept_preview"`` renders 1:1 previews (ideation). IDEATION IS
+      ALWAYS FREE: it renders via codex/gpt-image-2 (LOW quality) regardless of
+      the ``RENDER_BACKEND`` env or the pipeline's finals choice — never paid,
+      never selectable. The deterministic path renders ALL persisted concepts in
+      one approval.
+    * ``kind="final"`` renders 1:1 + 9:16 finals (generation). The image model is
+      the manager's PER-PIPELINE "Finals model" choice, persisted at kickoff on
+      ``config_draft.finals_render_backend`` + ``finals_render_model`` (default:
+      the free codex/gpt-image-2). Each item MUST carry ``parent_creative_id``
+      (the picked concept it derives from); the deterministic path threads it
+      from the picks automatically. 9:16 is a TRUE 9:16 (864x1536) on codex.
 
-    **Backend (env ``RENDER_BACKEND``, default ``openai-codex``):**
+    **Finals backend (per pipeline, NOT the env):**
 
     * ``openai-codex`` — generate each image IN-CONTAINER via the operator's
       ChatGPT/Codex subscription (gpt-image-2 through the Codex Responses
-      ``image_generation`` tool, $0) and upload the bytes to the worker's
-      ``/work/pipeline/tools/store_creative``. No paid API.
-    * ``kie`` — POST to the worker's ``/work/pipeline/tools/render`` (the legacy
-      paid Kie path), kept as a selectable fallback.
+      ``image_generation`` tool, $0, HIGH quality for finals) and upload the
+      bytes to the worker's ``/work/pipeline/tools/store_creative``. No paid API.
+      This is also the ideation path (LOW quality).
+    * ``kie`` — POST to the worker's ``/work/pipeline/tools/render`` (the paid Kie
+      path) with the chosen Kie model id (nano-banana-2 / Flux / Seedream).
 
     Either way the worker emits the SAME pipeline_events + cost line + creative
     row, so the dashboard, the auto-advance trigger, and the cost aggregator
@@ -399,15 +451,28 @@ def pipeline_operator_render(
             f"kind must be one of {sorted(RENDER_KINDS)}, got {kind!r}"
         )
 
-    backend = _resolve_render_backend()
+    # Resolve the (backend, model) for THIS render.
+    #   * IDEATION (concept_preview) is HARDWIRED to the free codex/gpt-image-2.
+    #     It never consults RENDER_BACKEND or the finals choice — it can never be
+    #     a paid model.
+    #   * FINALS read the manager's per-pipeline choice from pipeline state
+    #     (config_draft.finals_render_backend / finals_render_model), defaulting
+    #     to the free codex model.
+    if kind == "concept_preview":
+        backend, model = BACKEND_OPENAI_CODEX, FREE_MODEL
+        state: Optional[dict[str, Any]] = None
+    else:
+        state = pipeline_operator_read(pid)
+        backend, model = _resolve_finals_model(state)
 
     # Deterministic path: no items supplied → render the persisted plan.
     if items is None:
         if backend == BACKEND_KIE:
-            # The worker resolves the persisted plan itself for the Kie path.
-            body = {"pipeline_id": pid, "kind": kind}
+            # The worker resolves the persisted plan itself for the Kie path; we
+            # thread the chosen model id so it renders with the finals model.
+            body = {"pipeline_id": pid, "kind": kind, "model": model}
             return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
-        resolved = _resolve_deterministic_items(pid, kind)
+        resolved = _resolve_deterministic_items(pid, kind, state=state)
         if not resolved:
             # Nothing to render — empty plan or everything already done.
             return {
@@ -466,13 +531,18 @@ def pipeline_operator_render(
         normalized.append(out)
 
     if backend == BACKEND_KIE:
-        body = {"pipeline_id": pid, "kind": kind, "items": normalized}
+        body = {
+            "pipeline_id": pid,
+            "kind": kind,
+            "items": normalized,
+            "model": model,
+        }
         return _request("POST", f"{_TOOLS_PREFIX}/render", json_body=body)
     return _render_via_codex(pipeline_id=pid, kind=kind, items=normalized)
 
 
 def _resolve_deterministic_items(
-    pipeline_id: str, kind: str
+    pipeline_id: str, kind: str, *, state: Optional[dict[str, Any]] = None
 ) -> list[dict[str, Any]]:
     """Build the codex render batch from the PERSISTED plan (no items supplied).
 
@@ -485,8 +555,13 @@ def _resolve_deterministic_items(
     This keeps the LLM out of the per-image loop entirely: the operator triggers
     the stage, and the deterministic plan comes from the brief it already
     authored, not from prompts re-held across a long synchronous render.
+
+    ``state`` is an optional already-fetched pipeline read (the finals path reads
+    it once to resolve the per-pipeline model and reuses it here); when omitted we
+    fetch it.
     """
-    state = pipeline_operator_read(pipeline_id)
+    if state is None:
+        state = pipeline_operator_read(pipeline_id)
     specs = _persisted_concepts_from_state(state)
 
     if kind == "concept_preview":
@@ -644,6 +719,10 @@ def _render_via_codex(
     params = _KIND_PARAMS[kind]
     ratios: tuple[str, ...] = params["ratios"]
     version: str = params["version"]
+    # Per-kind codex image quality: ideation is LOW (cheap previews), finals are
+    # HIGH (production-grade). Passed explicitly so the operator container's
+    # OPENAI_IMAGE_QUALITY env (set to low for ideation) can't downgrade finals.
+    quality: str = params["quality"]
 
     renders: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -655,7 +734,9 @@ def _render_via_codex(
         parent = item.get("parent_creative_id")
         for ratio in ratios:
             try:
-                image_bytes = codex_render.render_image(prompt, ratio)
+                image_bytes = codex_render.render_image(
+                    prompt, ratio, quality=quality
+                )
                 image_b64 = _b64.b64encode(image_bytes).decode("ascii")
                 stored = pipeline_operator_store_creative(
                     pipeline_id=pipeline_id,
@@ -709,6 +790,9 @@ __all__ = [
     "BACKEND_KIE",
     "RENDER_BACKENDS",
     "DEFAULT_RENDER_BACKEND",
+    "FREE_MODEL",
+    "FINALS_MODELS",
+    "DEFAULT_FINALS_LABEL",
     "PipelineOperatorError",
     "RENDER_KINDS",
     "get_client",

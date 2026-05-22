@@ -21,22 +21,29 @@
 # Merge semantics (see policy_overlay.py / the plugin README): in-code
 # defaults always win over a softening override; gating wins over allowing.
 
-# The render tool is THE spend tool — every call renders paid Kie images.
-# Gating it here makes the manager approve the spend in the dashboard
-# (long-poll) before the worker runs. This is the operator's spend gate.
-extra_requires_approval:
-  - mcp_pipeline_operator_pipeline_operator_render
+# Renders are FREE by default (the operator renders ideation — and finals when
+# the manager keeps the free model — on the manager's ChatGPT/Codex subscription,
+# $0). The render gate was removed LIVE on the VPS so the operator runs the whole
+# pipeline without pestering the manager for a spend approval on every render.
+# This file is the source `operator-deploy.sh` deploys, so it MUST match the live
+# state — an empty requires-approval set, with render in the allowlist below —
+# or a redeploy would silently RE-GATE renders (the footgun). The manager still
+# supervises spend at the dashboard STAGE gates (brief review, concept picks,
+# finals approval); per-render long-poll gating is intentionally gone.
+extra_requires_approval: []
 
 # The read tool is a pure GET of pipeline state, the client-read tool is a pure
 # GET of the client's brand / offers / do-not-say context (both no spend, no
-# side effects), and the brief tool is a free Supabase write the manager reviews
-# via the dashboard STAGE gate (not the spend gate). Allowlisting all three
-# keeps the operator's read-state → read-client → author loop running without
-# pestering the manager for non-spend actions.
+# side effects), the brief tool is a free Supabase write the manager reviews via
+# the dashboard STAGE gate, and the render tool is now allowlisted too (renders
+# are free; the manager gates spend at the stage gates, not per render).
+# Allowlisting all four keeps the operator's read → author → render loop running
+# without pestering the manager for non-spend actions.
 allowlist:
   - mcp_pipeline_operator_pipeline_operator_read
   - mcp_pipeline_operator_pipeline_operator_client_read
   - mcp_pipeline_operator_pipeline_operator_brief
+  - mcp_pipeline_operator_pipeline_operator_render
 
 # Hard-block the shell/code tools. A focused marketing operator authors brief
 # and concept payloads directly (in reasoning) and persists them via the MCP

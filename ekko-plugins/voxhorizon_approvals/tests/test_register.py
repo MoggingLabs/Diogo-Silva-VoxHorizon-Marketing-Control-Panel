@@ -687,8 +687,8 @@ def test_resolve_evaluate_loads_overlay_when_set(
     function)."""
     decide = _resolve_evaluate()
     assert decide is not plain_evaluate
-    # The overlay gates render and allowlists read.
-    assert decide(RENDER, {}).action == "ask_operator"
+    # The overlay allowlists render (free) and read.
+    assert decide(RENDER, {}).action == "allow"
     assert decide(READ, {}).action == "allow"
 
 
@@ -733,18 +733,15 @@ def test_env_unset_is_byte_identical_for_core_tools(
     assert hook("read_file", {"path": "/x"}, "t") is None
 
 
-def test_overlay_gates_render_returns_ask_then_block(
+def test_overlay_allowlists_render_no_round_trip(
     env: None,
-    audit_path: Path,
     _operator_policy_env: None,
     _always_ask_mode: None,
 ) -> None:
-    """With the operator overlay loaded, the render spend tool round-trips the
-    operator; a rejection becomes a block."""
+    """Renders are free, so the render tool is allowlisted under the operator
+    overlay → it passes through without any operator round-trip."""
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200, json={"decision": "rejected", "notes": "no budget"}
-        )
+        raise AssertionError("allowlisted render tool must not round-trip")
 
     _ctx, hook, _client = _register_with_mock(handler)
     result = hook(
@@ -754,43 +751,15 @@ def test_overlay_gates_render_returns_ask_then_block(
         session_id="sess-1",
         tool_call_id="tc-1",
     )
-    assert result is not None
-    assert result["action"] == "block"
-    assert "no budget" in result["message"]
+    assert result is None  # allowlisted → pass-through, no worker hit
 
 
-def test_overlay_gates_render_round_trips_operator(
-    env: None,
-    _operator_policy_env: None,
-    _always_ask_mode: None,
-) -> None:
-    """The exact full render tool name is gated and round-trips the operator."""
-    seen = {"count": 0}
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["count"] += 1
-        return httpx.Response(
-            200, json={"decision": "approved", "notes": "go"}
-        )
-
-    _ctx, hook, _client = _register_with_mock(handler)
-    result = hook(
-        RENDER,
-        {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
-        "task-1",
-        session_id="sess-1",
-        tool_call_id="tc-1",
-    )
-    assert result is None  # operator approved
-    assert seen["count"] == 1  # it actually round-tripped the operator
-
-
-def test_overlay_allowlists_read_and_brief(
+def test_overlay_allowlists_read_brief_and_render(
     env: None,
     _operator_policy_env: None,
 ) -> None:
-    """read/client_read/brief are allowlisted under the operator overlay → no
-    worker hit."""
+    """read/client_read/brief/render are allowlisted under the operator overlay
+    → no worker hit."""
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("allowlisted operator tool must not round-trip")
 
@@ -807,6 +776,14 @@ def test_overlay_allowlists_read_and_brief(
         hook(
             BRIEF,
             {"pipeline_id": "p", "image_payload": {}},
+            "t",
+        )
+        is None
+    )
+    assert (
+        hook(
+            RENDER,
+            {"pipeline_id": "p", "kind": "concept_preview"},
             "t",
         )
         is None

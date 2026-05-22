@@ -14,7 +14,11 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import { kickoffOperatorPipeline } from "@/lib/pipeline/client";
+import {
+  DEFAULT_FINALS_MODEL_LABEL,
+  FINALS_MODEL_OPTIONS,
+  kickoffOperatorPipeline,
+} from "@/lib/pipeline/client";
 import { fetchClients, type ClientOption } from "@/lib/realtime/client-data";
 
 /**
@@ -52,6 +56,11 @@ export function OperatorKickoffForm() {
   const [clients, setClients] = useState<ClientOption[]>([]);
   const [clientsLoading, setClientsLoading] = useState(true);
 
+  // The image model used for the FINALS (generation) renders, chosen per
+  // pipeline at kickoff. Defaults to the FREE codex model. Ideation always
+  // renders free regardless of this — it is never selectable to a paid model.
+  const [finalsModel, setFinalsModel] = useState<string>(DEFAULT_FINALS_MODEL_LABEL);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -80,6 +89,7 @@ export function OperatorKickoffForm() {
     try {
       const pipeline = await kickoffOperatorPipeline({
         instruction: trimmed,
+        finals_model: finalsModel,
         ...(clientId !== NO_CLIENT ? { client_id: clientId } : {}),
       });
       router.push(`/pipeline/${pipeline.id}`);
@@ -89,7 +99,7 @@ export function OperatorKickoffForm() {
     }
     // On success we navigate away, so we deliberately leave `submitting` true
     // to keep the button disabled through the transition.
-  }, [clientId, router, submitting, trimmed]);
+  }, [clientId, finalsModel, router, submitting, trimmed]);
 
   return (
     <section
@@ -149,6 +159,30 @@ export function OperatorKickoffForm() {
           {clientsLoading
             ? "Loading clients…"
             : "Pick a client to give the operator its brand voice, offers, and do-not-say rules."}
+        </p>
+      </div>
+
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="operator-finals-model">Finals model</Label>
+        <Select value={finalsModel} onValueChange={setFinalsModel} disabled={submitting}>
+          <SelectTrigger
+            id="operator-finals-model"
+            data-testid="operator-finals-model"
+            aria-label="Finals model"
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {FINALS_MODEL_OPTIONS.map((opt) => (
+              <SelectItem key={opt.label} value={opt.label}>
+                {opt.label} <span className="text-muted-foreground">({opt.cost})</span>
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <p className="text-xs text-muted-foreground">
+          Model for the final production renders. Ideation previews are always free (gpt-image-2).
+          Paid models bill per image.
         </p>
       </div>
 
