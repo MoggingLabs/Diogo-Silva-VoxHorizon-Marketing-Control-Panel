@@ -328,34 +328,44 @@ def test_brief_rejects_non_string_notes(env_set: None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_render_concept_preview_batches_all_items(
+def test_render_concept_preview_always_uses_codex_even_with_kie_env(
     env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": []}
-    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
+    """IDEATION is hardwired to the free codex model: even with
+    RENDER_BACKEND=kie, concept_preview renders via codex/store_creative — never
+    the paid /render path. This is the ideation-always-free guarantee."""
+    _fake_codex(monkeypatch)
     items = [
         {"concept": "before_after__a", "prompt": "prompt a"},
         {"concept": "savings__b", "prompt": "prompt b", "offer_text": "$99"},
     ]
+    # Two concepts × one 1x1 ratio = two store_creative calls; NO /render.
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v0.ideation"}),
+            _FakeResponse(200, {"creative_id": "cr-b", "file_path_supabase": "y", "version": "v0.ideation"}),
+        ],
+    )
     out = pipeline_operator_render(
         pipeline_id="p-1", kind="concept_preview", items=items
     )
-    assert out == resp
-    req = built[0].requests[0]
-    assert req.method == "POST"
-    assert req.url == "/work/pipeline/tools/render"
-    # All items in ONE call (one spend gate).
-    assert req.json_body == {
-        "pipeline_id": "p-1",
-        "kind": "concept_preview",
-        "items": [
-            {"concept": "before_after__a", "prompt": "prompt a"},
-            {"concept": "savings__b", "prompt": "prompt b", "offer_text": "$99"},
-        ],
-    }
+    assert out["ok"] is True
+    assert out["total_cost_usd"] == 0  # free
+    all_requests = [r for c in built for r in c.requests]
+    urls = [r.url for r in all_requests]
+    assert urls == ["/work/pipeline/tools/store_creative"] * 2
+    # No /render call ever — ideation never touches the paid Kie path.
+    assert not any(r.url.endswith("/render") for r in all_requests)
 
 
-def test_render_final_requires_parent_creative_id(env_set: None) -> None:
+def test_render_final_requires_parent_creative_id(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # final reads pipeline state to resolve the per-pipeline finals model.
+    _fake_codex(monkeypatch)
+    state = {"config_draft": {}, "concepts": [], "picks": {"image": []}, "brief": None}
+    _install_fake_client(monkeypatch, responses=[_FakeResponse(200, state)])
     with pytest.raises(PipelineOperatorError, match="parent_creative_id is required"):
         pipeline_operator_render(
             pipeline_id="p-1",
@@ -364,12 +374,26 @@ def test_render_final_requires_parent_creative_id(env_set: None) -> None:
         )
 
 
-def test_render_final_passes_parent_creative_id(
-    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+def test_render_final_kie_model_threaded_from_pipeline(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A pipeline whose finals choice is a Kie model (e.g. Flux) routes the
+    explicit-items final to /render with that model id threaded."""
+    state = {
+        "config_draft": {
+            "finals_render_backend": "kie",
+            "finals_render_model": "flux-2/pro-text-to-image",
+        },
+        "concepts": [],
+        "picks": {"image": []},
+        "brief": None,
+    }
     built = _install_fake_client(
         monkeypatch,
-        responses=[_FakeResponse(200, {"ok": True, "renders": [], "total_cost_usd": 0.1, "errors": []})],
+        responses=[
+            _FakeResponse(200, state),  # the read to resolve the finals model
+            _FakeResponse(200, {"ok": True, "renders": [], "total_cost_usd": 0.1, "errors": []}),
+        ],
     )
     pipeline_operator_render(
         pipeline_id="p-1",
@@ -382,8 +406,51 @@ def test_render_final_passes_parent_creative_id(
             }
         ],
     )
-    body = built[0].requests[0].json_body
+    render_calls = [
+        r for c in built for r in c.requests if r.url.endswith("/render")
+    ]
+    assert len(render_calls) == 1
+    body = render_calls[0].json_body
+    assert body["model"] == "flux-2/pro-text-to-image"
     assert body["items"][0]["parent_creative_id"] == "cr-9"
+
+
+def test_render_final_default_codex_when_no_choice(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pipeline with NO finals choice defaults finals to the free codex model
+    (1x1 + 9x16 via store_creative, $0) regardless of RENDER_BACKEND."""
+    _fake_codex(monkeypatch)
+    state = {
+        "config_draft": {},  # no finals_render_* keys
+        "concepts": [],
+        "picks": {"image": []},
+        "brief": None,
+    }
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, state),  # the read
+            _FakeResponse(200, {"creative_id": "f-1", "file_path_supabase": "x", "version": "v1.0"}),
+            _FakeResponse(200, {"creative_id": "f-2", "file_path_supabase": "y", "version": "v1.0"}),
+        ],
+    )
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="final",
+        items=[
+            {
+                "concept": "savings__b",
+                "prompt": "final prompt",
+                "parent_creative_id": "cr-9",
+            }
+        ],
+    )
+    assert out["total_cost_usd"] == 0
+    store_calls = [
+        r for c in built for r in c.requests if r.url.endswith("store_creative")
+    ]
+    assert sorted(r.json_body["ratio"] for r in store_calls) == ["1x1", "9x16"]
 
 
 def test_render_rejects_unknown_kind(env_set: None) -> None:
@@ -421,38 +488,57 @@ def test_render_rejects_item_without_concept(env_set: None) -> None:
 
 
 def test_render_strips_whitespace_in_items(
-    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """concept_preview (codex) strips whitespace on the stored concept/prompt."""
+    _fake_codex(monkeypatch)
     built = _install_fake_client(
         monkeypatch,
-        responses=[_FakeResponse(200, {"ok": True, "renders": [], "total_cost_usd": 0, "errors": []})],
+        responses=[
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v0.ideation"}),
+        ],
     )
     pipeline_operator_render(
         pipeline_id="p-1",
         kind="concept_preview",
         items=[{"concept": "  before_after__a  ", "prompt": "  prompt a  "}],
     )
-    item = built[0].requests[0].json_body["items"][0]
-    assert item == {"concept": "before_after__a", "prompt": "prompt a"}
+    body = built[0].requests[0].json_body
+    assert body["concept"] == "before_after__a"
+    assert body["prompt"] == "prompt a"
 
 
 def test_render_per_item_errors_do_not_raise(
-    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+    env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Worker reports per-item failures inside a 2xx body; helper returns it."""
-    resp = {
-        "ok": True,
-        "renders": [{"creative_id": "cr-1", "concept": "a", "ratio": "1x1"}],
-        "total_cost_usd": 0.02,
-        "errors": [{"concept": "b", "error": "kie 429"}],
-    }
-    _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
+    """A codex render failure for one item lands in errors[]; batch continues."""
+
+    def _render(prompt: str, ratio: str, *, quality: str = "high") -> bytes:
+        if prompt == "pb":
+            raise RuntimeError("codex boom for b")
+        return b"PNG-ok"
+
+    fake_codex = type(sys)("codex_render")
+    fake_codex.render_image = _render
+    monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
+
+    # Only concept "a" stores successfully (one 1x1 call).
+    _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, {"creative_id": "cr-1", "file_path_supabase": "x", "version": "v0.ideation"}),
+        ],
+    )
     out = pipeline_operator_render(
         pipeline_id="p-1",
         kind="concept_preview",
         items=[{"concept": "a", "prompt": "pa"}, {"concept": "b", "prompt": "pb"}],
     )
-    assert out["errors"] == [{"concept": "b", "error": "kie 429"}]
+    assert len(out["renders"]) == 1
+    assert out["renders"][0]["concept"] == "a"
+    assert len(out["errors"]) == 1
+    assert out["errors"][0]["concept"] == "b"
+    assert "boom" in out["errors"][0]["error"]
 
 
 # ---------------------------------------------------------------------------
@@ -473,7 +559,9 @@ def test_render_default_backend_is_codex_not_kie(
 
     # Fake the codex renderer so no Hermes / network is needed.
     fake_codex = type(sys)("codex_render")
-    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    fake_codex.render_image = (
+        lambda prompt, ratio, *, quality="high": b"PNG-" + ratio.encode()
+    )
     monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
 
     # store_creative posts; one item × concept_preview = one 1x1 store call.
@@ -518,12 +606,18 @@ def test_render_codex_final_renders_both_ratios(
     """Codex final fans out to 1x1 + 9x16 and stores each (v1.0)."""
     monkeypatch.setenv("RENDER_BACKEND", "openai-codex")
     fake_codex = type(sys)("codex_render")
-    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    fake_codex.render_image = (
+        lambda prompt, ratio, *, quality="high": b"PNG-" + ratio.encode()
+    )
     monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
 
+    # final reads pipeline state to resolve the per-pipeline finals model
+    # (no choice persisted → defaults to the free codex model).
+    state = {"config_draft": {}, "concepts": [], "picks": {"image": []}, "brief": None}
     built = _install_fake_client(
         monkeypatch,
         responses=[
+            _FakeResponse(200, state),
             _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v1.0"}),
             _FakeResponse(200, {"creative_id": "cr-b", "file_path_supabase": "y", "version": "v1.0"}),
         ],
@@ -538,11 +632,12 @@ def test_render_codex_final_renders_both_ratios(
     assert out["total_cost_usd"] == 0
     assert sorted(r["ratio"] for r in out["renders"]) == ["1x1", "9x16"]
     # Two store_creative calls (a fresh httpx.Client per request), both v1.0
-    # with the parent threaded through. Aggregate requests across all clients.
+    # with the parent threaded through. Aggregate requests across all clients;
+    # the first request is the state read (to resolve the finals model).
     all_requests = [r for c in built for r in c.requests]
-    urls = [r.url for r in all_requests]
-    assert urls == ["/work/pipeline/tools/store_creative"] * 2
-    for r in all_requests:
+    store_calls = [r for r in all_requests if r.url.endswith("store_creative")]
+    assert [r.url for r in store_calls] == ["/work/pipeline/tools/store_creative"] * 2
+    for r in store_calls:
         assert r.json_body["version"] == "v1.0"
         assert r.json_body["parent_creative_id"] == "cr-c1"
 
@@ -553,7 +648,7 @@ def test_render_codex_per_item_error_collected_not_raised(
     """A codex generation failure lands in errors[], the batch continues."""
     monkeypatch.delenv("RENDER_BACKEND", raising=False)
 
-    def _render(prompt: str, ratio: str) -> bytes:
+    def _render(prompt: str, ratio: str, *, quality: str = "high") -> bytes:
         if ratio == "9x16":
             raise RuntimeError("codex 9x16 boom")
         return b"PNG-ok"
@@ -562,11 +657,14 @@ def test_render_codex_per_item_error_collected_not_raised(
     fake_codex.render_image = _render
     monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
 
-    # Only the 1x1 store call should reach the worker.
+    # final reads state first (no choice → free codex), then only the 1x1 store
+    # call should reach the worker (9x16 fails in codex before any store).
+    state = {"config_draft": {}, "concepts": [], "picks": {"image": []}, "brief": None}
     built = _install_fake_client(
         monkeypatch,
         responses=[
-            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v1.0"})
+            _FakeResponse(200, state),
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v1.0"}),
         ],
     )
     out = pipeline_operator_render(
@@ -581,43 +679,53 @@ def test_render_codex_per_item_error_collected_not_raised(
     assert len(out["errors"]) == 1
     assert out["errors"][0]["ratio"] == "9x16"
     assert "boom" in out["errors"][0]["error"]
-    assert len(built[0].requests) == 1
+    store_calls = [
+        r for c in built for r in c.requests if r.url.endswith("store_creative")
+    ]
+    assert len(store_calls) == 1
 
 
-def test_render_kie_backend_posts_to_render(
-    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """RENDER_BACKEND=kie keeps the legacy /render path (one batched call)."""
-    resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": []}
-    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
-    out = pipeline_operator_render(
-        pipeline_id="p-1",
-        kind="concept_preview",
-        items=[{"concept": "a", "prompt": "pa"}, {"concept": "b", "prompt": "pb"}],
-    )
-    assert out == resp
-    req = built[0].requests[0]
-    assert req.url == "/work/pipeline/tools/render"
-    assert req.json_body == {
-        "pipeline_id": "p-1",
-        "kind": "concept_preview",
-        "items": [
-            {"concept": "a", "prompt": "pa"},
-            {"concept": "b", "prompt": "pb"},
-        ],
-    }
-
-
-def test_render_rejects_unknown_backend(
+def test_render_final_kie_batched_items_to_render(
     env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("RENDER_BACKEND", "midjourney")
-    with pytest.raises(PipelineOperatorError, match="RENDER_BACKEND must be one of"):
-        pipeline_operator_render(
-            pipeline_id="p-1",
-            kind="concept_preview",
-            items=[{"concept": "a", "prompt": "pa"}],
-        )
+    """A finals render with a Kie model choice posts the batched items to /render
+    with the chosen model id (one batched call)."""
+    state = {
+        "config_draft": {
+            "finals_render_backend": "kie",
+            "finals_render_model": "nano-banana-2",
+        },
+        "concepts": [],
+        "picks": {"image": []},
+        "brief": None,
+    }
+    resp = {"ok": True, "renders": [], "total_cost_usd": 0.1, "errors": []}
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[_FakeResponse(200, state), _FakeResponse(200, resp)],
+    )
+    out = pipeline_operator_render(
+        pipeline_id="p-1",
+        kind="final",
+        items=[
+            {"concept": "a", "prompt": "pa", "parent_creative_id": "cr-1"},
+            {"concept": "b", "prompt": "pb", "parent_creative_id": "cr-2"},
+        ],
+    )
+    assert out == resp
+    render_calls = [
+        r for c in built for r in c.requests if r.url.endswith("/render")
+    ]
+    assert len(render_calls) == 1
+    assert render_calls[0].json_body == {
+        "pipeline_id": "p-1",
+        "kind": "final",
+        "items": [
+            {"concept": "a", "prompt": "pa", "parent_creative_id": "cr-1"},
+            {"concept": "b", "prompt": "pb", "parent_creative_id": "cr-2"},
+        ],
+        "model": "nano-banana-2",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +735,9 @@ def test_render_rejects_unknown_backend(
 
 def _fake_codex(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_codex = type(sys)("codex_render")
-    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    fake_codex.render_image = (
+        lambda prompt, ratio, *, quality="high": b"PNG-" + ratio.encode()
+    )
     monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
 
 
@@ -761,18 +871,37 @@ def test_render_deterministic_final_threads_parent_from_picks(
         assert r.json_body["version"] == "v1.0"
 
 
-def test_render_deterministic_kie_forwards_kind_only(
-    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+def test_render_deterministic_final_kie_forwards_kind_and_model(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Kie backend with items=None forwards {pipeline_id, kind} (worker resolves)."""
+    """A deterministic finals render with a Kie model choice forwards
+    {pipeline_id, kind, model} (the worker resolves the persisted plan)."""
+    state = {
+        "config_draft": {
+            "finals_render_backend": "kie",
+            "finals_render_model": "bytedance/seedream-v4-text-to-image",
+        },
+        "concepts": [],
+        "picks": {"image": []},
+        "brief": None,
+    }
     resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": [], "skipped": []}
-    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
-    out = pipeline_operator_render(pipeline_id="p-1", kind="concept_preview")
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[_FakeResponse(200, state), _FakeResponse(200, resp)],
+    )
+    out = pipeline_operator_render(pipeline_id="p-1", kind="final")
     assert out == resp
-    req = built[0].requests[0]
-    assert req.method == "POST"
-    assert req.url == "/work/pipeline/tools/render"
-    assert req.json_body == {"pipeline_id": "p-1", "kind": "concept_preview"}
+    render_calls = [
+        r for c in built for r in c.requests if r.url.endswith("/render")
+    ]
+    assert len(render_calls) == 1
+    assert render_calls[0].method == "POST"
+    assert render_calls[0].json_body == {
+        "pipeline_id": "p-1",
+        "kind": "final",
+        "model": "bytedance/seedream-v4-text-to-image",
+    }
 
 
 def test_store_creative_posts_expected_body(

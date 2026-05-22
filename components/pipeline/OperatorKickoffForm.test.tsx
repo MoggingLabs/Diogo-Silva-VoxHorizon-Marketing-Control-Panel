@@ -35,9 +35,17 @@ vi.mock("next/navigation", () => ({
 }));
 
 const kickoffOperatorPipeline = vi.fn();
-vi.mock("@/lib/pipeline/client", () => ({
-  kickoffOperatorPipeline: (...args: unknown[]) => kickoffOperatorPipeline(...args),
-}));
+// Keep the real FINALS_MODEL_OPTIONS / DEFAULT_FINALS_MODEL_LABEL exports (the
+// form imports them to build the "Finals model" dropdown) while stubbing only
+// the network call.
+vi.mock("@/lib/pipeline/client", async () => {
+  const actual =
+    await vi.importActual<typeof import("@/lib/pipeline/client")>("@/lib/pipeline/client");
+  return {
+    ...actual,
+    kickoffOperatorPipeline: (...args: unknown[]) => kickoffOperatorPipeline(...args),
+  };
+});
 
 // Clients are fetched on mount via the service-role `/api/clients` helper.
 const fetchClients = vi.fn<() => Promise<ClientOption[]>>(async () => []);
@@ -52,8 +60,20 @@ beforeEach(() => {
   kickoffOperatorPipeline.mockReset();
   fetchClients.mockReset();
   fetchClients.mockResolvedValue([
-    { id: "11111111-1111-4111-8111-111111111111", name: "Acme Roofing", slug: "acme", service_type: "roofing", status: "active" },
-    { id: "22222222-2222-4222-8222-222222222222", name: "Beta Remodel", slug: "beta", service_type: "remodeling", status: "active" },
+    {
+      id: "11111111-1111-4111-8111-111111111111",
+      name: "Acme Roofing",
+      slug: "acme",
+      service_type: "roofing",
+      status: "active",
+    },
+    {
+      id: "22222222-2222-4222-8222-222222222222",
+      name: "Beta Remodel",
+      slug: "beta",
+      service_type: "remodeling",
+      status: "active",
+    },
   ]);
 });
 
@@ -80,6 +100,7 @@ describe("OperatorKickoffForm", () => {
     await waitFor(() => {
       expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
         instruction: "4 roofing ads, Austin",
+        finals_model: "gpt-image-2 (free)",
       });
       expect(routerPush).toHaveBeenCalledWith("/pipeline/p123");
     });
@@ -131,7 +152,10 @@ describe("OperatorKickoffForm", () => {
     await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
     await user.click(screen.getByRole("button", { name: /hire the operator/i }));
     await waitFor(() => {
-      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({ instruction: "4 roofing ads" });
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
+        instruction: "4 roofing ads",
+        finals_model: "gpt-image-2 (free)",
+      });
     });
     const arg = kickoffOperatorPipeline.mock.calls[0]![0] as Record<string, unknown>;
     expect("client_id" in arg).toBe(false);
@@ -153,6 +177,7 @@ describe("OperatorKickoffForm", () => {
     await waitFor(() => {
       expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
         instruction: "4 roofing ads",
+        finals_model: "gpt-image-2 (free)",
         client_id: "11111111-1111-4111-8111-111111111111",
       });
     });
@@ -166,7 +191,34 @@ describe("OperatorKickoffForm", () => {
     await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
     await user.click(screen.getByRole("button", { name: /hire the operator/i }));
     await waitFor(() => {
-      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({ instruction: "4 roofing ads" });
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
+        instruction: "4 roofing ads",
+        finals_model: "gpt-image-2 (free)",
+      });
+    });
+  });
+
+  it("defaults the Finals model to the free model and lets the manager change it", async () => {
+    kickoffOperatorPipeline.mockResolvedValue({ id: "p7" });
+    const user = userEvent.setup();
+    render(<OperatorKickoffForm />);
+
+    // The picker defaults to the free model.
+    expect(screen.getByLabelText("Finals model")).toBeInTheDocument();
+    expect(await screen.findByText(/gpt-image-2 \(free\)/)).toBeInTheDocument();
+
+    // Switch to a paid model (Flux).
+    await user.click(screen.getByLabelText("Finals model"));
+    await user.click(await screen.findByRole("option", { name: /Flux/ }));
+
+    await user.type(screen.getByTestId("operator-instruction"), "4 roofing ads");
+    await user.click(screen.getByRole("button", { name: /hire the operator/i }));
+
+    await waitFor(() => {
+      expect(kickoffOperatorPipeline).toHaveBeenCalledWith({
+        instruction: "4 roofing ads",
+        finals_model: "Flux",
+      });
     });
   });
 });

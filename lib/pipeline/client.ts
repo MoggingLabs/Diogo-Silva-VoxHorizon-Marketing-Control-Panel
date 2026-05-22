@@ -70,6 +70,22 @@ export async function createPipeline(input: CreatePipelineInput): Promise<Pipeli
 }
 
 /**
+ * The "Finals model" picker options, in display order. Labels mirror
+ * `FINALS_MODELS` in `app/api/pipelines/operator/route.ts` and
+ * `ekko-skills/pipeline-operator/helper.py`. `cost` is the per-image cue shown
+ * in the dropdown so the manager sees free vs paid at a glance. The first entry
+ * (free codex) is the default. Ideation always renders free regardless of this.
+ */
+export const FINALS_MODEL_OPTIONS: ReadonlyArray<{ label: string; cost: string }> = [
+  { label: "gpt-image-2 (free)", cost: "Free" },
+  { label: "nano-banana-2", cost: "≈$0.05/img" },
+  { label: "Flux", cost: "≈$0.05/img" },
+  { label: "Seedream", cost: "≈$0.03/img" },
+];
+
+export const DEFAULT_FINALS_MODEL_LABEL = "gpt-image-2 (free)";
+
+/**
  * Input to `POST /api/pipelines/operator` — the operator-driven kickoff.
  * `instruction` is the manager's free-text brief ("4 roofing ads, Austin,
  * $99 inspection"); the other fields mirror `CreatePipelineInput`.
@@ -78,6 +94,12 @@ export type KickoffOperatorInput = {
   instruction: string;
   format_choice?: PipelineFormat;
   client_id?: string;
+  /**
+   * The manager's "Finals model" label for the generation stage. One of the
+   * labels in `FINALS_MODEL_OPTIONS`; defaults server-side to the free
+   * `gpt-image-2 (free)`. Ideation always renders free regardless of this.
+   */
+  finals_model?: string;
 };
 
 /**

@@ -732,6 +732,11 @@ class RenderInput(BaseModel):
     pipeline_id: str = Field(..., min_length=1)
     kind: Literal["concept_preview", "final"]
     items: list[RenderItem] | None = None
+    # The Kie image model id for this render (the manager's per-pipeline finals
+    # choice — nano-banana-2 / flux-2/pro-text-to-image / bytedance/seedream-v4-
+    # text-to-image). Optional: omitted falls back to the KieClient default
+    # (nano-banana-2) so existing callers are unchanged.
+    model: str | None = None
 
 
 def _persisted_concept_specs(pipeline: dict[str, Any]) -> list[dict[str, Any]]:
@@ -916,7 +921,7 @@ async def _render_one(
         ratio=ratio,
         version=version,
         prompt_used={
-            "model": "kie/nano-banana-2",
+            "model": f"kie/{getattr(kie_client, 'model', 'nano-banana-2')}",
             "prompt": item.prompt,
             "ratio": ratio,
             "resolution": resolution,
@@ -1039,7 +1044,7 @@ async def render(body: RenderInput) -> dict[str, Any]:
             )
 
     try:
-        kie_client = KieClient()
+        kie_client = KieClient(model=body.model)
     except RuntimeError as e:
         raise HTTPException(status_code=503, detail=str(e)) from e
 

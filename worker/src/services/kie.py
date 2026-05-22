@@ -45,6 +45,40 @@ RECORD_INFO_URL = f"{API_BASE}/api/v1/jobs/recordInfo"
 # images for the same prompt.
 MODEL = "nano-banana-2"
 
+# Finals model registry (Kie side). The dashboard's "Finals model" picker maps a
+# label to (backend, model); for the Kie backend the chosen model id is threaded
+# down to ``KieClient.generate_image``. These are the VERIFIED Kie model ids:
+#
+#   * ``nano-banana-2``                       — Google Nano Banana 2 (the legacy
+#                                               default Kie model).
+#   * ``flux-2/pro-text-to-image``            — Flux 2 Pro. Same input schema as
+#                                               nano-banana-2 (aspect_ratio +
+#                                               resolution).
+#   * ``bytedance/seedream-v4-text-to-image`` — Seedream 4.0. Uses a DIFFERENT
+#                                               input schema (image_size +
+#                                               image_resolution; no aspect_ratio),
+#                                               handled below.
+#
+# Any model not in this set still works as long as it accepts the default
+# (aspect_ratio + resolution) input schema; the set drives only the schema
+# selection, not an allowlist.
+MODEL_NANO_BANANA_2 = "nano-banana-2"
+MODEL_FLUX = "flux-2/pro-text-to-image"
+MODEL_SEEDREAM = "bytedance/seedream-v4-text-to-image"
+
+# Models whose createTask ``input`` uses ``image_size`` + ``image_resolution``
+# (the fal-style market schema) instead of ``aspect_ratio`` + ``resolution``.
+# Seedream is the one exposed model on this schema; nano-banana-2 and Flux-2 both
+# use the aspect_ratio schema.
+_IMAGE_SIZE_SCHEMA_MODELS: frozenset[str] = frozenset({MODEL_SEEDREAM})
+
+# Map the worker ratio labels to Seedream's ``image_size`` enum. Seedream has no
+# exact 9:16; ``portrait_16_9`` is its tallest portrait, so we use it for 9x16.
+_SEEDREAM_IMAGE_SIZE: dict[str, str] = {
+    "1:1": "square_hd",
+    "9:16": "portrait_16_9",
+}
+
 # Poll cadence: every 5s, up to 5 minutes total. Kie.ai's nano-banana-2
 # typically finishes in 30–90s; the 5-min ceiling exists to surface a
 # stuck task rather than wait forever.
@@ -114,6 +148,7 @@ class KieClient:
         self,
         api_key: str | None = None,
         *,
+        model: str | None = None,
         timeout_s: float = 60.0,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
@@ -125,6 +160,10 @@ class KieClient:
                 "before calling /work/creative/generate."
             )
         self.api_key = resolved
+        # The image model id. Defaults to nano-banana-2 (the legacy default) so
+        # existing callers are unchanged; the finals-model picker passes the
+        # chosen id (e.g. flux-2/pro-text-to-image, bytedance/seedream-v4-...).
+        self.model = (model or MODEL).strip() or MODEL
         self.timeout_s = timeout_s
         self._transport = transport
 
@@ -233,6 +272,36 @@ class KieClient:
             kwargs["transport"] = self._transport
         return httpx.AsyncClient(**kwargs)
 
+    def _build_input(
+        self, *, prompt: str, aspect_ratio: str, resolution: str
+    ) -> dict[str, Any]:
+        """Build the createTask ``input`` block for the configured model.
+
+        Most Kie image models (nano-banana-2, flux-2/pro-text-to-image) accept
+        ``aspect_ratio`` + ``resolution``. Seedream uses the fal-style schema
+        (``image_size`` + ``image_resolution``, no aspect_ratio), so we map the
+        colon ratio to Seedream's ``image_size`` enum here. ``aspect_ratio`` is
+        the already-mapped colon form (e.g. ``"1:1"`` / ``"9:16"``).
+        """
+        if self.model in _IMAGE_SIZE_SCHEMA_MODELS:
+            image_size = _SEEDREAM_IMAGE_SIZE.get(aspect_ratio)
+            if image_size is None:
+                raise KieError(
+                    f"model {self.model!r} has no image_size for ratio "
+                    f"{aspect_ratio!r} (supported: {sorted(_SEEDREAM_IMAGE_SIZE)})"
+                )
+            return {
+                "prompt": prompt,
+                "image_size": image_size,
+                "image_resolution": resolution,
+            }
+        return {
+            "prompt": prompt,
+            "image_input": [],
+            "aspect_ratio": aspect_ratio,
+            "resolution": resolution,
+        }
+
     async def _create_task(
         self,
         client: httpx.AsyncClient,
@@ -242,13 +311,12 @@ class KieClient:
         resolution: str,
     ) -> str:
         payload = {
-            "model": MODEL,
-            "input": {
-                "prompt": prompt,
-                "image_input": [],
-                "aspect_ratio": aspect_ratio,
-                "resolution": resolution,
-            },
+            "model": self.model,
+            "input": self._build_input(
+                prompt=prompt,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+            ),
         }
         try:
             resp = await client.post(CREATE_TASK_URL, json=payload)

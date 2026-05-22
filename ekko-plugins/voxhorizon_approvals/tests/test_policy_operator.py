@@ -4,8 +4,9 @@
 Mirrors the style of ``test_policy.py``: import the loader, build the overlay,
 and assert decisions per tool. The contract under test:
 
-* The render tool (the SPEND tool) is GATED (``ask_operator``).
-* The read / brief tools are ALLOWLISTED.
+* The render tool is ALLOWLISTED — renders are free (codex by default), so the
+  per-render spend gate was removed live and this file matches that state.
+* The read / client_read / brief tools are ALLOWLISTED.
 * In-code defaults still WIN over the overlay (you can't allowlist away a
   baked-in gate; ``rm -rf`` still asks; ``kie_generate`` still asks).
 * The shipped ``policy.operator.yaml`` parses to exactly those sets.
@@ -48,26 +49,26 @@ def operator_overlay() -> PolicyOverlay:
 
 
 # ---------------------------------------------------------------------------
-# The operator profile gates render + allowlists read/brief
+# The operator profile allowlists render + read/client_read/brief
 # ---------------------------------------------------------------------------
 
 
-def test_render_tool_is_gated(operator_overlay: PolicyOverlay) -> None:
-    """The spend tool requires operator approval under the operator policy."""
+def test_render_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
+    """Renders are free (codex default), so the render tool is allowlisted —
+    the per-render spend gate was removed live; this file matches that."""
     decision = operator_overlay.evaluate(RENDER, {})
-    assert decision.action == "ask_operator"
-    assert decision.risk_class == "spend"
-    assert RENDER in decision.reason
+    assert decision.action == "allow"
+    assert "allowlist" in decision.reason
 
 
-def test_render_tool_gated_regardless_of_args(
+def test_render_tool_allowed_regardless_of_args(
     operator_overlay: PolicyOverlay,
 ) -> None:
     decision = operator_overlay.evaluate(
         RENDER,
         {"pipeline_id": "p-1", "kind": "concept_preview", "items": [{}]},
     )
-    assert decision.action == "ask_operator"
+    assert decision.action == "allow"
 
 
 def test_read_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
@@ -118,10 +119,12 @@ def test_bare_short_render_name_is_not_gated_by_overlay(
 
 def test_shipped_operator_policy_contents() -> None:
     overlay = load_overlay(OPERATOR_POLICY_PATH)
-    assert overlay.extra_requires_approval == frozenset({RENDER})
-    # The allowlist now carries the three non-spend tools: read + client_read +
-    # brief (all GET/free-write; the manager gates spend + brief stage review).
-    assert overlay.allowlist == frozenset({READ, CLIENT_READ, BRIEF})
+    # Renders are free — the per-render spend gate was removed live, so nothing
+    # is in extra_requires_approval.
+    assert overlay.extra_requires_approval == frozenset()
+    # The allowlist now carries all four operator tools: read + client_read +
+    # brief + render (renders are free; the manager gates spend at stage gates).
+    assert overlay.allowlist == frozenset({READ, CLIENT_READ, BRIEF, RENDER})
     assert overlay.blocklist == frozenset({"execute_code", "terminal", "shell"})
 
 

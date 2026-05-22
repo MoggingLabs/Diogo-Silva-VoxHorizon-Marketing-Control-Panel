@@ -38,10 +38,35 @@ export const dynamic = "force-dynamic";
  * Returns the created pipeline with status 201 (same envelope as the create
  * route) so the kickoff UI can redirect straight to the detail page.
  */
+/**
+ * The manager's "Finals model" choice → (backend, model) for the FINALS
+ * (generation) stage. The FREE codex/gpt-image-2 is the default; the paid Kie
+ * models are nano-banana-2 / Flux / Seedream. IDEATION is NOT configurable — it
+ * always renders on the free codex model server-side, never one of these. This
+ * registry mirrors `FINALS_MODELS` in
+ * `ekko-skills/pipeline-operator/helper.py` (the operator routes renders by the
+ * persisted backend+model). Keep the two in lockstep.
+ */
+const FINALS_MODELS = {
+  "gpt-image-2 (free)": { backend: "openai-codex", model: "gpt-image-2" },
+  "nano-banana-2": { backend: "kie", model: "nano-banana-2" },
+  Flux: { backend: "kie", model: "flux-2/pro-text-to-image" },
+  Seedream: { backend: "kie", model: "bytedance/seedream-v4-text-to-image" },
+} as const;
+
+const FINALS_MODEL_LABELS = Object.keys(FINALS_MODELS) as [
+  keyof typeof FINALS_MODELS,
+  ...(keyof typeof FINALS_MODELS)[],
+];
+const DEFAULT_FINALS_LABEL: keyof typeof FINALS_MODELS = "gpt-image-2 (free)";
+
 const OperatorKickoffBody = z.object({
   instruction: z.string().trim().min(1, "instruction is required").max(5000),
   format_choice: z.enum(["image", "video", "both"]).default("image"),
   client_id: z.string().uuid().optional(),
+  // The finals (generation) image model. Defaults to the FREE codex model;
+  // ideation always stays free regardless of this choice.
+  finals_model: z.enum(FINALS_MODEL_LABELS).default(DEFAULT_FINALS_LABEL),
 });
 
 export async function POST(req: NextRequest) {
@@ -59,7 +84,12 @@ export async function POST(req: NextRequest) {
       { status: 422 },
     );
   }
-  const { instruction, format_choice, client_id } = parsed.data;
+  const { instruction, format_choice, client_id, finals_model } = parsed.data;
+
+  // Resolve the finals model label → (backend, model) and persist it on the
+  // pipeline so the operator renders FINALS with the manager's choice. Ideation
+  // stays on the free codex model server-side regardless of this.
+  const finals = FINALS_MODELS[finals_model];
 
   const supabase = createAdminClient();
   const now = new Date().toISOString();
@@ -67,7 +97,13 @@ export async function POST(req: NextRequest) {
     format_choice,
     client_id: client_id ?? null,
     advanced_at: { configuration: now } as unknown as Json,
-    config_draft: { operator_driven: true, operator_instruction: instruction } as unknown as Json,
+    config_draft: {
+      operator_driven: true,
+      operator_instruction: instruction,
+      finals_render_label: finals_model,
+      finals_render_backend: finals.backend,
+      finals_render_model: finals.model,
+    } as unknown as Json,
   };
 
   const { data: pipeline, error: insertErr } = await supabase
