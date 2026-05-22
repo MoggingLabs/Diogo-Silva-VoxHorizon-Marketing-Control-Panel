@@ -129,9 +129,10 @@ describe("estimatePipelineCost", () => {
     // The image line shows the real free backend at $0...
     expect(result.items.map((i) => i.api)).toEqual(["gpt-image-2 (free)"]);
     const img = result.items[0];
-    expect(img.units).toBe(2); // 1 pick * 2 ratios (1:1 + 9:16)
-    expect(img.unit_cost).toBe(0);
-    expect(img.subtotal).toBe(0);
+    expect(img).toBeDefined();
+    expect(img?.units).toBe(2); // 1 pick * 2 ratios (1:1 + 9:16)
+    expect(img?.unit_cost).toBe(0);
+    expect(img?.subtotal).toBe(0);
     // ...and there is NO Anthropic line (operator runs on the subscription).
     expect(result.items.map((i) => i.api)).not.toContain("Anthropic");
     expect(result.total).toBe(0);
@@ -148,7 +149,7 @@ describe("estimatePipelineCost", () => {
     });
 
     expect(result.items.map((i) => i.api)).toEqual(["nano-banana-2 (Kie)"]);
-    expect(result.items[0].subtotal).toBeCloseTo(0.1, 4); // 2 images * $0.05
+    expect(result.items[0]?.subtotal).toBeCloseTo(0.1, 4); // 2 images * $0.05
     expect(result.items.map((i) => i.api)).not.toContain("Anthropic");
     expect(result.total).toBeCloseTo(0.1, 4);
   });
