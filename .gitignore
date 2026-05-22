@@ -66,3 +66,6 @@ build/
 # Local plan / scratch
 .plans/
 .scratch/
+
+# Claude Code local state (worktrees, settings, caches)
+.claude/
