@@ -13,15 +13,31 @@ Migration sources:
 - `db/migrations/0006_pipelines.sql` — added in #171 (PF-A-1)
 - `db/migrations/0007_pipeline_triggers.sql` — added in #196 / #197 (PF-E-4 / PF-E-5)
 - `db/migrations/0008_hermes_integration.sql` — added in #257 (HI-15)
+- `db/migrations/0009_approval_mode.sql` — Wave 24 (approval-mode-toggle)
+- `db/migrations/0010_revoke_anon_writes.sql` — Supabase lockdown phase 1
+- `db/migrations/0011_enable_rls_lockdown.sql` — Supabase lockdown phase 2
+- `db/migrations/0012_client_data_layer.sql` — client knowledge layer
+- `db/migrations/0013_client_targeting_fields.sql` — client geo-targeting fields
+- `db/migrations/0014_fix_auto_advance_operator.sql` — operator-flow auto-advance fix
+- `db/migrations/0015_operator_launch_approval.sql` — operator pipeline auto-approve
 
 ---
 
 ## Overview
 
-- **RLS is OFF for v1.** The app is single-operator behind Tailscale; all
-  writes go through the Next.js / worker server with the service-role
-  key. If multi-operator access is ever introduced, an RLS migration is
-  the entry point.
+- **RLS is ON (deny-all) as of 0011.** Every table in `public` has Row
+  Level Security enabled with **no policies**, so `anon` /
+  `authenticated` get zero rows (no read, no write, no Realtime
+  delivery). The only legitimate database client is the trusted server:
+  the Next.js routes / server components / SSE Realtime relay and the
+  FastAPI worker all use the service-role credential
+  (`SUPABASE_SECRET_KEY`), whose Postgres role has `rolbypassrls = true`
+  and bypasses both RLS and grants. There is no Supabase Auth (no
+  end-user JWTs) in this deployment. See "Security model (RLS lockdown)"
+  below.
+- **Single-operator app behind Tailscale + Caddy basic auth.** The
+  browser never talks to Supabase directly; all data flows through the
+  Next.js server gated by the Caddy edge.
 - **Forward-only migrations.** Never edit a merged migration; new
   changes go into a new numbered file.
 - **Two verticals, parallel tables.** Image and video share `clients`,
@@ -50,7 +66,7 @@ Single source of truth for each marketing client.
 | `id`                        | `uuid` PK                              | `gen_random_uuid()` default.        |
 | `slug`                      | `text` UNIQUE NOT NULL                 | URL-safe key (e.g. `acme-roofing`). |
 | `name`                      | `text` NOT NULL                        | Display name.                       |
-| `service_type`              | `service_type` enum NOT NULL           | `roofing` \| `remodeling`.          |
+| `service_type`              | `service_type` enum NOT NULL           | `roofing` \| `remodeling` \| `general_contracting` \| `construction` \| `pools` (last three added in 0012). |
 | `brand_colors`              | `jsonb`                                | Default `{}`.                       |
 | `meta_account_id`           | `text`                                 | Meta Ads account id.                |
 | `ghl_location_id`           | `text`                                 | GoHighLevel location id.            |
@@ -58,6 +74,11 @@ Single source of truth for each marketing client.
 | `cpl_target`                | `numeric`                              | Target cost-per-lead.               |
 | `status`                    | `text` NOT NULL default `active`       |                                     |
 | `created_at` / `updated_at` | `timestamptz` NOT NULL default `now()` |                                     |
+
+The deeper per-client brand / company / campaign knowledge the operator
+authors ads from lives in the **client data layer** (`client_profiles`
+1:1 plus child tables), added in 0012 — see "Client data layer" below.
+Identity / integration columns above are NOT duplicated there.
 
 ### `briefs`
 
@@ -285,7 +306,9 @@ polluted with other domain events.
 
 #### Triggers on `pipeline_events`
 
-Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197).
+Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197); the
+auto-advance function was later revised in `0014` (closure heuristic) and
+`0015` (operator auto-approve). Both triggers still fire AFTER INSERT.
 
 `pipeline_events_cost_actual_trg` (AFTER INSERT WHEN `kind = 'cost_recorded'`):
 
@@ -323,9 +346,32 @@ Added in `db/migrations/0007_pipeline_triggers.sql` (#196, #197).
   transaction).
 - Flips the pipeline to `status = 'done'`, stamps `advanced_at.done`,
   and emits a `stage_advanced → done` event once
-  `task_done + task_error ≥ task_queued`.
+  `task_done + task_error ≥ greatest(task_queued, task_running)`.
+- **Closure heuristic (revised in 0014).** The original 0007 logic keyed
+  off `task_queued`, so the dashboard **operator** flow — which renders
+  `task_running → task_done` only, with no `task_queued` — had
+  `v_queued = 0` and never auto-advanced. 0014 changed the upper bound to
+  `greatest(queued, running)` so both flows close: the deterministic Ekko
+  worker (emits queued + running + done per task) and the operator
+  (running + done only).
+- **Operator auto-approve (added in 0015).** When the flip to `done`
+  actually moves the needle, the trigger now also calls
+  `approve_operator_pipeline_outputs(pipeline_id)` **in the same
+  transaction** (see Helper functions below). For operator-driven
+  pipelines this approves the brief + finals; for the legacy
+  Ekko / deterministic flow it is a no-op (the helper gates on
+  `config_draft.operator_driven`).
 - Idempotent: the UPDATE is gated on `status = 'generation'`, so a
   late retry or duplicate `task_done` after closure is a no-op.
+
+> **Live-schema note.** The 0014 / 0015 `CREATE OR REPLACE FUNCTION`
+> redefinitions did not re-apply the `SET search_path = pg_catalog,
+> public` that 0011 pinned, so the live
+> `pipeline_events_auto_advance_done` (and the new
+> `approve_operator_pipeline_outputs`) currently run with a role-mutable
+> search_path. The other three pinned functions
+> (`gen_brief_id_human`, `gen_video_brief_id_human`,
+> `pipeline_events_apply_cost_actual`) retain their pinned path.
 
 #### `pipeline_events.source` column
 
@@ -434,6 +480,112 @@ Indexes:
 
 ---
 
+## Approval mode
+
+Operator-controlled toggle for the `voxhorizon-approvals` Hermes plugin's
+default behaviour on sensitive tool calls. Added in
+`db/migrations/0009_approval_mode.sql` (Wave 24). Distinct from the
+per-call `approvals` queue above: this is the global *policy* the plugin
+applies, settable from the dashboard Settings tab. Three modes:
+
+- `ASK` — long-poll the dashboard for an operator decision (the queue).
+- `AUTO_APPROVE` — allow without asking; **TTL-bounded** (1h..24h).
+- `HALT` — block all approval-needing tools until cleared.
+
+### `approval_mode`
+
+Singleton state row (`id = 'singleton'`).
+
+| Column       | Type                                   | Notes                                                                                                       |
+| ------------ | -------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| `id`         | `text` PK default `singleton`          | CHECK `id = 'singleton'` — PK + CHECK enforce the single-row invariant.                                    |
+| `mode`       | `text` NOT NULL default `ASK`          | CHECK in (`ASK`, `AUTO_APPROVE`, `HALT`).                                                                  |
+| `expires_at` | `timestamptz`                          | CHECK: non-null **iff** `mode = 'AUTO_APPROVE'` (`ASK` / `HALT` must leave it null). Drives TTL drop-back. |
+| `set_by`     | `text`                                 | Who set the mode.                                                                                          |
+| `set_at`     | `timestamptz` NOT NULL default `now()` |                                                                                                           |
+| `note`       | `text`                                 |                                                                                                           |
+
+Seeded with one row at `ASK`. On Realtime so the dashboard badge / banner
+update within ~1s of a mode change (the plugin refreshes a 5s in-process
+cache).
+
+### `approval_mode_audit`
+
+Append-only transition log (one row per mode change).
+
+| Column        | Type                                   | Notes                                                                       |
+| ------------- | -------------------------------------- | --------------------------------------------------------------------------- |
+| `id`          | `uuid` PK                              | `gen_random_uuid()` default.                                                |
+| `from_mode`   | `text` NOT NULL                        |                                                                             |
+| `to_mode`     | `text` NOT NULL                        |                                                                             |
+| `ttl_seconds` | `int`                                  | Only meaningful when `to_mode = 'AUTO_APPROVE'`; null otherwise (no CHECK). |
+| `changed_at`  | `timestamptz` NOT NULL default `now()` |                                                                             |
+| `changed_by`  | `text` NOT NULL                        | `dashboard` for v1; `expired` for auto-expiry transitions.                  |
+| `note`        | `text`                                 |                                                                             |
+
+Indexes: `(changed_at desc)` — newest-first for the Settings page.
+Not on Realtime (the page re-fetches on focus).
+
+---
+
+## Client data layer
+
+Per-client brand / company / campaign knowledge the operator authors ads
+from. Added in `db/migrations/0012_client_data_layer.sql`
+(plus `0013` targeting fields). Normalized-heavy hybrid: consistent
+fields are typed columns, multi-row arrays are child tables, and `jsonb`
+is reserved for genuinely variable-shape data; `raw_profile` keeps the
+full source object so nothing is lost. The DB is canonical, seeded from
+and synced back to `/docker/hermes-shared/client-profiles/*.json` (so the
+file-based marketing agents keep working). Identity / integration columns
+(`slug`, `name`, `service_type`, `brand_colors`, `ghl_location_id`,
+`drive_root_folder_id`, `cpl_target`, `status`) stay on `clients` and are
+NOT duplicated here. None of these tables are on Realtime.
+
+### `client_profiles`
+
+1:1 with `clients` (`client_id` is both PK and FK → `clients.id` ON
+DELETE CASCADE). Wide typed-column table; the highlights:
+
+| Column                                                | Type          | Notes                                                                  |
+| ----------------------------------------------------- | ------------- | --------------------------------------------------------------------- |
+| `client_id`                                           | `uuid` PK/FK  | → `clients.id` ON DELETE CASCADE.                                      |
+| `tone`, `tagline`, `voice_note`, `logo_drive_id`, …   | `text`        | Brand / voice narrative.                                              |
+| `brand_fonts`                                         | `jsonb`       | `{headings, body}`.                                                    |
+| `legal_name`, `business_type`, `ein`, `license_number`| `text`        | Company facts.                                                         |
+| `years_in_business`, `owner_experience_years`         | `integer`     |                                                                       |
+| `family_owned`, `licensed_insured`                    | `boolean`     |                                                                       |
+| `google_rating`                                       | `numeric`     | Null when unknown (`google_reviews` is `text` — mixed `"89"`/`"700+"`). |
+| `warranty_details`                                    | `jsonb`       | `{labor, structural, major_systems, manufacturer}`.                   |
+| contact / ownership / location columns                | `text`        | `contact_*`, `owner_name`, `address`, `city`, `state`, `timezone`, …  |
+| `targeting`, `targeting_detail`, `targeting_type`     | `text`        | Geo / audience targeting narrative.                                    |
+| `targeting_address`, `targeting_zip`                  | `text`        | Added in 0013.                                                         |
+| `targeting_radius_miles`                              | `numeric`     | Added in 0013. Ad geo radius; null = not set (a gap, tracked in `needs_input`). |
+| `daily_budget`, `monthly_budget`                      | `numeric`     | Campaign snapshot.                                                     |
+| `launch_date`, `relaunch_date`                        | `date`        |                                                                       |
+| `funnel`                                              | `jsonb`       | `{type, pages[], flow, build_url, live_url}`.                          |
+| `drive_*_folder_id`, `client_profile_doc_id`, `stat_sheet_url` | `text` | Google Drive folder ids (root lives on `clients`).                    |
+| `needs_input`                                         | `jsonb` NOT NULL default `[]` | Unfilled field paths (gap tracking).                       |
+| `raw_profile`                                         | `jsonb` NOT NULL default `{}` | Full source JSON.                                          |
+| `updated_at`                                          | `timestamptz` NOT NULL default `now()` | Explicit (no trigger).                            |
+
+### Child tables
+
+Arrays become rows; each child has `id uuid PK`, `client_id uuid NOT NULL
+FK → clients.id ON DELETE CASCADE`, a `sort_order int NOT NULL default 0`
+to preserve source order, `created_at`, and an index on `(client_id)`.
+
+| Table                       | Distinguishing columns                                                                 |
+| --------------------------- | ------------------------------------------------------------------------------------- |
+| `client_services`           | `service_name text`.                                                                   |
+| `client_value_props`        | `kind client_value_prop_kind` (`usp` \| `differentiator`), `prop_text text`.          |
+| `client_offers`             | `offer_text text`, `active boolean default true`.                                      |
+| `client_offer_constraints`  | `constraint_text text` — the do-not-say rules for compliant copy.                      |
+| `client_assets`             | `kind client_asset_kind`, `source client_asset_source`, `ref text`, `formats`, `label`. |
+| `client_past_projects`      | `url text`.                                                                            |
+
+---
+
 ## Audit
 
 ### `campaign_perf_image`
@@ -534,6 +686,32 @@ Web Push subscription endpoints for the operator's devices.
 | `keys`                    | `jsonb` NOT NULL | `{ p256dh, auth }`. |
 | `created_at`, `last_seen` | `timestamptz`    |                     |
 
+### `chat_messages`
+
+Persistent chat history shared between operator and Ekko. Added in
+`db/migrations/0005_chat_messages.sql` (#143). **Polymorphic thread key:**
+`(creative_type, creative_id)` points at `creatives` for
+`creative_type = 'image'` and `video_creatives` for `'video'`. There is
+no DB-level FK on `creative_id` (Postgres has no native polymorphic FK);
+the app layer enforces existence.
+
+| Column          | Type                                          | Notes                                                                       |
+| --------------- | --------------------------------------------- | --------------------------------------------------------------------------- |
+| `id`            | `uuid` PK                                     | `gen_random_uuid()` default.                                                |
+| `creative_type` | `chat_creative_type` enum NOT NULL            | `image` \| `video`.                                                         |
+| `creative_id`   | `uuid` NOT NULL                               | Target row in `creatives` / `video_creatives` (no FK — see above).          |
+| `author`        | `chat_author` enum NOT NULL                   | `user` \| `ekko` \| `system`.                                               |
+| `content_type`  | `chat_content_type` enum NOT NULL default `text` | `text` \| `tool_call` \| `tool_result` \| `system`.                      |
+| `content`       | `text`                                        |                                                                             |
+| `metadata`      | `jsonb` default `{}`                          | Flexible bag (tool input/result, attachments, model id, latency, …).        |
+| `tool_call_id`  | `text`                                        |                                                                             |
+| `reply_to_id`   | `uuid` FK → `chat_messages.id`                | Self-reference for threading; null for top-level.                           |
+| `is_edited`     | `boolean` NOT NULL default `false`            |                                                                             |
+| `created_at` / `updated_at` | `timestamptz` NOT NULL default `now()` |                                                                  |
+
+Indexes: `(creative_type, creative_id, created_at)` — primary thread
+load; `(created_at desc)` — global recency. On Realtime.
+
 ---
 
 ## Helper functions
@@ -552,13 +730,79 @@ Example: `vid-acme-2026-05-16-001`.
 Both functions are non-strict and safely callable as defaults:
 `insert into briefs (..., brief_id_human) values (..., gen_brief_id_human('acme'))`.
 
+Both have a pinned `search_path = pg_catalog, public` (set in 0011).
+
+### `approve_operator_pipeline_outputs(p_pipeline_id uuid) returns void`
+
+Added in `db/migrations/0015_operator_launch_approval.sql`. Stamps an
+**operator-driven** pipeline's brief + final creatives as approved so the
+launch route's gate passes. Operator/codex pipelines author the brief and
+render finals via the worker tools, which always write
+`briefs.status='draft'` and final `creatives.status='draft'` — there is no
+dashboard reviewer to click approve, so `POST /api/launches` would 409
+forever. Behaviour:
+
+- Reads `image_brief_id` and `config_draft->>'operator_driven'` from the
+  pipeline. **No-op unless `operator_driven = true` and a brief is
+  linked** — the legacy Ekko / deterministic flow keeps its dashboard
+  brief-approve + per-creative decide steps.
+- Brief: `draft → approved`, stamping `decided_at` / `decided_by`
+  (`'operator'`) — briefs have no `approved_at` column.
+- Finals: the brief's image creatives with `version like 'v1%'` go
+  `draft → approved`, stamping `approved_at`. Ideation concepts
+  (`v0.ideation`) stay drafts — only finals launch.
+- **Idempotent** via the `status = 'draft'` guards. Called by the
+  `done` auto-advance trigger (see Pipeline triggers) and by a one-time
+  backfill at the bottom of 0015 (which approved already-`done` operator
+  pipelines, incl. the live Kris pipeline).
+- Live note: unlike the three 0011-pinned functions, this function has
+  no pinned `search_path` (see the live-schema note in Pipeline
+  triggers).
+
+---
+
+## Security model (RLS lockdown)
+
+Two-phase lockdown of the Supabase project; before this the `anon` /
+`authenticated` roles had full CRUD + SELECT on every public table, so the
+public anon key (baked into the browser bundle) could read/forge/destroy
+data directly via PostgREST, bypassing the Caddy edge auth.
+
+**Phase 1 — `0010_revoke_anon_writes.sql`.** `REVOKE INSERT, UPDATE,
+DELETE, TRUNCATE, REFERENCES, TRIGGER` on all public tables from `anon`
++ `authenticated`, plus an `ALTER DEFAULT PRIVILEGES` so future tables
+created by `postgres` don't auto-grant writes back. SELECT was
+intentionally kept so reads / Realtime kept working until Phase 2.
+
+**Phase 2 — `0011_enable_rls_lockdown.sql`.** `ENABLE ROW LEVEL
+SECURITY` on every public table with **no policies** = deny-all (RLS on +
+no policy denies all rows regardless of the SELECT grant). The
+`service_role` Postgres role (`rolbypassrls = true`) bypasses both RLS and
+grants, so every server path keeps working; the anon key now has zero
+useful access. 0011 also:
+
+- Recreated `v_campaign_perf` `WITH (security_invoker = true)` so it no
+  longer runs as `SECURITY DEFINER` and respects the caller's RLS.
+- Pinned `search_path = pg_catalog, public` on `gen_brief_id_human`,
+  `gen_video_brief_id_human`, `pipeline_events_apply_cost_actual`, and
+  `pipeline_events_auto_advance_done` (the last was later un-pinned by
+  the 0014/0015 `CREATE OR REPLACE` — see Pipeline triggers).
+- Intentionally left `pg_trgm` in `public` (low-severity advisor WARN; no
+  exposure under deny-all, and moving it is a cross-cutting change).
+
+New tables added since (the client data layer in 0012, etc.) follow the
+same deny-all convention.
+
+> Verify live: there are zero rows in `pg_policies` for schema `public`,
+> and every public table reports `rls_enabled = true`.
+
 ---
 
 ## Enums reference
 
 | Enum                         | Values                                                                                                                   |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `service_type`               | `roofing`, `remodeling`                                                                                                  |
+| `service_type`               | `roofing`, `remodeling`, `general_contracting`, `construction`, `pools` (last three added in 0012)                       |
 | `brief_status`               | `draft`, `posted`, `approved`, `approved_with_changes`, `rejected`                                                       |
 | `creative_type`              | `image`, `video`                                                                                                         |
 | `image_creative_status`      | `draft`, `approved`, `rejected`, `live`, `killed`                                                                        |
@@ -577,6 +821,15 @@ Both functions are non-strict and safely callable as defaults:
 | `hermes_task_status_enum`    | `pending`, `ready`, `claimed`, `running`, `completed`, `failed`, `blocked`, `cancelled`                                  |
 | `approval_decision_enum`     | `approved`, `rejected`, `approved_with_caveat`                                                                           |
 | `approval_status_enum`       | `pending`, `decided`, `expired`, `cancelled`                                                                             |
+| `chat_author`                | `user`, `ekko`, `system`                                                                                                |
+| `chat_content_type`          | `text`, `tool_call`, `tool_result`, `system`                                                                            |
+| `chat_creative_type`         | `image`, `video`                                                                                                        |
+| `client_value_prop_kind`     | `usp`, `differentiator`                                                                                                 |
+| `client_asset_kind`          | `logo`, `logo_alt`, `facebook_banner`, `review`, `team_photo`, `project_photo`, `external`, `existing_creative`         |
+| `client_asset_source`        | `drive`, `local`, `url`, `filename`, `descriptor`                                                                       |
+
+`approval_mode.mode` (`ASK` / `AUTO_APPROVE` / `HALT`) is a CHECK
+constraint on a `text` column, not a Postgres enum.
 
 ---
 
@@ -590,12 +843,22 @@ Added by `0002_realtime_publication.sql` (#17):
 - `overrides`
 - `pipelines`, `pipeline_events`
 
+Added by `0005_chat_messages.sql` (#143):
+
+- `chat_messages`
+
 Added by `0008_hermes_integration.sql` (#257):
 
 - `hermes_tasks`, `approvals`, `approvals_policy_cache`
 
+Added by `0009_approval_mode.sql` (Wave 24):
+
+- `approval_mode` (the `approval_mode_audit` table is NOT published)
+
 Intentionally excluded: `events`, `sync_log` (high-volume / not useful in
-the live operator UI).
+the live operator UI), and the entire client data layer (`client_profiles`
++ child tables, 0012) — the operator edits those through the worker, not
+via live row pushes.
 
 Verify locally with:
 
