@@ -2067,6 +2067,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
 ]
 
 [package.dev-dependencies]
@@ -2086,6 +2087,7 @@ requires-dist = [
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.24" },
+    { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=5.0" },
     { name = "pywebpush", specifier = ">=2.3.0" },
     { name = "structlog", specifier = ">=24.4" },
     { name = "supabase", specifier = ">=2.8" },

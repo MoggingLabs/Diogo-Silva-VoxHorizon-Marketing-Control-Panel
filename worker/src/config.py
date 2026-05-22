@@ -51,6 +51,28 @@ class Settings(BaseSettings):
     submagic_api_key: str | None = None
     meta_ads_api_key: str | None = None
 
+    # Fake-integration mode (T.4 / #317). When a FAKE_* flag is on, the
+    # corresponding external integration is stubbed in-process with a
+    # deterministic response and makes ZERO outbound network calls — so the
+    # whole pipeline can run locally / in CI with no real Meta, GHL, Drive,
+    # or image-render credentials. Off by default so production behaviour is
+    # never accidentally faked; tests and local runs opt in via env.
+    #
+    #   FAKE_META    — Meta Ads recorder/launch saga returns canned ad ids.
+    #   FAKE_GHL     — GoHighLevel lead pull / webhook returns canned leads.
+    #   FAKE_DRIVE   — Google Drive upload returns a deterministic fake url.
+    #   FAKE_RENDER  — Kie.ai / codex image render returns a deterministic
+    #                  1x1 PNG (see services.kie.KieClient) instead of polling
+    #                  the real API.
+    #
+    # Meta/GHL/Drive are not built yet (see PIPELINE-REBUILD-ARCHITECTURE.md
+    # Layer 6); the flags + this convention land now so those services wire
+    # to them by construction when they arrive. FAKE_RENDER is live today.
+    fake_meta: bool = False
+    fake_ghl: bool = False
+    fake_drive: bool = False
+    fake_render: bool = False
+
     # B-roll storage
     broll_store_backend: BrollBackend = "local"
     broll_local_root: str = "~/voxhorizon-worker/storage/broll-pool"
