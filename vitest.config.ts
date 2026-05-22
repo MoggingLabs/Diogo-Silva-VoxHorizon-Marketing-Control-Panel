@@ -84,11 +84,17 @@ export default defineConfig({
         "**/__mocks__/**",
         "tests/**",
       ],
+      // Production coverage gate (enforced in CI via `pnpm test:coverage`).
+      // statements/lines/functions sit at 96-98% today, so 90 is a real floor.
+      // branches is 88% on LEGACY UI that the P4 rebuild replaces; grinding
+      // branch tests into soon-deleted components is wasted effort, so the
+      // global branch floor is 88 and RATCHETS to 90 as P4 lands. New rebuild
+      // code is held to >=90 branches by the Definition of Done (PR review).
       thresholds: {
         lines: 90,
         statements: 90,
-        functions: 85,
-        branches: 80,
+        functions: 90,
+        branches: 88,
       },
     },
   },
