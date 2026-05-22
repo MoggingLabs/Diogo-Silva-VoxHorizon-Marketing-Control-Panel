@@ -1,16 +1,19 @@
 # `pipeline-operator` — skill + deploy notes
 
 The operator **playbook** for running the VoxHorizon image-ad pipeline like a
-hired employee under a human manager. `SKILL.md` is the operating loop (read
-state → do the current stage's work → narrate → stop); `mcp_server.py`
-publishes the three worker tools as **real, named MCP tools** the operator
-calls; `helper.py` is the thin worker-tool client those tools delegate to (the
-single source of truth for HTTP + validation).
+hired employee under a human manager. `SKILL.md` is the orchestration loop
+across the 12 producing stages (read state → assert the dispatch envelope → do
+the current stage's work in-context or via a specialist sub-agent → persist →
+signal → narrate → stop); `mcp_server.py` publishes the worker tools as
+**real, named MCP tools** the operator calls; `helper.py` is the thin
+worker-tool client those tools delegate to (the single source of truth for
+HTTP + validation).
 
 This skill is loaded by the dedicated **operator** agent (its own container,
 `hermes-agent-operator`), not Ekko. It pairs with `image-ad-authoring` (the
-creative craft) and is gated by the `voxhorizon-approvals` plugin's
-`policy.operator.yaml`.
+visual craft) and the per-stage operator skills (`copy-authoring`,
+`creative-qa`, `ad-compliance`, `campaign-launch`, `campaign-monitor`), and is
+gated by the `voxhorizon-approvals` plugin's `policy.operator.yaml`.
 
 ## Layout
 
@@ -27,7 +30,7 @@ ekko-skills/pipeline-operator/
 │                      #   pipeline_operator_render       (render; SPEND-gated)
 ├── codex_render.py    # in-container codex image renderer (the manager's
 │                      #   ChatGPT/Codex subscription → gpt-image-2; $0). Backs
-│                      #   the default RENDER_BACKEND=openai-codex path.
+│                      #   pipeline_operator_render.
 ├── README.md          # this file
 └── tests/
     ├── test_helper.py       # helper unit tests (mock httpx.Client + codex)
@@ -35,22 +38,21 @@ ekko-skills/pipeline-operator/
     └── test_mcp_server.py   # MCP server: registration + delegation (mock helper)
 ```
 
-## Render backend (codex vs Kie)
+## Render backend (codex, $0)
 
-`pipeline_operator_render` is backend-selectable via the operator container's
-`RENDER_BACKEND` env (the tool name + the spend gate are UNCHANGED — the gate
-keys on the tool name regardless of backend):
+`pipeline_operator_render` renders via the manager's ChatGPT/Codex
+subscription. It generates each image IN-CONTAINER via Hermes' codex image-gen
+plugin (the operator's ChatGPT/Codex OAuth → `gpt-image-2` through the Codex
+Responses `image_generation` tool), then POSTs the bytes to the worker's
+`POST /work/pipeline/tools/store_creative`. Cost: **$0** (`total_cost_usd: 0`,
+recorded against `api="openai-codex"`).
 
-| `RENDER_BACKEND`        | How it renders                                                                                 | Cost |
-| ----------------------- | ---------------------------------------------------------------------------------------------- | ---- |
-| `openai-codex` (default) | Generates each image IN-CONTAINER via Hermes' codex image-gen plugin (the operator's ChatGPT/Codex OAuth → `gpt-image-2` through the Codex Responses `image_generation` tool), then POSTs the bytes to the worker's `POST /work/pipeline/tools/store_creative`. | **$0** |
-| `kie`                   | POSTs to the worker's `POST /work/pipeline/tools/render` (the legacy paid Kie path).            | paid |
-
-Both backends make the worker emit the SAME `pipeline_events`
-(task_running/task_done), the same cost line (`cost_recorded`; subtotal 0 for
-codex, against `api="openai-codex"`), and the same creative/iteration rows — so
-the dashboard, the auto-advance trigger, and the cost aggregator behave
-identically. Only the bill changes.
+There is no backend switch for the operator to set and no per-render routing
+decision: the operator calls the render tool the same way every time, the spend
+gate keys on the tool name, and the worker emits the same `pipeline_events`
+(task_running/task_done), the same `cost_recorded` line, and the same
+creative/iteration rows — so the dashboard, the auto-advance trigger, and the
+cost aggregator behave identically every time.
 
 ## Deterministic render (the all-N-concepts contract)
 
@@ -74,8 +76,7 @@ pipeline_operator_render(pipeline_id, "concept_preview")          # render ALL N
   prefix — `v0.ideation` for previews, `v1` for finals) are skipped and reported
   in the result's `skipped` list, so a retry after an interruption renders only
   the remainder. This is the fix for pipelines that got stuck at 1/N concepts.
-- The Kie backend resolves the same persisted plan worker-side
-  (`POST /work/pipeline/tools/render` with no `items`).
+- The worker resolves the same persisted plan worker-side from the render call.
 - Passing explicit `items` still works (back-compat / one-off / prompt refine).
 
 The worker's `RenderItem.items` is optional; `BriefInput.concepts` is optional
@@ -118,16 +119,15 @@ Set in the operator container's `.env`:
 Both are read lazily on the first call; missing/empty values raise
 `PipelineOperatorError` immediately.
 
-Optional (codex backend — all have working defaults):
+Optional (codex render — all have working defaults):
 
-- `RENDER_BACKEND` — `openai-codex` (default) | `kie`. Unset = `openai-codex`.
 - `HERMES_CODEX_PLUGIN_PATH` — path to the Hermes codex image-gen plugin
   `__init__.py`. Default `/opt/hermes/plugins/image_gen/openai-codex/__init__.py`.
 - `HERMES_SRC_PATH` — Hermes source root put on `sys.path` so the plugin's
   `from agent...` imports resolve. Default `/opt/hermes`.
 - `OPENAI_IMAGE_QUALITY` — `low` | `medium` | `high`. Default `high`.
 
-The codex backend requires the operator's ChatGPT/Codex OAuth credentials to be
+The codex render requires the operator's ChatGPT/Codex OAuth credentials to be
 present in the container (`auth.json` under `$HERMES_HOME`); the renderer reads
 them through Hermes' canonical token reader. No `OPENAI_API_KEY` is needed.
 

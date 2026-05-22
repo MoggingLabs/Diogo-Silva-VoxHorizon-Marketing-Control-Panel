@@ -237,6 +237,76 @@ stock-photo smiles, illegible signage. **Add concept-specific negatives** via
 
 ---
 
+## Step 4.5 — Contractor-iPhone realism (the realism that converts)
+
+A 16-billion-impression study finding is the rule behind every concept here:
+**AI images win only if they don't look AI.** For cold local-services traffic,
+native "ugly" UGC outperforms polished stock — the homeowner trusts a photo
+that looks like a neighbor took it, not an agency. Author for that look.
+
+**Contractor-iPhone cues to bake into the prompt (cold traffic):**
+
+- **Phone-camera, not studio.** "shot on a phone, natural daylight, slight
+  imperfect framing, candid" beats "professional studio lighting". Studio light
+  on an on-location service screams ad.
+- **Practical jobsite context.** A real truck, a ladder leaning, a tidy work
+  area, the owner mid-task. Imperfect-but-real reads as proof.
+- **Normal daylight.** Overcast or plain midday daylight is fine here; you are
+  not chasing golden-hour glamour for cold UGC.
+- **Real-looking people and real-looking homes** in the client's actual region.
+  Avoid the uncanny stock-photo smile and the magazine-perfect house.
+
+**When to polish instead:** retargeting / warm audiences tolerate (and
+sometimes reward) a cleaner, premium look. Cold traffic does not. Pick the
+finish to the funnel stage, and say which you chose in your narration.
+
+**Prefer a real photo when you have one.** If the client context carries a real
+owner/team/project photo and the task is a logo/sign/brand swap, edit the real
+photo surgically rather than regenerating a face. Regenerated people lose the
+trust the real face carries.
+
+## Step 4.6 — Roofing negative-cue bank (suppress the roofing tells)
+
+Roofing proof sells through detail; mushy shingles read as AI filler and kill a
+before/after. On TOP of `helper.BASELINE_NEGATIVE_CUES`, add roofing-specific
+negatives for any roof/exterior concept:
+
+- `"no melted or smeared shingle texture"`
+- `"no blurred, tiled, or overly smooth roof surface"`
+- `"no warped or sagging rooflines"`
+- `"no broken roof-plane perspective"`
+- `"no duplicate chimneys or floating vents"`
+- `"no impossible flashing around the chimney or valleys"`
+- `"no crooked gutters, fascia, or roof edges"`
+- `"no floating debris"`
+- before/after only: `"no mismatched lighting between halves"`,
+  `"no changed house identity between before and after"`
+
+**Positive detail the prompt should request** (the inverse of the negatives):
+visible individual shingle rows, realistic granule texture, believable roof
+pitch and plane geometry, clean flashing, straight gutters/fascia/edges. For
+before/after, keep the house identity constant (dormer, chimney, siding, trim,
+pitch, windows, camera angle); the "before" can be aged or stained but not
+cartoonishly destroyed; the "after" must be detailed, not plastic-smooth. The
+`creative-qa` skill scores exactly these surfaces — author so the render passes
+that rubric the first time.
+
+## Step 4.7 — Identity-preservation cues (when a real person is in frame)
+
+When the concept uses a real owner / team / customer (the trust angles), the
+value IS the real face. State identity preservation explicitly so the model does
+not drift the person into a stranger:
+
+- `"keep the person recognizable and facially consistent"`
+- `"preserve identity, do not alter facial structure"`
+- `"same person across all variants"` (when generating a set from one reference)
+
+Lock the seed on the first strong result and reuse it across variants so the
+person and composition stay consistent. If the value is the real face and you
+already have a usable real photo, edit that photo (logo swap, crop, light brand
+cleanup) instead of regenerating — see the donor `owner-brand-image-editing`
+guidance referenced by the `image-ad-prompting` source.
+
 ## Step 5 — Ratio intent (1:1 vs 9:16 are different ads)
 
 Don't render the same composition into both crops. The helper injects the
@@ -342,10 +412,15 @@ skill sends to the worker `render` tool for a `concept_preview` batch.
    and a **photographer's lens**?
 4. Is on-image text **absent on previews** (or <= 6 words on a final), with
    real copy reserved for the caption?
-5. Did you add **concept-specific negatives** for this shot's failure modes?
-6. For finals: does the concept work **both 1:1 and 9:16**?
+5. Did you add **concept-specific negatives** for this shot's failure modes,
+   plus the **roofing negative-cue bank** (Step 4.6) for any roof/exterior shot?
+6. For cold traffic, did you author **contractor-iPhone realism** (Step 4.5)
+   rather than studio polish — and pick the finish to the funnel stage?
+7. If a real person is in frame, did you add **identity-preservation cues** and
+   lock the seed (Step 4.7)?
+8. For finals: does the concept work **both 1:1 and 9:16**?
 
-If all six are yes, the set is ready to render. If any is no, fix it before
+If all eight are yes, the set is ready to render. If any is no, fix it before
 spending — a re-render is cheaper to avoid than to redo.
 
 ## Related
@@ -353,6 +428,8 @@ spending — a re-render is cheaper to avoid than to redo.
 - `pipeline-operator` — the playbook that drives this skill across a live
   pipeline (read state → author brief → render concepts → render finals),
   one spend gate per render batch.
+- `creative-qa` — scores the renders this skill produces against the defect +
+  roofing-surface rubric; author to that rubric so finals pass the first time.
 - The worker `render` tool consumes the `{concept, prompt, offer_text?}`
   items this skill produces; previews render 1:1 @ 1K, finals render 1:1 +
   9:16 @ 2K.
