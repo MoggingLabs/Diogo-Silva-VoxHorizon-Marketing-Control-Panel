@@ -86,7 +86,9 @@ def test_tool_input_schemas_expose_expected_params() -> None:
     assert "pipeline_id" in read_props
 
     brief_props = schemas["pipeline_operator_brief"].get("properties", {})
-    assert {"pipeline_id", "image_payload", "notes"} <= set(brief_props)
+    assert {"pipeline_id", "image_payload", "notes", "concepts"} <= set(
+        brief_props
+    )
 
     render_props = schemas["pipeline_operator_render"].get("properties", {})
     assert {"pipeline_id", "kind", "items"} <= set(render_props)
@@ -119,34 +121,38 @@ def test_brief_delegates_to_helper_with_kwargs(
     captured: dict = {}
     sentinel = {"ok": True, "brief_id": "b-1"}
 
-    def fake_brief(*, pipeline_id, image_payload, notes=None):
+    def fake_brief(*, pipeline_id, image_payload, notes=None, concepts=None):
         captured["pipeline_id"] = pipeline_id
         captured["image_payload"] = image_payload
         captured["notes"] = notes
+        captured["concepts"] = concepts
         return sentinel
 
     monkeypatch.setattr(helper, "pipeline_operator_brief", fake_brief)
 
     payload = {"market": "us", "offer_text": "$99", "angles": ["a"]}
+    concepts = [{"concept": "before_after__x", "prompt": "p1"}]
     result = mcp_server.pipeline_operator_brief(
-        "p-123", payload, notes="sharpened the offer"
+        "p-123", payload, notes="sharpened the offer", concepts=concepts
     )
 
     assert captured == {
         "pipeline_id": "p-123",
         "image_payload": payload,
         "notes": "sharpened the offer",
+        "concepts": concepts,
     }
     assert result is sentinel
 
 
-def test_brief_defaults_notes_to_none(
+def test_brief_defaults_notes_and_concepts_to_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict = {}
 
-    def fake_brief(*, pipeline_id, image_payload, notes=None):
+    def fake_brief(*, pipeline_id, image_payload, notes=None, concepts=None):
         captured["notes"] = notes
+        captured["concepts"] = concepts
         return {"ok": True}
 
     monkeypatch.setattr(helper, "pipeline_operator_brief", fake_brief)
@@ -155,6 +161,7 @@ def test_brief_defaults_notes_to_none(
         "p-1", {"market": "us", "offer_text": "x", "angles": ["a"]}
     )
     assert captured["notes"] is None
+    assert captured["concepts"] is None
 
 
 def test_render_delegates_to_helper_with_kwargs(
@@ -163,7 +170,7 @@ def test_render_delegates_to_helper_with_kwargs(
     captured: dict = {}
     sentinel = {"ok": True, "renders": [], "total_cost_usd": 0.0, "errors": []}
 
-    def fake_render(*, pipeline_id, kind, items):
+    def fake_render(*, pipeline_id, kind, items=None):
         captured["pipeline_id"] = pipeline_id
         captured["kind"] = kind
         captured["items"] = items
@@ -182,13 +189,30 @@ def test_render_delegates_to_helper_with_kwargs(
     assert result is sentinel
 
 
+def test_render_deterministic_defaults_items_to_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The deterministic dispatch omits items; the server forwards None so the
+    helper renders the persisted plan."""
+    captured: dict = {}
+
+    def fake_render(*, pipeline_id, kind, items=None):
+        captured["items"] = items
+        return {"ok": True, "renders": [], "total_cost_usd": 0, "errors": []}
+
+    monkeypatch.setattr(helper, "pipeline_operator_render", fake_render)
+
+    mcp_server.pipeline_operator_render("p-9", "concept_preview")
+    assert captured["items"] is None
+
+
 def test_render_passes_errors_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The server does not swallow helper validation errors — they propagate
     so the MCP layer reports them to the agent."""
 
-    def fake_render(*, pipeline_id, kind, items):
+    def fake_render(*, pipeline_id, kind, items=None):
         raise helper.PipelineOperatorError("bad kind")
 
     monkeypatch.setattr(helper, "pipeline_operator_render", fake_render)

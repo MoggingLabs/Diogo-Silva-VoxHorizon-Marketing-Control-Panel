@@ -61,6 +61,22 @@ describe("describeApproval", () => {
     expect(describeApproval(a).purpose).toBe("Render 1 concept preview");
   });
 
+  it("describes the deterministic concept_preview render (no items) as 'all'", () => {
+    const a = makeApproval({
+      tool_name: RENDER_TOOL,
+      tool_args: { pipeline_id: "p1", kind: "concept_preview" },
+    });
+    expect(describeApproval(a).purpose).toBe("Render all concept previews");
+  });
+
+  it("describes the deterministic final render (no items) as 'all'", () => {
+    const a = makeApproval({
+      tool_name: RENDER_TOOL,
+      tool_args: { pipeline_id: "p1", kind: "final" },
+    });
+    expect(describeApproval(a).purpose).toBe("Render all final images");
+  });
+
   it("describes a kie_generate call with a truncated prompt detail", () => {
     const prompt = "A".repeat(200);
     const a = makeApproval({

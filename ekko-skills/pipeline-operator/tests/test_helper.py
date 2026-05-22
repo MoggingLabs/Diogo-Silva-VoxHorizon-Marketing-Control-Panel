@@ -261,6 +261,46 @@ def test_brief_omits_notes_when_none(
     assert "notes" not in built[0].requests[0].json_body
 
 
+def test_brief_persists_concepts(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """concepts are validated, normalized, and sent on the brief body."""
+    built = _install_fake_client(
+        monkeypatch, responses=[_FakeResponse(200, {"ok": True, "brief_id": "b-1"})]
+    )
+    concepts = [
+        {"concept": "  before_after__a  ", "prompt": "  pa  ", "offer_text": "$99"},
+        {"concept": "savings__b", "prompt": "pb"},
+    ]
+    pipeline_operator_brief(
+        pipeline_id="p-1", image_payload=_payload(), concepts=concepts
+    )
+    body = built[0].requests[0].json_body
+    assert body["concepts"] == [
+        {"concept": "before_after__a", "prompt": "pa", "offer_text": "$99"},
+        {"concept": "savings__b", "prompt": "pb"},
+    ]
+
+
+def test_brief_omits_concepts_when_none(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(
+        monkeypatch, responses=[_FakeResponse(200, {"ok": True, "brief_id": "b-1"})]
+    )
+    pipeline_operator_brief(pipeline_id="p-1", image_payload=_payload())
+    assert "concepts" not in built[0].requests[0].json_body
+
+
+def test_brief_rejects_concept_without_prompt(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"concepts\[0\].prompt"):
+        pipeline_operator_brief(
+            pipeline_id="p-1",
+            image_payload=_payload(),
+            concepts=[{"concept": "before_after__a"}],
+        )
+
+
 def test_brief_requires_payload_keys(env_set: None) -> None:
     with pytest.raises(PipelineOperatorError, match="missing required keys"):
         pipeline_operator_brief(
@@ -578,6 +618,161 @@ def test_render_rejects_unknown_backend(
             kind="concept_preview",
             items=[{"concept": "a", "prompt": "pa"}],
         )
+
+
+# ---------------------------------------------------------------------------
+# Deterministic render (items omitted → render the persisted plan)
+# ---------------------------------------------------------------------------
+
+
+def _fake_codex(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_codex = type(sys)("codex_render")
+    fake_codex.render_image = lambda prompt, ratio: b"PNG-" + ratio.encode()
+    monkeypatch.setitem(sys.modules, "codex_render", fake_codex)
+
+
+def test_render_deterministic_concept_preview_renders_all_persisted(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """items=None on codex → reads state, renders ALL persisted concepts."""
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+    _fake_codex(monkeypatch)
+
+    state = {
+        "pipeline_id": "p-1",
+        "status": "ideation",
+        "config_draft": {
+            "concepts": [
+                {"concept": "before_after__a", "prompt": "pa", "offer_text": "$99"},
+                {"concept": "owner_led_trust__b", "prompt": "pb"},
+                {"concept": "savings__c", "prompt": "pc"},
+            ]
+        },
+        "concepts": [],  # nothing rendered yet
+        "picks": {"image": []},
+        "brief": None,
+    }
+    # 1 read (GET) + 3 store_creative (POST), one per concept (1x1 each).
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, state),
+            _FakeResponse(200, {"creative_id": "cr-a", "file_path_supabase": "x", "version": "v0.ideation"}),
+            _FakeResponse(200, {"creative_id": "cr-b", "file_path_supabase": "y", "version": "v0.ideation"}),
+            _FakeResponse(200, {"creative_id": "cr-c", "file_path_supabase": "z", "version": "v0.ideation"}),
+        ],
+    )
+    out = pipeline_operator_render(pipeline_id="p-1", kind="concept_preview")
+    assert out["ok"] is True
+    assert out["total_cost_usd"] == 0
+    assert len(out["renders"]) == 3  # all 3 concepts rendered in ONE pass
+    all_requests = [r for c in built for r in c.requests]
+    assert all_requests[0].method == "GET"  # the read
+    store_calls = [r for r in all_requests if r.url.endswith("store_creative")]
+    assert len(store_calls) == 3
+    assert {r.json_body["concept"] for r in store_calls} == {
+        "before_after__a",
+        "owner_led_trust__b",
+        "savings__c",
+    }
+
+
+def test_render_deterministic_skips_already_rendered(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retry renders only the REMAINDER (idempotent resume) — the prod fix."""
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+    _fake_codex(monkeypatch)
+
+    state = {
+        "pipeline_id": "p-1",
+        "config_draft": {
+            "concepts": [
+                {"concept": "before_after__a", "prompt": "pa"},
+                {"concept": "savings__c", "prompt": "pc"},
+            ]
+        },
+        # one already landed (the stuck-at-1 production state)
+        "concepts": [{"creative_id": "cr-a", "concept": "before_after__a", "ratio": "1x1"}],
+        "picks": {"image": []},
+        "brief": None,
+    }
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, state),
+            _FakeResponse(200, {"creative_id": "cr-c", "file_path_supabase": "z", "version": "v0.ideation"}),
+        ],
+    )
+    out = pipeline_operator_render(pipeline_id="p-1", kind="concept_preview")
+    assert len(out["renders"]) == 1
+    store_calls = [
+        r for c in built for r in c.requests if r.url.endswith("store_creative")
+    ]
+    assert len(store_calls) == 1
+    assert store_calls[0].json_body["concept"] == "savings__c"
+
+
+def test_render_deterministic_empty_plan_is_clean_noop(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+    _fake_codex(monkeypatch)
+    state = {"config_draft": {}, "concepts": [], "picks": {"image": []}, "brief": None}
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, state)])
+    out = pipeline_operator_render(pipeline_id="p-1", kind="concept_preview")
+    assert out == {"ok": True, "renders": [], "total_cost_usd": 0, "errors": [], "skipped": []}
+    # Only the read happened, no store calls.
+    assert all(r.method == "GET" for c in built for r in c.requests)
+
+
+def test_render_deterministic_final_threads_parent_from_picks(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """items=None final → one item per pick, parent_creative_id threaded."""
+    monkeypatch.delenv("RENDER_BACKEND", raising=False)
+    _fake_codex(monkeypatch)
+    state = {
+        "config_draft": {
+            "concepts": [{"concept": "savings__c", "prompt": "pc", "offer_text": "$99"}]
+        },
+        "concepts": [{"creative_id": "cr-pick", "concept": "savings__c", "ratio": "1x1"}],
+        "finals": [],
+        "picks": {"image": ["cr-pick"]},
+        "brief": None,
+    }
+    # read + 2 store (1x1 + 9x16 for the one final).
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[
+            _FakeResponse(200, state),
+            _FakeResponse(200, {"creative_id": "f-1", "file_path_supabase": "x", "version": "v1.0"}),
+            _FakeResponse(200, {"creative_id": "f-2", "file_path_supabase": "y", "version": "v1.0"}),
+        ],
+    )
+    out = pipeline_operator_render(pipeline_id="p-1", kind="final")
+    assert sorted(r["ratio"] for r in out["renders"]) == ["1x1", "9x16"]
+    store_calls = [
+        r for c in built for r in c.requests if r.url.endswith("store_creative")
+    ]
+    assert len(store_calls) == 2
+    for r in store_calls:
+        assert r.json_body["parent_creative_id"] == "cr-pick"
+        assert r.json_body["version"] == "v1.0"
+
+
+def test_render_deterministic_kie_forwards_kind_only(
+    env_set: None, kie_backend: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kie backend with items=None forwards {pipeline_id, kind} (worker resolves)."""
+    resp = {"ok": True, "renders": [], "total_cost_usd": 0.08, "errors": [], "skipped": []}
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, resp)])
+    out = pipeline_operator_render(pipeline_id="p-1", kind="concept_preview")
+    assert out == resp
+    req = built[0].requests[0]
+    assert req.method == "POST"
+    assert req.url == "/work/pipeline/tools/render"
+    assert req.json_body == {"pipeline_id": "p-1", "kind": "concept_preview"}
 
 
 def test_store_creative_posts_expected_body(

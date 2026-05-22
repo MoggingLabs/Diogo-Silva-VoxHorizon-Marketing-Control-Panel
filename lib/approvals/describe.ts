@@ -32,11 +32,16 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
 }
 
-/** Count the items array on a render call; defaults to 1 when absent/empty. */
-function countItems(args: Record<string, unknown>): number {
+/**
+ * Count the items array on a render call. Returns `null` when no explicit
+ * items/n are present — the DETERMINISTIC path, where the worker renders all
+ * persisted concepts/picks itself, so a fixed count is unknown at gate time.
+ */
+function countItems(args: Record<string, unknown>): number | null {
   const items = args.items;
   if (Array.isArray(items) && items.length > 0) return items.length;
   if (typeof args.n === "number" && args.n > 0) return args.n;
+  if (items === undefined || items === null) return null;
   return 1;
 }
 
@@ -72,13 +77,19 @@ export function describeApproval(approval: Approval): ApprovalDescription {
     const n = countItems(args);
     if (args.kind === "final") {
       return {
-        purpose: `Render ${n} final image${n === 1 ? "" : "s"}`,
+        purpose:
+          n === null
+            ? "Render all final images"
+            : `Render ${n} final image${n === 1 ? "" : "s"}`,
         detail: "Final render for the pipeline.",
       };
     }
     // Default render kind is concept_preview.
     return {
-      purpose: `Render ${n} concept preview${n === 1 ? "" : "s"}`,
+      purpose:
+        n === null
+          ? "Render all concept previews"
+          : `Render ${n} concept preview${n === 1 ? "" : "s"}`,
       detail: "Concept preview render for the pipeline.",
     };
   }
