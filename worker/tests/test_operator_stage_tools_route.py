@@ -588,9 +588,11 @@ def test_read_returns_per_creative_stage_rollup(
     stage_sb.seed(
         "creative_stage_state",
         [
-            {"creative_id": "cr-1", "stage": "creative_qa", "status": "passed"},
-            {"creative_id": "cr-1", "stage": "copy", "status": "pending"},
-            {"creative_id": "cr-2", "stage": "creative_qa", "status": "failed"},
+            # _fetch_creative_rollup filters by pipeline_id (= the path id "p-1"),
+            # so the seeded rows must carry it or the rollup comes back empty.
+            {"pipeline_id": "p-1", "creative_id": "cr-1", "stage": "creative_qa", "status": "passed"},
+            {"pipeline_id": "p-1", "creative_id": "cr-1", "stage": "copy", "status": "pending"},
+            {"pipeline_id": "p-1", "creative_id": "cr-2", "stage": "creative_qa", "status": "failed"},
         ],
     )
     stage_sb.seed(
