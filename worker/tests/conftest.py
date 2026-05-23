@@ -181,6 +181,17 @@ class _FakeBucket:
     def upload(self, *, path: str, file: bytes, file_options: dict | None = None) -> None:
         self._sb.storage_uploads.append((path, bytes(file)))
 
+    def download(self, path: str) -> bytes:
+        """Return seeded bytes for ``path`` (mirrors supabase-py download).
+
+        Bytes are seeded with ``FakeSupabase.set_storage_object(path, data)``.
+        A missing path raises (like the real client returning a storage error)
+        so the route's download-failure branch is exercisable.
+        """
+        if path not in self._sb.storage_objects:
+            raise FileNotFoundError(f"object not found: {path}")
+        return self._sb.storage_objects[path]
+
 
 class _FakeStorage:
     def __init__(self, sb: "FakeSupabase") -> None:
@@ -211,12 +222,17 @@ class FakeSupabase:
         self.inserts: list[tuple[str, dict[str, Any]]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
         self.storage_uploads: list[tuple[str, bytes]] = []
+        self.storage_objects: dict[str, bytes] = {}
         self.rpc_calls: list[tuple[str, dict[str, Any]]] = []
         self.rpc_return: Any = None
 
     # -- seeding -----------------------------------------------------------
     def seed(self, table: str, rows: list[dict[str, Any]]) -> None:
         self._store.setdefault(table, []).extend(dict(r) for r in rows)
+
+    def set_storage_object(self, path: str, data: bytes) -> None:
+        """Seed bytes a ``storage.from_(bucket).download(path)`` returns."""
+        self.storage_objects[path] = bytes(data)
 
     def set_single(self, table: str, row: dict[str, Any] | Callable[[], Any] | None) -> None:
         self.single_overrides[table] = row
@@ -344,13 +360,14 @@ def fake_supabase(monkeypatch: pytest.MonkeyPatch) -> FakeSupabase:
     sb = FakeSupabase()
 
     from src import supabase_client
-    from src.routes import integrations, pipeline_tools
+    from src.routes import integrations, pipeline_tools, qa_compliance
     from src.services import atomic_inserts, cost_ledger, pipeline_runner
 
     for mod in (
         supabase_client,
         pipeline_tools,
         integrations,
+        qa_compliance,
         pipeline_runner,
         atomic_inserts,
         cost_ledger,

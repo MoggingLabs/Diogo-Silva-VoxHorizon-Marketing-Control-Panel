@@ -23,6 +23,7 @@ from .routes import (
     pipeline,
     pipeline_tools,
     ping,
+    qa_compliance,
 )
 
 
@@ -109,6 +110,15 @@ def create_app() -> FastAPI:
     app.include_router(
         operator_stage_tools.router, tags=["operator-stage-tools"]
     )
+
+    # === P2 compliance + QA adjudication endpoints ===
+    # /work/pipeline/tools/compliance_run + /qa_run: the operator submits
+    # CANDIDATE findings only; the worker runs the deterministic + adjudication
+    # engines, writes the append-only evidence (compliance_finding / qa_result)
+    # and rolls the verdict onto creative_stage_state. The operator has no path
+    # to write a pass — the verdict is always worker-owned (hard-gate invariant,
+    # PIPELINE-REBUILD-ARCHITECTURE.md Layer 3).
+    app.include_router(qa_compliance.router, tags=["qa-compliance"])
 
     # /work/creative/generate + /work/creative/composite — the per-brief
     # image generation + compositor surface used by the pipeline producers
