@@ -20,14 +20,14 @@ gated by the `voxhorizon-approvals` plugin's `policy.operator.yaml`.
 ```
 ekko-skills/pipeline-operator/
 ├── SKILL.md           # the operator playbook (per-stage behavior, narration,
-│                      #   the spend-gate discipline)
+│                      #   the launch-gate + stage-gate discipline)
 ├── mcp_server.py      # stdio MCP server: publishes the four tools below and
 │                      #   delegates each to helper.py (no logic of its own)
 ├── helper.py          # worker-tool client (single source of truth):
 │                      #   pipeline_operator_read         (GET state; allowlisted)
 │                      #   pipeline_operator_client_read  (GET client; allowlisted)
 │                      #   pipeline_operator_brief        (POST brief; free write)
-│                      #   pipeline_operator_render       (render; SPEND-gated)
+│                      #   pipeline_operator_render       (render; free, allowlisted)
 ├── codex_render.py    # in-container codex image renderer (the manager's
 │                      #   ChatGPT/Codex subscription → gpt-image-2; $0). Backs
 │                      #   pipeline_operator_render.
@@ -48,8 +48,8 @@ Responses `image_generation` tool), then POSTs the bytes to the worker's
 recorded against `api="openai-codex"`).
 
 There is no backend switch for the operator to set and no per-render routing
-decision: the operator calls the render tool the same way every time, the spend
-gate keys on the tool name, and the worker emits the same `pipeline_events`
+decision: the operator calls the render tool the same way every time (renders
+are free and allowlisted), and the worker emits the same `pipeline_events`
 (task_running/task_done), the same `cost_recorded` line, and the same
 creative/iteration rows — so the dashboard, the auto-advance trigger, and the
 cost aggregator behave identically every time.
@@ -95,18 +95,22 @@ The approval plugin gates **by tool name**. The operator's three capabilities
 are published as MCP tools (by `mcp_server.py`) under distinct, stable names so
 the operator policy can reference them one-for-one:
 
-| MCP tool                   | Worker endpoint                    | Gate (policy.operator.yaml)   |
-| -------------------------- | ---------------------------------- | ----------------------------- |
-| `pipeline_operator_read`   | `GET  /work/pipeline/tools/{id}`   | **allowlist** (no prompt)     |
-| `pipeline_operator_brief`  | `POST /work/pipeline/tools/brief`  | allowlist (free write)        |
-| `pipeline_operator_render` | `POST /work/pipeline/tools/render` | **requires approval (spend)** |
+| MCP tool                   | Worker endpoint                    | Gate (policy.operator.yaml) |
+| -------------------------- | ---------------------------------- | --------------------------- |
+| `pipeline_operator_read`   | `GET  /work/pipeline/tools/{id}`   | **allowlist** (no prompt)   |
+| `pipeline_operator_brief`  | `POST /work/pipeline/tools/brief`  | allowlist (free write)      |
+| `pipeline_operator_render` | `POST /work/pipeline/tools/render` | allowlist (free render, $0) |
 
 Hermes presents these to the gate as `mcp_<server>_<tool>` with single
 underscores — e.g. `mcp_pipeline_operator_pipeline_operator_render` — and the
-overlay keys on that exact full name (no fuzzy matching). **Do not rename
-`pipeline_operator_render`** (or the MCP server name) without updating
-`ekko-plugins/voxhorizon_approvals/policy.operator.yaml` — the spend gate keys
-on this exact name.
+overlay keys on that exact full name (no fuzzy matching). Renders are **free**
+(codex `gpt-image-2`, $0) and the per-render spend gate was removed live, so
+`pipeline_operator_render` is **allowlisted**; the manager supervises spend at
+the dashboard STAGE gates (brief review, concept picks, finals approval). The
+only approval-gated tool is `pipeline_operator_launch` (plus `Meta_ads_activate_entity`)
+— the irreversible Meta launch. **Do not rename** these tools (or the MCP
+server name) without updating `ekko-plugins/voxhorizon_approvals/policy.operator.yaml`,
+which keys on the exact full names.
 
 ## Required environment variables
 
@@ -167,9 +171,9 @@ bind-mounts the skills directory.
 
 3. Ensure the `voxhorizon-approvals` plugin in the operator container uses
    the **operator** policy (`policy.operator.yaml` dropped as its
-   `policy.yaml`) so `pipeline_operator_render` is spend-gated and
-   `pipeline_operator_read` is allowlisted. See the plugin README's
-   "Operator policy profile" section.
+   `policy.yaml`) so `pipeline_operator_launch` (and `Meta_ads_activate_entity`)
+   is approval-gated and `pipeline_operator_render` / `pipeline_operator_read`
+   are allowlisted. See the plugin README's "Operator policy profile" section.
 
 4. Restart the operator agent:
 
@@ -192,5 +196,5 @@ bakes it in — follow-up after this lands, out of scope here.
 ## Pairs with
 
 - `image-ad-authoring` — the creative craft this skill drives.
-- `voxhorizon-approvals` (`policy.operator.yaml`) — the spend gate.
+- `voxhorizon-approvals` (`policy.operator.yaml`) — the launch approval gate.
 - Worker Wave-A endpoints under `/work/pipeline/tools/`.

@@ -1,0 +1,4 @@
+# Husky git hooks are sh scripts — they MUST use LF endings or they fail to
+# spawn ("Exec format error") under git-bash / CI. Pin them so a Windows
+# checkout with core.autocrlf=true can't reintroduce CRLF.
+.husky/** text eol=lf
