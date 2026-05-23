@@ -10,6 +10,7 @@ import {
 } from "@/lib/pipeline/transitions";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
 import type { PipelineStatus } from "@/lib/pipeline/types";
+import { MIN_APPROVED_COPY } from "@/lib/review/grid";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { VideoBriefInput, type VideoBriefInsertRow } from "@/lib/video-briefs";
@@ -93,6 +94,15 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   if (PER_CREATIVE_STAGES.has(pipeline.status as PipelineStatus)) {
     return advanceFromPerCreativeStage(supabase, pipeline);
   }
+  // finalize_assets → launch_handoff: an AGENT_WORK/AUTO stage with no DB
+  // trigger (only generation→creative_qa is trigger-driven, see 0024). Without
+  // a wired transition the pipeline STALLS at finalize_assets — the UI falls
+  // through to a placeholder and nothing advances it. The gate is "every
+  // in-scope creative is finalize_verified" (the operator's finalize_result /
+  // finalize_drive tools stamp it), re-derived server-side here.
+  if (pipeline.status === "finalize_assets") {
+    return advanceFromFinalizeAssets(supabase, pipeline);
+  }
 
   // Every other status is a stage gate we haven't wired up yet.
   return NextResponse.json(
@@ -102,6 +112,83 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     },
     { status: 422 },
   );
+}
+
+/**
+ * Handle the `finalize_assets → launch_handoff` transition. finalize_assets is
+ * an AGENT_WORK stage closed by the operator's finalize tools; there is no DB
+ * trigger for it (0024 only auto-advances generation→creative_qa), so the route
+ * is the execution path that keeps the chain from stalling here.
+ *
+ * Gate (re-derived server-side, never trusting the client): at least one
+ * in-scope (non-deleted) creative for the pipeline AND every one of them is
+ * `finalize_verified = true`. That mirrors the work-unit closure spirit
+ * ("≥1 done, none outstanding") against the creatives the finalize tools stamp.
+ */
+async function advanceFromFinalizeAssets(
+  supabase: SupabaseClient,
+  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+): Promise<NextResponse> {
+  const { data: rows, error: readErr } = await supabase
+    .from("creatives")
+    .select("id, finalize_verified")
+    .eq("pipeline_id", pipeline.id)
+    .is("deleted_at", null);
+  if (readErr) {
+    return NextResponse.json({ error: readErr.message }, { status: 500 });
+  }
+  const creatives = (rows ?? []) as Array<{ id: string; finalize_verified: boolean | null }>;
+  const total = creatives.length;
+  const unverified = creatives.filter((c) => c.finalize_verified !== true).length;
+  if (total === 0 || unverified > 0) {
+    return NextResponse.json(
+      {
+        error: "finalize not complete: every creative must be finalize_verified",
+        field: "finalize",
+        stage: "finalize_assets",
+        finalize: { total, unverified },
+      },
+      { status: 422 },
+    );
+  }
+
+  const now = new Date().toISOString();
+  const advancedAt =
+    pipeline.advanced_at &&
+    typeof pipeline.advanced_at === "object" &&
+    !Array.isArray(pipeline.advanced_at)
+      ? (pipeline.advanced_at as Record<string, string>)
+      : {};
+  const update: PipelineUpdate = {
+    status: "launch_handoff",
+    advanced_at: { ...advancedAt, launch_handoff: now } as unknown as Json,
+  };
+  const { data: updated, error: updateErr } = await supabase
+    .from("pipelines")
+    .update(update)
+    .eq("id", pipeline.id)
+    .eq("status", "finalize_assets")
+    .select()
+    .single();
+  if (updateErr || !updated) {
+    return NextResponse.json(
+      { error: updateErr?.message ?? "finalize advance failed" },
+      { status: 500 },
+    );
+  }
+
+  const event: PipelineEventInsert = {
+    pipeline_id: pipeline.id,
+    kind: "stage_advanced",
+    stage: "launch_handoff",
+    payload: { from: "finalize_assets", finalized: total } as Json,
+  };
+  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
+  if (evErr) {
+    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+  }
+
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**
@@ -162,6 +249,32 @@ async function advanceFromPerCreativeStage(
   pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
 ): Promise<NextResponse> {
   const status = pipeline.status as PipelineStatus;
+
+  // The `copy` stage's gate is "≥3 approved copy variants per in-scope
+  // creative" — the SAME predicate the StageCopy UI enables Continue on and the
+  // launch precondition `copy_ge_3` re-checks. The operator copy tool only ever
+  // rolls creative_stage_state(copy) to `in_progress` (never a cleared state),
+  // so gating copy on that rollup would STALL the stage permanently. Re-derive
+  // the approved-copy gate here instead so the UI and the server agree.
+  if (status === "copy") {
+    const copyGate = await computeCopyGate(supabase, pipeline.id);
+    if (!copyGate.ok) {
+      return NextResponse.json({ error: copyGate.message }, { status: 500 });
+    }
+    if (!copyGate.cleared) {
+      return NextResponse.json(
+        {
+          error: `copy not cleared: every creative needs >=${MIN_APPROVED_COPY} approved variants`,
+          field: "copy",
+          stage: status,
+          copy: { total: copyGate.total, short: copyGate.short },
+        },
+        { status: 422 },
+      );
+    }
+    return commitPerCreativeAdvance(supabase, pipeline, status, true);
+  }
+
   const rollup = await computeRollup(supabase, pipeline.id, status);
   if (!rollup.ok) {
     return NextResponse.json({ error: rollup.message }, { status: 500 });
@@ -186,7 +299,63 @@ async function advanceFromPerCreativeStage(
       { status: 422 },
     );
   }
+  return commitPerCreativeAdvance(supabase, pipeline, status, rollup.cleared);
+}
 
+/**
+ * Re-derive the copy gate: ≥{@link MIN_APPROVED_COPY} approved `copy_variants`
+ * per in-scope (non-killed, non-deleted) creative. Returns `{ cleared, total,
+ * short }` so a 422 can name how many creatives are short on approved copy. A
+ * read error surfaces (caller turns it into a 500).
+ */
+async function computeCopyGate(
+  supabase: SupabaseClient,
+  pipelineId: string,
+): Promise<
+  { ok: true; cleared: boolean; total: number; short: number } | { ok: false; message: string }
+> {
+  const { data: creatives, error: cErr } = await supabase
+    .from("creatives")
+    .select("id, status")
+    .eq("pipeline_id", pipelineId)
+    .is("deleted_at", null);
+  if (cErr) {
+    return { ok: false, message: cErr.message };
+  }
+  const inScope = (creatives ?? []).filter(
+    (c) => (c as { status?: string }).status !== "killed",
+  ) as Array<{ id: string }>;
+
+  const { data: variants, error: vErr } = await supabase
+    .from("copy_variants")
+    .select("creative_id, status")
+    .eq("pipeline_id", pipelineId)
+    .eq("status", "approved");
+  if (vErr) {
+    return { ok: false, message: vErr.message };
+  }
+  const approvedByCreative = new Map<string, number>();
+  for (const v of (variants ?? []) as Array<{ creative_id: string }>) {
+    approvedByCreative.set(v.creative_id, (approvedByCreative.get(v.creative_id) ?? 0) + 1);
+  }
+  const short = inScope.filter(
+    (c) => (approvedByCreative.get(c.id) ?? 0) < MIN_APPROVED_COPY,
+  ).length;
+  const cleared = inScope.length > 0 && short === 0;
+  return { ok: true, cleared, total: inScope.length, short };
+}
+
+/**
+ * Commit a per-creative stage advance: compare-and-set the pipeline status to
+ * its successor and emit the `stage_advanced` event. Shared by the rollup-gated
+ * stages and the copy stage so both record the move identically.
+ */
+async function commitPerCreativeAdvance(
+  supabase: SupabaseClient,
+  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  status: PipelineStatus,
+  cleared: boolean,
+): Promise<NextResponse> {
   const next = nextStage(status);
   if (!next) {
     // Unreachable for the per-creative stages (all have a successor), but keep
@@ -226,7 +395,7 @@ async function advanceFromPerCreativeStage(
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
     stage: next,
-    payload: { from: status, rollup_cleared: rollup.cleared } as Json,
+    payload: { from: status, rollup_cleared: cleared } as Json,
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {

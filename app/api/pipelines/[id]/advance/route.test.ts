@@ -1101,7 +1101,7 @@ describe("POST /api/pipelines/:id/advance", () => {
     it("500 when the pipeline update races (compare-and-set miss)", async () => {
       currentSupabase = mockClient({
         pipelines: {
-          select: { single: { data: perCreativePipeline("copy"), error: null } },
+          select: { single: { data: perCreativePipeline("spec_validation"), error: null } },
           update: { single: { data: null, error: { message: "race" } } },
         },
         creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
@@ -1121,6 +1121,230 @@ describe("POST /api/pipelines/:id/advance", () => {
           update: { single: { data: { id, status: "variant_plan" }, error: null } },
         },
         creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: { message: "events down" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
+      warn.mockRestore();
+    });
+  });
+
+  describe("copy → spec_validation (approved-copy gate, no-stall wiring)", () => {
+    function copyPipeline() {
+      return {
+        id,
+        status: "copy",
+        format_choice: "image",
+        config_draft: null,
+        advanced_at: {},
+      };
+    }
+
+    // The copy gate re-derives ≥3 approved copy variants per in-scope creative
+    // (NOT the creative_stage_state rollup, which the operator copy tool only
+    // ever rolls to in_progress — gating on it would stall the stage).
+    it("advances when every creative has >=3 approved copy variants (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: copyPipeline(), error: null } },
+          update: { single: { data: { id, status: "spec_validation" }, error: null } },
+        },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: {
+          select: {
+            data: [
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("spec_validation");
+    });
+
+    it("422 when a creative is short on approved copy", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: copyPipeline(), error: null } } },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: {
+          select: { data: [{ creative_id: "c1", status: "approved" }], error: null },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.field).toBe("copy");
+      expect(body.copy.short).toBe(1);
+    });
+
+    it("422 when no in-scope creatives exist", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: copyPipeline(), error: null } } },
+        creatives: { select: { data: [{ id: "c1", status: "killed" }], error: null } },
+        copy_variants: { select: { data: [], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+    });
+
+    it("500 when the creatives read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: copyPipeline(), error: null } } },
+        creatives: { select: { data: null, error: { message: "boom" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("500 when the copy_variants read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: copyPipeline(), error: null } } },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: { select: { data: null, error: { message: "boom" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+  });
+
+  describe("finalize_assets → launch_handoff (no-stall wiring)", () => {
+    function finalizePipeline() {
+      return {
+        id,
+        status: "finalize_assets",
+        format_choice: "image",
+        config_draft: null,
+        advanced_at: {},
+      };
+    }
+
+    it("advances when every creative is finalize_verified (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+          update: { single: { data: { id, status: "launch_handoff" }, error: null } },
+        },
+        creatives: {
+          select: {
+            data: [
+              { id: "c1", finalize_verified: true },
+              { id: "c2", finalize_verified: true },
+            ],
+            error: null,
+          },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("launch_handoff");
+    });
+
+    it("422 when a creative is not finalize_verified (gate holds)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+        },
+        creatives: {
+          select: {
+            data: [
+              { id: "c1", finalize_verified: true },
+              { id: "c2", finalize_verified: false },
+            ],
+            error: null,
+          },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.field).toBe("finalize");
+      expect(body.finalize.unverified).toBe(1);
+    });
+
+    it("422 when no creatives exist for the pipeline (nothing finalized)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+        },
+        creatives: { select: { data: [], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+    });
+
+    it("500 when the creatives read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+        },
+        creatives: { select: { data: null, error: { message: "read failed" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("500 when the finalize advance update races", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+          update: { single: { data: null, error: { message: "race" } } },
+        },
+        creatives: { select: { data: [{ id: "c1", finalize_verified: true }], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("warns but returns 200 when the stage_advanced event insert fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: finalizePipeline(), error: null } },
+          update: { single: { data: { id, status: "launch_handoff" }, error: null } },
+        },
+        creatives: { select: { data: [{ id: "c1", finalize_verified: true }], error: null } },
         pipeline_events: { insert: { data: null, error: { message: "events down" } } },
       });
       const res = await POST(

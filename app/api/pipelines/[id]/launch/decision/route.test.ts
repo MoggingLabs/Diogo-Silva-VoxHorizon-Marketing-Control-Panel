@@ -57,8 +57,6 @@ const BLOCKED_BUNDLE = {
 beforeEach(() => {
   currentSupabase = mockClient();
   getReviewBundle.mockReset();
-  delete process.env.WORKER_URL;
-  delete process.env.WORKER_SHARED_SECRET;
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -163,34 +161,17 @@ describe("POST /api/pipelines/:id/launch/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("forwards to the worker launch endpoint when configured (200)", async () => {
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+  it("does NOT push to any worker launch endpoint (operator-MCP launch)", async () => {
+    // The locked design holds the Meta launch on the operator's MCP (the
+    // operator records entities via /work/pipeline/tools/launch before this
+    // approval). The decision route must NEVER fire-and-forget to a worker
+    // launch endpoint — the dead `/work/pipeline/launch` glue was removed.
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
     currentSupabase = inLaunchStage();
     getReviewBundle.mockResolvedValue(READY_BUNDLE);
     const res = await POST(req(approveBody), { params });
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 5));
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "http://worker.local/work/pipeline/launch",
-      expect.objectContaining({ method: "POST" }),
-    );
-  });
-
-  it("warns when worker launch kick fails (still 200)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("oops", { status: 500 }));
-    currentSupabase = inLaunchStage();
-    getReviewBundle.mockResolvedValue(READY_BUNDLE);
-    const res = await POST(req(approveBody), { params });
-    expect(res.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });

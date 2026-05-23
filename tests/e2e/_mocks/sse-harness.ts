@@ -155,38 +155,53 @@ export async function mockWorkerIdeation(
   // no-ops. We just need to seed the rows the worker would have produced.
 
   const admin = getAdminClient();
-  const { data: pipeline, error } = await admin
-    .from("pipelines")
-    .select("image_brief_id, video_brief_id, format_choice")
-    .eq("id", opts.pipelineId)
-    .maybeSingle();
-  if (error || !pipeline) {
-    throw new Error(
-      `mockWorkerIdeation: pipeline ${opts.pipelineId} not found: ${error?.message ?? "no row"}`,
-    );
-  }
 
-  const imageActive = pipeline.format_choice === "image" || pipeline.format_choice === "both";
-  const videoActive = pipeline.format_choice === "video" || pipeline.format_choice === "both";
+  // The configuration→ideation advance route mints the brief(s) and stamps
+  // image_brief_id / video_brief_id on the pipeline, but the spec reaches this
+  // helper as soon as the PhaseStepper renders the "Ideation" step label —
+  // which is present regardless of the live status — so the advance route's DB
+  // write can still be in flight. Poll for the required brief id(s) rather than
+  // assuming a single read sees them.
+  const deadline = Date.now() + 15_000;
+  let imageBriefId: string | null = null;
+  let videoBriefId: string | null = null;
+  let imageActive = false;
+  let videoActive = false;
+  for (;;) {
+    const { data, error } = await admin
+      .from("pipelines")
+      .select("image_brief_id, video_brief_id, format_choice")
+      .eq("id", opts.pipelineId)
+      .maybeSingle();
+    if (error || !data) {
+      throw new Error(
+        `mockWorkerIdeation: pipeline ${opts.pipelineId} not found: ${error?.message ?? "no row"}`,
+      );
+    }
+    imageActive = data.format_choice === "image" || data.format_choice === "both";
+    videoActive = data.format_choice === "video" || data.format_choice === "both";
+    imageBriefId = data.image_brief_id;
+    videoBriefId = data.video_brief_id;
+    const imageReady = !imageActive || Boolean(imageBriefId);
+    const videoReady = !videoActive || Boolean(videoBriefId);
+    if (imageReady && videoReady) break;
+    if (Date.now() > deadline) {
+      throw new Error(
+        `mockWorkerIdeation: pipeline ${opts.pipelineId} brief ids not stamped within 15s ` +
+          `(image_brief_id=${imageBriefId}, video_brief_id=${videoBriefId}) — did the ` +
+          `configuration→ideation advance commit?`,
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
 
   let image: SeededIdeationVariant[] = [];
   let video: SeededIdeationVariant[] = [];
-
   if (imageActive) {
-    if (!pipeline.image_brief_id) {
-      throw new Error(
-        `mockWorkerIdeation: pipeline ${opts.pipelineId} has no image_brief_id — was the advance route awaited?`,
-      );
-    }
-    image = await seedIdeationVariants(opts.pipelineId, pipeline.image_brief_id, "image", opts.n);
+    image = await seedIdeationVariants(opts.pipelineId, imageBriefId as string, "image", opts.n);
   }
   if (videoActive) {
-    if (!pipeline.video_brief_id) {
-      throw new Error(
-        `mockWorkerIdeation: pipeline ${opts.pipelineId} has no video_brief_id — was the advance route awaited?`,
-      );
-    }
-    video = await seedIdeationVariants(opts.pipelineId, pipeline.video_brief_id, "video", opts.n);
+    video = await seedIdeationVariants(opts.pipelineId, videoBriefId as string, "video", opts.n);
   }
   return { image, video };
 }
