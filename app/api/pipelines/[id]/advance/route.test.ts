@@ -958,4 +958,178 @@ describe("POST /api/pipelines/:id/advance", () => {
       warn.mockRestore();
     });
   });
+
+  describe("per-creative gated stages (hard block)", () => {
+    function perCreativePipeline(status: string) {
+      return {
+        id,
+        status,
+        format_choice: "image",
+        config_draft: null,
+        advanced_at: {},
+      };
+    }
+
+    it("advances creative_qa when every creative is passed (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("creative_qa"), error: null } },
+          update: { single: { data: { id, status: "compliance_review" }, error: null } },
+        },
+        creative_stage_state: {
+          select: { data: [{ status: "passed" }, { status: "passed" }], error: null },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("compliance_review");
+    });
+
+    it("422 HARD-BLOCKS compliance_review while a creative is failed", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("compliance_review"), error: null } },
+        },
+        creative_stage_state: {
+          select: { data: [{ status: "passed" }, { status: "failed" }], error: null },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.field).toBe("rollup");
+      expect(body.stage).toBe("compliance_review");
+      expect(body.rollup.blocking).toBe(1);
+      expect(String(body.error)).toContain("HARD gate");
+    });
+
+    it("422 when no creative_stage_state rows exist (uncleared rollup)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("compliance_review"), error: null } },
+        },
+        creative_stage_state: { select: { data: [], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+    });
+
+    it("500 when the creative_stage_state read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("creative_qa"), error: null } },
+        },
+        creative_stage_state: {
+          select: { data: null, error: { message: "rollup read failed" } },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("treats overridden + skipped as cleared and advances compliance_review", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("compliance_review"), error: null } },
+          update: { single: { data: { id, status: "copy" }, error: null } },
+        },
+        creative_stage_state: {
+          select: { data: [{ status: "overridden" }, { status: "skipped" }], error: null },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("copy");
+    });
+
+    it("blocked -> override -> advances (integration of the hard gate)", async () => {
+      // 1. Blocked: a failed compliance unit holds the gate shut (422).
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("compliance_review"), error: null } },
+        },
+        creative_stage_state: {
+          select: { data: [{ status: "failed" }], error: null },
+        },
+      });
+      const blocked = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(blocked.status).toBe(422);
+
+      // 2. Override (simulated by the manager route): the unit is now overridden.
+      // 3. Re-advance: the rollup now reads as cleared, so the gate opens.
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("compliance_review"), error: null } },
+          update: { single: { data: { id, status: "copy" }, error: null } },
+        },
+        creative_stage_state: {
+          select: { data: [{ status: "overridden" }], error: null },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const advanced = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(advanced.status).toBe(200);
+      const body = await advanced.json();
+      expect(body.pipeline.status).toBe("copy");
+    });
+
+    it("500 when the pipeline update races (compare-and-set miss)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("copy"), error: null } },
+          update: { single: { data: null, error: { message: "race" } } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("warns but returns 200 when the stage_advanced event insert fails", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("spec_validation"), error: null } },
+          update: { single: { data: { id, status: "variant_plan" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: { message: "events down" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
+      warn.mockRestore();
+    });
+  });
 });
