@@ -628,9 +628,3 @@ def test_rollup_verdict_semantics() -> None:
     assert qa_compliance._rollup_verdict(["passed", "failed"]) == "failed"
     assert qa_compliance._rollup_verdict(["passed", "pending"]) == "pending"
     assert qa_compliance._rollup_verdict(["overridden", "skipped"]) == "passed"
-
-
-def test_coerce_rule_version() -> None:
-    assert qa_compliance._coerce_rule_version("3") == 3
-    assert qa_compliance._coerce_rule_version("client") == 0
-    assert qa_compliance._coerce_rule_version("") == 0

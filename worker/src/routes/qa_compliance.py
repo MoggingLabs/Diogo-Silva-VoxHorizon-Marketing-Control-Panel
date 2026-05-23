@@ -365,7 +365,10 @@ def _persist_compliance_findings(
             "copy_variant_id": item.copy_variant_id,
             "pass": 1,
             "rule_id": finding.rule_id,
-            "rule_version": _coerce_rule_version(finding.version),
+            # rule_version is TEXT (migration 0028): store the engine's real
+            # semantic version verbatim ("2025.1", or "client" for synthesized
+            # per-client rules) on this append-only evidence row.
+            "rule_version": finding.version,
             "severity": _COMPLIANCE_SEVERITY_TO_DB.get(finding.severity, "medium"),
             "verdict": finding.verdict,
             "evidence": {"detail": finding.evidence},
@@ -376,18 +379,6 @@ def _persist_compliance_findings(
         sb.table("compliance_finding").insert(row).execute()
         written += 1
     return written
-
-
-def _coerce_rule_version(version: str) -> int:
-    """compliance_finding.rule_version is an int; engine carries a string.
-
-    Synthesized per-client rules use ``"client"`` (non-numeric) — map those (and
-    any unparseable version) to ``0`` so the evidence row still persists.
-    """
-    try:
-        return int(version)
-    except (TypeError, ValueError):
-        return 0
 
 
 @router.post(

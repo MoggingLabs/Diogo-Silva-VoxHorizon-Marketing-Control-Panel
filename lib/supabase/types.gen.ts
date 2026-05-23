@@ -92,7 +92,7 @@ export type Database = {
           pipeline_id: string
           required_edit: string | null
           rule_id: string
-          rule_version: number
+          rule_version: string
           severity: Database["public"]["Enums"]["verdict_severity_enum"]
           verdict: Database["public"]["Enums"]["compliance_verdict_enum"]
         }
@@ -113,7 +113,7 @@ export type Database = {
           pipeline_id: string
           required_edit?: string | null
           rule_id: string
-          rule_version: number
+          rule_version: string
           severity: Database["public"]["Enums"]["verdict_severity_enum"]
           verdict: Database["public"]["Enums"]["compliance_verdict_enum"]
         }
@@ -134,7 +134,7 @@ export type Database = {
           pipeline_id?: string
           required_edit?: string | null
           rule_id?: string
-          rule_version?: number
+          rule_version?: string
           severity?: Database["public"]["Enums"]["verdict_severity_enum"]
           verdict?: Database["public"]["Enums"]["compliance_verdict_enum"]
         }
