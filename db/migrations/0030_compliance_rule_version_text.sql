@@ -1,4 +1,4 @@
--- 0029_compliance_rule_version_text.sql
+-- 0030_compliance_rule_version_text.sql
 -- Reconcile compliance_rule.version int -> text so the lookup matches the
 -- compliance engine's SEMANTIC rule versions ("2025.1", "client", ...).
 --
