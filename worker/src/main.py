@@ -18,6 +18,7 @@ from .routes import (
     hermes_chat,
     hermes_kanban,
     hermes_webhook,
+    integrations,
     pipeline,
     pipeline_tools,
     ping,
@@ -102,6 +103,14 @@ def create_app() -> FastAPI:
     # image generation + compositor surface used by the pipeline producers
     # and the standalone creative routes.
     app.include_router(creative.router, tags=["creative"])
+
+    # === P5 integrations + monitor + observability (Layer 6) ===
+    # The launch RECORDER + hard launch gate (re-checks preconditions
+    # server-side), the Drive finalize recorder, the read-only GHL lead
+    # webhook (deduped via the inbox), and the /work/metrics observability
+    # snapshot. Meta + Drive stay operator-MCP — these endpoints RECORD and
+    # GATE, they never call Meta/Drive. See routes/integrations.py.
+    app.include_router(integrations.router, tags=["integrations"])
 
     # === wave 18 hermes-bridge routes ===
     # Three thin surfaces that proxy to the co-located Hermes/Ekko
