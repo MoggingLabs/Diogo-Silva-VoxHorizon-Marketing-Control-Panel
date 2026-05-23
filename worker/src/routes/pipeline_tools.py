@@ -31,9 +31,11 @@ Endpoints (all bearer-authed via :func:`verify_secret`):
       — the manager reviews the brief via the existing stage gate.
 
   POST /work/pipeline/tools/render
-      Operator RENDERS — THE spend tool, gated by the approval plugin
-      (not by this endpoint). A SYNCHRONOUS batch render of operator-
-      authored prompts that mirrors the canonical render loop in
+      Operator RENDERS — free (codex gpt-image-2, $0) and ALLOWLISTED by the
+      approval plugin (the per-render spend gate was removed; the manager
+      supervises spend at the dashboard stage gates, not per render). A
+      SYNCHRONOUS batch render of operator-authored prompts that mirrors the
+      canonical render loop in
       ``pipeline.py`` EXACTLY (queue.acquire → emit task events → Kie →
       Storage upload → record_creative_stage → emit_cost). Returns once
       every item has resolved so the operator can narrate the results.
@@ -1050,9 +1052,10 @@ async def _render_one(
 async def render(body: RenderInput) -> dict[str, Any]:
     """Synchronously render a batch of operator-authored prompts.
 
-    THE spend tool — the approval plugin intercepts this call to long-poll
-    the manager for spend approval; this endpoint itself is not gated. Each
-    item × ratio runs the canonical render loop, serialized per brief via
+    Free render (codex gpt-image-2, $0) — the approval plugin ALLOWLISTS this
+    tool (the per-render spend gate was removed; the manager supervises spend at
+    the dashboard stage gates). Each item × ratio runs the canonical render
+    loop, serialized per brief via
     the existing ``BriefQueue`` (the SOP forbids parallel Kie within one
     brief). Per-item failures emit a ``task_error`` and continue so one bad
     render doesn't abort the batch.
