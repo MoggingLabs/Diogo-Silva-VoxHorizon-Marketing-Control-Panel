@@ -60,25 +60,25 @@ the worker). Call them like any other tool — do NOT shell out to `helper.py`.
 The names matter: the approval gate keys on them. Each stage below names the
 one tool it calls.
 
-| MCP tool                            | What it does                                         | Spend?  | Manager gate                                  |
-| ----------------------------------- | ---------------------------------------------------- | ------- | --------------------------------------------- |
-| `pipeline_operator_read`            | Read pipeline state + stage + per-creative rollup    | no      | allowlisted (no prompt)                       |
-| `pipeline_operator_client_read`     | Read client brand / offers / do-not-say              | no      | allowlisted (no prompt)                       |
-| `pipeline_operator_brief`           | Author/upsert the image brief + persist concepts     | no      | reviewed via the brief stage gate             |
-| `pipeline_operator_render`          | Render concepts / finals / re-renders                | **yes** | **requires approval** (spend gate)            |
-| `pipeline_operator_store_creative`  | Record render bytes/metadata (codex backend upload)  | no      | allowlisted (worker recorder)                 |
-| `pipeline_operator_qa_result`       | Persist per-creative QA verdicts (array)             | no      | allowlisted; worker adjudicates               |
-| `pipeline_operator_compliance_result` | Submit per-creative compliance **candidate findings** | no    | allowlisted; **worker writes the verdict**    |
-| `pipeline_operator_copy`            | Persist per-creative copy variants (array)           | no      | reviewed via the copy stage gate              |
-| `pipeline_operator_spec_result`     | Persist per-placement spec checks + derived crops    | no      | allowlisted; auto-stage                       |
-| `pipeline_operator_finalize_result` | Record naming + Drive URLs + verify report           | no      | allowlisted; worker recorder                  |
-| `pipeline_operator_launch`          | Submit the assembled launch package (PAUSED-first)   | **yes** | **requires approval** (HARD launch gate)      |
-| `pipeline_operator_monitor_result`  | Persist monitor KPIs + kill/scale verdicts           | no      | allowlisted; recommendation only              |
-| `pipeline_operator_signal`          | Signal dispatch completion / health to the workflow  | no      | allowlisted (always last)                     |
+| MCP tool                              | What it does                                          | Spend?  | Manager gate                                                   |
+| ------------------------------------- | ----------------------------------------------------- | ------- | -------------------------------------------------------------- |
+| `pipeline_operator_read`              | Read pipeline state + stage + per-creative rollup     | no      | allowlisted (no prompt)                                        |
+| `pipeline_operator_client_read`       | Read client brand / offers / do-not-say               | no      | allowlisted (no prompt)                                        |
+| `pipeline_operator_brief`             | Author/upsert the image brief + persist concepts      | no      | reviewed via the brief stage gate                              |
+| `pipeline_operator_render`            | Render concepts / finals / re-renders                 | no      | allowlisted (free render, $0; spend supervised at stage gates) |
+| `pipeline_operator_store_creative`    | Record render bytes/metadata (codex backend upload)   | no      | allowlisted (worker recorder)                                  |
+| `pipeline_operator_qa_result`         | Persist per-creative QA verdicts (array)              | no      | allowlisted; worker adjudicates                                |
+| `pipeline_operator_compliance_result` | Submit per-creative compliance **candidate findings** | no      | allowlisted; **worker writes the verdict**                     |
+| `pipeline_operator_copy`              | Persist per-creative copy variants (array)            | no      | reviewed via the copy stage gate                               |
+| `pipeline_operator_spec_result`       | Persist per-placement spec checks + derived crops     | no      | allowlisted; auto-stage                                        |
+| `pipeline_operator_finalize_result`   | Record naming + Drive URLs + verify report            | no      | allowlisted; worker recorder                                   |
+| `pipeline_operator_launch`            | Submit the assembled launch package (PAUSED-first)    | **yes** | **requires approval** (HARD launch gate)                       |
+| `pipeline_operator_monitor_result`    | Persist monitor KPIs + kill/scale verdicts            | no      | allowlisted; recommendation only                               |
+| `pipeline_operator_signal`            | Signal dispatch completion / health to the workflow   | no      | allowlisted (always last)                                      |
 
 > **The compliance + launch invariant (READ THIS, IT IS THE WHOLE POINT).**
 > You have **no tool that writes a compliance pass and no tool that clears a
-> gate.** `pipeline_operator_compliance_result` only submits *candidate*
+> gate.** `pipeline_operator_compliance_result` only submits _candidate_
 > findings (`{rule_id, label, confidence, evidence_span}`); the **worker
 > adjudicates** and writes the verdict. A `failed` compliance unit leaves
 > `failed` only through an **audited manager override** (a manager-authed route,
@@ -108,8 +108,8 @@ one tool it calls.
 The MCP server reads `WORKER_BASE_URL` / `WORKER_SHARED_SECRET` from the
 operator container env on your behalf — you never handle the secret. Hermes
 presents these tools to the approval gate as `mcp_<server>_<tool>` with single
-underscores — e.g. `pipeline_operator_render` becomes
-`mcp_pipeline_operator_pipeline_operator_render` — and the gate keys on that
+underscores — e.g. `pipeline_operator_launch` becomes
+`mcp_pipeline_operator_pipeline_operator_launch` — and the gate keys on that
 exact full name; you just call the tools by their normal name.
 
 ---
@@ -136,7 +136,7 @@ A dispatch is a single unit of work:
 4. **Persist** the stage's result through its MCP tool (an **array** for the
    per-creative stages — see the loop rules).
 5. **Signal.** End every dispatch with `pipeline_operator_signal(pipeline_id,
-   dispatch_id, stage, status=...)` so the workflow knows the dispatch landed
+dispatch_id, stage, status=...)` so the workflow knows the dispatch landed
    (and the watchdog does not re-dispatch a healthy stage).
 6. **Narrate** what you did and what the manager needs to decide, in plain
    English (the manager reads this verbatim).
@@ -262,19 +262,21 @@ Goal: produce a brief the manager can review. **No spend.**
   and say what you changed. Then **author all N concepts NOW** (distinct
   angles, default N = number of angles = 4) and PERSIST them on the brief.
 - **MCP tool:** `pipeline_operator_brief(pipeline_id, image_payload, notes,
-  concepts=<all N>)` — upserts the brief, persists the plan, idempotent.
+concepts=<all N>)` — upserts the brief, persists the plan, idempotent.
 - **Narration line:** _"Brief and N concepts are ready for your review. Approve
   it in the dashboard and I'll render the previews."_
 - **Signal:** `pipeline_operator_signal(pipeline_id, dispatch_id,
-  "configuration", status="done")`.
+"configuration", status="done")`.
 - **Stop.** Do not render. The manager approves the brief at the stage gate.
 
 ---
 
 ## Stage: `ideation` -> render ALL N concept previews (ONE deterministic call)
 
-Goal: render the N approved concepts. **This spends** — one approval, all N in
-one deterministic pass.
+Goal: render the N approved concepts in one deterministic pass. Rendering is
+**free** (codex `gpt-image-2`, $0) and **not** per-render gated — do NOT wait
+for a spend approval. The manager supervises spend at the dashboard STAGE gates
+(brief review, concept picks, finals approval), not on each render.
 
 - **Reads:** `pipeline_operator_read` (the persisted plan lives in
   `brief.payload.concepts` / `config_draft.concepts`; you do NOT re-author).
@@ -282,9 +284,9 @@ one deterministic pass.
   render was interrupted, just call it again — done concepts are `skipped`.
   Never loop the tool per image.
 - **MCP tool:** `pipeline_operator_render(pipeline_id, kind="concept_preview")`
-  -> `{ok, renders, total_cost_usd, errors, skipped}`. The render gate fires
-  once; if the manager declines, narrate the decline and stop. The worker
-  records bytes via `pipeline_operator_store_creative`.
+  -> `{ok, renders, total_cost_usd, errors, skipped}`. Rendering is free and
+  ungated — there is no per-render approval to wait on. The worker records
+  bytes via `pipeline_operator_store_creative`.
 - **Narration line:** _"All concepts are in for your review. Pick the one(s) to
   finalize and I'll render the production versions."_ (narrate each by angle +
   idea; report `total_cost_usd`, 0 on codex).
@@ -312,8 +314,10 @@ Goal: nothing to produce; the manager is choosing. **No spend.**
 
 ## Stage: `generation` -> render finals for the picks
 
-Goal: produce the production renders for the picks (1:1 + 4:5 + 9:16). **This
-spends.**
+Goal: produce the production renders for the picks (1:1 + 4:5 + 9:16). Free by
+default (codex `gpt-image-2`, $0); only the per-pipeline finals model picker can
+select a paid model — and even then it is **not** per-render gated (the manager
+chose the model upfront and approves finals at the stage gate). Just render.
 
 - **Reads:** `pipeline_operator_read` (confirm `picks.image` is populated).
 - **Procedure (in-context):** Call render with **no `items`**; the worker
@@ -336,8 +340,8 @@ spends.**
 ## Stage: `creative_qa` -> per-creative defect + brand QA (DELEGATE)
 
 Goal: a pass/fail QA verdict per final, with notes; failures route to a
-targeted re-render. **No spend** (the re-render, if any, is a later
-`generation`-style render the manager approves). This is a **per-creative**
+targeted re-render. **No spend** (the re-render, if any, is a later free
+`generation`-style render — no per-render approval). This is a **per-creative**
 stage — apply the loop rules.
 
 - **Reads:** `pipeline_operator_read` (find OUTSTANDING finals where
@@ -348,11 +352,11 @@ stage — apply the loop rules.
   angle + client brand profile + the roofing detail sub-rubric when the
   service is roofing). It returns the strict QA verdict schema per creative
   (`{creative_id, verdict: pass|fail, scores:{hands,in_image_text,anatomy,
-  surface,resolution,legibility,brand}, defects:[...], remediation}`). Use
+surface,resolution,legibility,brand}, defects:[...], remediation}`). Use
   the **`creative-qa`** skill rubric as the standard. The specialist judges;
   it never persists and never clears a gate.
 - **MCP tool:** `pipeline_operator_qa_result(pipeline_id,
-  results=[{creative_id, verdict, scores, defects, remediation}, ...])` — ONE
+results=[{creative_id, verdict, scores, defects, remediation}, ...])` — ONE
   array call for the whole batch. The worker writes the verdicts and runs its
   own deterministic resolution/legibility backstops.
 - **Narration line:** _"QA is in: M of N finals pass, K need a re-render
@@ -382,11 +386,11 @@ is a **per-creative** stage — apply the loop rules.
   the re-arm pass), the vertical, and the client constraints. It returns
   **candidate findings** per creative against the versioned ruleset
   (`{creative_id, findings:[{rule_id, version, label:violation|clear|uncertain,
-  confidence, evidence_span, required_edit, citation_url}]}`). Use the
+confidence, evidence_span, required_edit, citation_url}]}`). Use the
   **`ad-compliance`** skill ruleset as the standard. The specialist **submits
   candidates only**; it does not adjudicate and **never writes a pass**.
 - **MCP tool:** `pipeline_operator_compliance_result(pipeline_id,
-  candidates=[{creative_id, findings:[...]}, ...])` — ONE array call. The
+candidates=[{creative_id, findings:[...]}, ...])` — ONE array call. The
   **worker adjudicates** deterministic + LLM findings and writes the verdict.
   `uncertain` or low-confidence ⇒ the worker escalates to the manager queue,
   **never auto-passes**.
@@ -420,14 +424,14 @@ rules. Copy edits **re-arm** that creative's compliance unit (two-pass).
   (`templates/subagents/copy.md`) per creative with the visual description, the
   angle, the client profile, and the copy patterns to use. It returns the
   strict copy schema (>=3 variants, each `{platform, variant_index, pattern,
-  headline, primary_text, description, cta, validation:{char_counts,...}}`),
+headline, primary_text, description, cta, validation:{char_counts,...}}`),
   pattern-tagged to the winning registry, run through the humanizer, with no em
   dashes and no copy reused across creatives. Use the **`copy-authoring`**
   skill standards. The specialist writes drafts; it never approves, never
   posts to comms, never clears a gate.
 - **MCP tool:** `pipeline_operator_copy(pipeline_id,
-  variants=[{creative_id, platform, variant_index, pattern, headline,
-  primary_text, description, cta, validation}, ...])` — ONE array call for the
+variants=[{creative_id, platform, variant_index, pattern, headline,
+primary_text, description, cta, validation}, ...])` — ONE array call for the
   whole batch.
 - **Narration line:** _"Copy is drafted: 3+ variants per creative, owner voice,
   pattern-tagged and humanized. Approve them in the dashboard. Note that
@@ -452,7 +456,7 @@ drives safe-zones/overlay. This is an **auto** stage (advances when it closes).
   crops the worker generated. Surface exceptions; do not silently "fix" a
   failing placement.
 - **MCP tool:** `pipeline_operator_spec_result(pipeline_id,
-  results=[{creative_id, placement, ratio, status, crop_ref, exceptions}, ...])`
+results=[{creative_id, placement, ratio, status, crop_ref, exceptions}, ...])`
   — ONE array call.
 - **Narration line:** _"Spec check done: all placements pass except K (listed).
   Derived crops are attached. The pipeline moves to variant planning
@@ -502,7 +506,7 @@ MCP, and the worker is the recorder.
   assets to the client's Drive folder via the operator Drive MCP, verify each
   by md5/size, and record the URLs + verify report.
 - **MCP tool:** `pipeline_operator_finalize_result(pipeline_id,
-  results=[{creative_id, asset_name, drive_url, md5, verified}, ...])` — the
+results=[{creative_id, asset_name, drive_url, md5, verified}, ...])` — the
   worker records the `drive_url` graph idempotently.
 - **Narration line:** _"Assets are named, uploaded to Drive, and verified
   (report below). The pipeline assembles the launch package next."_
@@ -556,12 +560,12 @@ a **new** pipeline (the next brief).
   (`templates/subagents/monitor.md`) with the active ad entities, the lookback
   window, and the spend floor. It returns the strict verdict schema per ad
   (`{ad_entity_id, verdict: kill|watch|keep|scale, spend, ghl_leads, real_cpl,
-  ctr, frequency, reason, next_move}`) against the thresholds in the
+ctr, frequency, reason, next_move}`) against the thresholds in the
   **`campaign-monitor`** skill. The specialist recommends; it never executes a
   Meta change and never clears a gate.
 - **MCP tool:** `pipeline_operator_monitor_result(pipeline_id,
-  results=[{ad_entity_id, verdict, spend, ghl_leads, real_cpl, ctr, frequency,
-  reason, next_move}, ...])` — ONE array call.
+results=[{ad_entity_id, verdict, spend, ghl_leads, real_cpl, ctr, frequency,
+reason, next_move}, ...])` — ONE array call.
 - **Narration line:** _"30-day read is in (GHL lead truth): X keep, Y watch, Z
   kill. Reasons and the next-brief input are below. Approve the kill/scale
   moves in the dashboard."_
@@ -601,11 +605,12 @@ a **new** pipeline (the next brief).
    budget, signal `partial` if you cap.
 6. **One deterministic render per render stage.** Persist all N concepts in the
    brief, then trigger with a SINGLE `pipeline_operator_render(pipeline_id,
-   kind)` call with NO `items`. Never loop the render tool per image. A retry
+kind)` call with NO `items`. Never loop the render tool per image. A retry
    resumes the remainder.
-7. **The spend gate is the manager's, not yours.** When `pipeline_operator_render`
-   or `pipeline_operator_launch` is blocked (declined / no approval), narrate
-   the decline plainly and stop. PAUSED-first always; never create `ACTIVE`.
+7. **The launch gate is the manager's, not yours.** Rendering is free and
+   ungated — just render. The approval gate is `pipeline_operator_launch` (and
+   `Meta_ads_activate_entity`): when it's blocked (declined / no approval),
+   narrate the decline plainly and stop. PAUSED-first always; never create `ACTIVE`.
 8. **Be idempotent.** Use `events_tail` and the existing
    brief/concepts/finals/verdicts/copy to avoid redoing work.
 9. **Delegate the judgment stages.** `copy`, `creative_qa`, `compliance_review`,
@@ -629,6 +634,6 @@ a **new** pipeline (the next brief).
   sub-agent contracts for the four judgment stages.
 - `mcp_server.py` — the stdio MCP server publishing the `pipeline_operator_*`
   tools; it delegates to `helper.py` (the only thing that talks to the worker).
-- `voxhorizon-approvals` plugin (`policy.operator.yaml`) — gates `..._render`
-  and `..._launch` (approval), allowlists the read/persist/signal tools;
-  blocklists the shell.
+- `voxhorizon-approvals` plugin (`policy.operator.yaml`) — gates `..._launch`
+  (and `Meta_ads_activate_entity`) for approval; allowlists the render +
+  read/persist/signal tools (render is free); blocklists the shell.
