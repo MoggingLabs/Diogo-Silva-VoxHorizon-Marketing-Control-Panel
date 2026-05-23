@@ -243,7 +243,15 @@ def pipeline_operator_read(pipeline_id: str) -> dict[str, Any]:
 
     Calls ``GET {WORKER_BASE_URL}/work/pipeline/tools/{pipeline_id}`` and
     returns the worker's JSON: ``status``, ``format_choice``, ``config_draft``,
-    ``picks``, ``brief``, ``concepts``, ``finals``, ``events_tail``.
+    ``picks``, ``brief``, ``concepts``, ``finals``, ``creatives``, ``client``,
+    ``events_tail``.
+
+    ``creatives`` is the PER-CREATIVE GATE ROLLUP — one entry per creative with
+    a ``stage_state`` map ``{creative_qa, compliance_review, copy,
+    spec_validation}`` → ``pending|in_progress|passed|failed|overridden|
+    skipped`` (plus the creative lifecycle ``status``). The operator reads it to
+    find the OUTSTANDING creatives for a per-creative stage and resume by
+    skip-done. It is ``[]`` until the first per-creative stage runs.
 
     This is the operator's first move on every dispatch. It performs NO spend
     and the operator policy ALLOWLISTS it, so it never round-trips the manager.
@@ -772,6 +780,247 @@ def _render_via_codex(
 
 
 # ---------------------------------------------------------------------------
+# STAGE-PERSIST tools (P3) — the post-generation persistence wrappers.
+#
+# Each delegates straight to a worker endpoint that VALIDATES + WRITES the
+# result (and rolls the per-(creative, stage) gate forward). The operator has
+# NO tool here that clears a gate or writes a compliance pass: qa/compliance
+# only SUBMIT (the worker adjudicates), copy/spec/finalize record evidence, and
+# the manager's audited action at the gate is what advances the pipeline.
+#
+# All are array-shaped (one call per stage, not per creative) and idempotent
+# (the worker resumes by skip-done). They are allowlisted in
+# policy.operator.yaml — no spend, so no per-call approval; the manager gates at
+# the dashboard stage gates. (pipeline_operator_launch is the EXCEPTION — it
+# requires approval and is the integrations agent's tool, not built here.)
+# ---------------------------------------------------------------------------
+
+
+def _require_list(value: Any, name: str) -> list[dict[str, Any]]:
+    """Validate an array payload is a non-empty list of dicts before it ships."""
+    if not isinstance(value, list) or not value:
+        raise PipelineOperatorError(f"{name} must be a non-empty list")
+    for idx, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise PipelineOperatorError(f"{name}[{idx}] must be a dict")
+    return value
+
+
+def _require_creative_ids(items: list[dict[str, Any]], name: str) -> None:
+    """Every per-creative item must carry a non-empty ``creative_id``."""
+    for idx, item in enumerate(items):
+        cid = item.get("creative_id")
+        if not isinstance(cid, str) or not cid.strip():
+            raise PipelineOperatorError(
+                f"{name}[{idx}].creative_id must be a non-empty string"
+            )
+
+
+def pipeline_operator_qa_result(
+    *, pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Submit per-creative QA verdicts for the worker to ADJUDICATE + write.
+
+    POSTs ``{pipeline_id, results:[{creative_id, verdict, scores, defects,
+    remediation}, ...]}`` to ``/work/pipeline/tools/qa_run`` (the qa_compliance
+    route module). ONE array call for the whole batch — never per creative. The
+    worker runs its own deterministic resolution/legibility backstops, writes
+    ``qa_result`` + rolls ``creative_stage_state(creative_qa)``. The operator
+    persists the specialist's verdict; it does not decide the rollup.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(results, "results")
+    _require_creative_ids(items, "results")
+    return _request(
+        "POST",
+        f"{_TOOLS_PREFIX}/qa_run",
+        json_body={"pipeline_id": pid, "results": items},
+    )
+
+
+def pipeline_operator_compliance_result(
+    *, pipeline_id: str, candidates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Submit per-creative compliance CANDIDATE findings (the worker adjudicates).
+
+    POSTs ``{pipeline_id, candidates:[{creative_id, findings:[{rule_id, version,
+    label, confidence, evidence_span, ...}]}, ...]}`` to
+    ``/work/pipeline/tools/compliance_run`` (the qa_compliance route module).
+    HARD GATE: the operator has NO pass-writing tool — these are CANDIDATES
+    only; the **worker** adjudicates deterministic + LLM findings and writes the
+    verdict, escalating ``uncertain``/low-confidence to the manager queue rather
+    than auto-passing. A ``failed`` unit leaves ``failed`` only via an audited
+    manager override. ONE array call for the whole batch.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(candidates, "candidates")
+    _require_creative_ids(items, "candidates")
+    return _request(
+        "POST",
+        f"{_TOOLS_PREFIX}/compliance_run",
+        json_body={"pipeline_id": pid, "candidates": items},
+    )
+
+
+def pipeline_operator_copy(
+    *, pipeline_id: str, variants: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist authored copy variants (>=1 per creative) — the worker writes them.
+
+    POSTs ``{pipeline_id, variants:[{creative_id, platform, variant_index,
+    pattern, headline, primary_text, description, cta, validation}, ...]}`` to
+    ``/work/pipeline/tools/copy``. The worker upserts ``copy_variants``
+    (idempotent on ``(creative_id, platform, variant_index)``) at
+    ``status='draft'`` and arms the per-creative copy gate to ``in_progress``;
+    the manager approves at the copy stage gate. Approved copy edits re-arm that
+    creative's compliance unit (two-pass). ONE array call for the whole batch.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(variants, "variants")
+    _require_creative_ids(items, "variants")
+    return _request(
+        "POST",
+        f"{_TOOLS_PREFIX}/copy",
+        json_body={"pipeline_id": pid, "variants": items},
+    )
+
+
+def pipeline_operator_spec_result(
+    *, pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist per-placement spec checks + derived crops — the worker writes them.
+
+    POSTs ``{pipeline_id, results:[{creative_id, platform, placement, ratio,
+    status, checks, derived_path_supabase?, derived_path_drive?}, ...]}`` to
+    ``/work/pipeline/tools/spec_result``. The worker upserts ``spec_check``
+    (idempotent on ``(creative_id, platform, placement)``) and rolls the
+    spec_validation gate to the worst placement status (a failing placement
+    holds the gate for the manager). ONE array call for the whole batch.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(results, "results")
+    _require_creative_ids(items, "results")
+    return _request(
+        "POST",
+        f"{_TOOLS_PREFIX}/spec_result",
+        json_body={"pipeline_id": pid, "results": items},
+    )
+
+
+def pipeline_operator_finalize_result(
+    *, pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Record naming + Drive folder + verify report onto each creative.
+
+    POSTs ``{pipeline_id, results:[{creative_id, asset_name, drive_folder_id?,
+    file_path_drive?, verified}, ...]}`` to
+    ``/work/pipeline/tools/finalize_result``. The worker writes the ``creatives``
+    finalize columns and resumes idempotently (a creative already
+    ``finalize_verified`` is skipped). ONE array call for the whole batch.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(results, "results")
+    _require_creative_ids(items, "results")
+    return _request(
+        "POST",
+        f"{_TOOLS_PREFIX}/finalize_result",
+        json_body={"pipeline_id": pid, "results": items},
+    )
+
+
+def pipeline_operator_monitor_result(
+    *,
+    pipeline_id: str,
+    results: list[dict[str, Any]],
+    client_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Persist monitor KPIs + kill/watch/keep verdicts (GHL is lead truth).
+
+    POSTs ``{pipeline_id, client_id?, results:[{campaign_id, ad_entity_id?,
+    window_days, spend, ghl_leads, ctr, freq, verdict, verdict_reason, ...},
+    ...]}`` to ``/work/pipeline/tools/monitor_result``. The worker writes
+    ``campaign_perf_image`` rows computing ``cpl_real = spend / ghl_leads``
+    (never Meta leads) and resumes idempotently on the daily-unique key. The
+    verdicts are recommendations; the manager approves kill/scale at the gate.
+    ONE array call for the whole batch.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    items = _require_list(results, "results")
+    for idx, item in enumerate(items):
+        camp = item.get("campaign_id")
+        if not isinstance(camp, str) or not camp.strip():
+            raise PipelineOperatorError(
+                f"results[{idx}].campaign_id must be a non-empty string"
+            )
+    body: dict[str, Any] = {"pipeline_id": pid, "results": items}
+    if client_id is not None:
+        body["client_id"] = _require_client_id(client_id)
+    return _request("POST", f"{_TOOLS_PREFIX}/monitor_result", json_body=body)
+
+
+#: The signal statuses the worker accepts (operator narration verbs + the DB
+#: lifecycle values). Mirrors ``operator_stage_tools.SignalInput.status``.
+SIGNAL_STATUSES: frozenset[str] = frozenset(
+    {
+        "dispatched",
+        "running",
+        "completed",
+        "failed",
+        "timed_out",
+        "stale",
+        "waiting",
+        "partial",
+        "error",
+    }
+)
+
+
+def pipeline_operator_signal(
+    *,
+    pipeline_id: str,
+    dispatch_id: str,
+    status: str,
+    stage: Optional[str] = None,
+    expected_status: Optional[str] = None,
+    exec_id: Optional[str] = None,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Signal dispatch completion / health to the workflow (ALWAYS call last).
+
+    POSTs to ``/work/pipeline/tools/signal`` to open / heartbeat / close the
+    dispatch's ``operator_dispatches`` row so the workflow knows the dispatch
+    landed and the watchdog does not re-dispatch a healthy stage. End EVERY
+    dispatch with this. ``status`` is one of :data:`SIGNAL_STATUSES`:
+    ``stale``→done (a no-op dispatch), ``waiting``/``partial``→still running,
+    ``error``→failed. Idempotent on ``(pipeline_id, dispatch_id)``.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    if not isinstance(dispatch_id, str) or not dispatch_id.strip():
+        raise PipelineOperatorError("dispatch_id must be a non-empty string")
+    if status not in SIGNAL_STATUSES:
+        raise PipelineOperatorError(
+            f"status must be one of {sorted(SIGNAL_STATUSES)}, got {status!r}"
+        )
+    body: dict[str, Any] = {
+        "pipeline_id": pid,
+        "dispatch_id": dispatch_id.strip(),
+        "status": status,
+    }
+    if stage is not None:
+        body["stage"] = stage
+    if expected_status is not None:
+        body["expected_status"] = expected_status
+    if exec_id is not None:
+        body["exec_id"] = exec_id
+    if summary is not None:
+        body["summary"] = summary
+    if error is not None:
+        body["error"] = error
+    return _request("POST", f"{_TOOLS_PREFIX}/signal", json_body=body)
+
+
+# ---------------------------------------------------------------------------
 # Conventional aliases (contract naming). The gating-canonical names are the
 # pipeline_operator_* functions above; these are thin readability aliases.
 # ---------------------------------------------------------------------------
@@ -795,12 +1044,20 @@ __all__ = [
     "DEFAULT_FINALS_LABEL",
     "PipelineOperatorError",
     "RENDER_KINDS",
+    "SIGNAL_STATUSES",
     "get_client",
     "get_pipeline",
     "pipeline_operator_brief",
     "pipeline_operator_client_read",
+    "pipeline_operator_compliance_result",
+    "pipeline_operator_copy",
+    "pipeline_operator_finalize_result",
+    "pipeline_operator_monitor_result",
+    "pipeline_operator_qa_result",
     "pipeline_operator_read",
     "pipeline_operator_render",
+    "pipeline_operator_signal",
+    "pipeline_operator_spec_result",
     "pipeline_operator_store_creative",
     "post_brief",
     "post_render",

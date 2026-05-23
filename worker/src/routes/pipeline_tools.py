@@ -198,6 +198,63 @@ def _creative_view(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# The four per-creative stages whose gate state the operator reads to find the
+# OUTSTANDING creatives (resume-by-skip-done). Mirrors the creative_stage_enum.
+_PER_CREATIVE_STAGES = ("creative_qa", "compliance_review", "copy", "spec_validation")
+
+
+def _fetch_creative_rollup(pipeline_id: str) -> list[dict[str, Any]]:
+    """Build the per-creative gate rollup the operator resumes idempotently from.
+
+    Returns one entry per creative_stage_state row's creative, each carrying the
+    creative lifecycle ``status`` and a ``stage_state`` map of
+    ``{creative_qa, compliance_review, copy, spec_validation}`` → the per-stage
+    verdict (``pending|in_progress|passed|failed|overridden|skipped``). The
+    operator loops every OUTSTANDING creative (not yet
+    ``passed|overridden|skipped`` for a stage) in one dispatch, so this is the
+    read it branches on. Returns ``[]`` when no per-creative state exists yet
+    (pre-QA pipelines), degrading the read cleanly to "no rollup".
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("creative_stage_state")
+        .select("creative_id, stage, status")
+        .eq("pipeline_id", pipeline_id)
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    if not rows:
+        return []
+
+    by_creative: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        creative_id = row.get("creative_id")
+        if not creative_id:
+            continue
+        entry = by_creative.setdefault(
+            str(creative_id),
+            {"creative_id": str(creative_id), "stage_state": {}},
+        )
+        stage = row.get("stage")
+        if stage in _PER_CREATIVE_STAGES:
+            entry["stage_state"][stage] = row.get("status")
+
+    # Enrich with the creative lifecycle status (draft..live..killed) so the
+    # operator can skip a killed creative without a second read.
+    creative_ids = list(by_creative.keys())
+    for creative_id in creative_ids:
+        life = (
+            sb.table("creatives")
+            .select("id, status")
+            .eq("id", creative_id)
+            .maybe_single()
+            .execute()
+        )
+        if life is not None and isinstance(life.data, dict):
+            by_creative[creative_id]["status"] = life.data.get("status")
+    return list(by_creative.values())
+
+
 @router.get(
     "/work/pipeline/tools/{pipeline_id}", dependencies=[Depends(verify_secret)]
 )
@@ -244,6 +301,10 @@ async def read_pipeline_tools(pipeline_id: str) -> dict[str, Any]:
         "brief": brief,
         "concepts": concepts,
         "finals": finals,
+        # Per-creative gate rollup (creative_qa / compliance_review / copy /
+        # spec_validation) so the operator resumes the per-creative stages by
+        # skip-done. Empty list until the first per-creative stage runs.
+        "creatives": _fetch_creative_rollup(pipeline_id),
         "client": client_compact,
         "events_tail": _fetch_events_tail(pipeline_id, limit=EVENTS_TAIL_LIMIT),
     }

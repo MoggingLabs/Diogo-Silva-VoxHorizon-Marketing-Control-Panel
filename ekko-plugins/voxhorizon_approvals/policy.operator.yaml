@@ -26,24 +26,44 @@
 # $0). The render gate was removed LIVE on the VPS so the operator runs the whole
 # pipeline without pestering the manager for a spend approval on every render.
 # This file is the source `operator-deploy.sh` deploys, so it MUST match the live
-# state — an empty requires-approval set, with render in the allowlist below —
-# or a redeploy would silently RE-GATE renders (the footgun). The manager still
-# supervises spend at the dashboard STAGE gates (brief review, concept picks,
-# finals approval); per-render long-poll gating is intentionally gone.
-extra_requires_approval: []
+# state — with render in the allowlist below — or a redeploy would silently
+# RE-GATE renders (the footgun). The manager still supervises spend at the
+# dashboard STAGE gates (brief review, concept picks, finals approval);
+# per-render long-poll gating is intentionally gone.
+#
+# The ONE tool that DOES require approval is the irreversible Meta launch /
+# activate (the HARD launch gate): creating live ad entities spends real money
+# and cannot be undone, so it long-polls the dashboard for the manager's audited
+# approval before the operator's MCP creates anything. PAUSED-first is the
+# operator's contract; this gate is the server-side backstop. (The launch tool
+# is the integrations agent's; its name is listed here so the gate is in place
+# the moment that tool ships.)
+extra_requires_approval:
+  - mcp_pipeline_operator_pipeline_operator_launch
+  - mcp_Meta_ads_activate_entity
 
-# The read tool is a pure GET of pipeline state, the client-read tool is a pure
-# GET of the client's brand / offers / do-not-say context (both no spend, no
-# side effects), the brief tool is a free Supabase write the manager reviews via
-# the dashboard STAGE gate, and the render tool is now allowlisted too (renders
-# are free; the manager gates spend at the stage gates, not per render).
-# Allowlisting all four keeps the operator's read → author → render loop running
-# without pestering the manager for non-spend actions.
+# The read/client-read tools are pure GETs (no spend), the brief tool is a free
+# Supabase write the manager reviews via the dashboard STAGE gate, and the
+# render tool is allowlisted (renders are free; the manager gates spend at the
+# stage gates). The P3 stage-persist tools (qa_result / compliance_result /
+# copy / spec_result / finalize_result / monitor_result / signal) are all free
+# DB writes that record evidence + roll the per-creative gate forward — they
+# clear NO gate (the worker adjudicates qa/compliance; the manager clears gates),
+# so they are allowlisted to keep the operator's per-stage loop running without
+# a round-trip. The Meta-launch tool is the EXCEPTION (extra_requires_approval
+# above). Shell stays blocklisted below.
 allowlist:
   - mcp_pipeline_operator_pipeline_operator_read
   - mcp_pipeline_operator_pipeline_operator_client_read
   - mcp_pipeline_operator_pipeline_operator_brief
   - mcp_pipeline_operator_pipeline_operator_render
+  - mcp_pipeline_operator_pipeline_operator_qa_result
+  - mcp_pipeline_operator_pipeline_operator_compliance_result
+  - mcp_pipeline_operator_pipeline_operator_copy
+  - mcp_pipeline_operator_pipeline_operator_spec_result
+  - mcp_pipeline_operator_pipeline_operator_finalize_result
+  - mcp_pipeline_operator_pipeline_operator_monitor_result
+  - mcp_pipeline_operator_pipeline_operator_signal
 
 # Hard-block the shell/code tools. A focused marketing operator authors brief
 # and concept payloads directly (in reasoning) and persists them via the MCP

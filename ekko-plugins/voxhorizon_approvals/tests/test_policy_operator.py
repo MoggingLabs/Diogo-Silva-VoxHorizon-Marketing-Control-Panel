@@ -42,6 +42,34 @@ READ = "mcp_pipeline_operator_pipeline_operator_read"
 CLIENT_READ = "mcp_pipeline_operator_pipeline_operator_client_read"
 BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
 
+# P3 stage-persist tools (all allowlisted; none clears a gate).
+QA_RESULT = "mcp_pipeline_operator_pipeline_operator_qa_result"
+COMPLIANCE_RESULT = "mcp_pipeline_operator_pipeline_operator_compliance_result"
+COPY = "mcp_pipeline_operator_pipeline_operator_copy"
+SPEC_RESULT = "mcp_pipeline_operator_pipeline_operator_spec_result"
+FINALIZE_RESULT = "mcp_pipeline_operator_pipeline_operator_finalize_result"
+MONITOR_RESULT = "mcp_pipeline_operator_pipeline_operator_monitor_result"
+SIGNAL = "mcp_pipeline_operator_pipeline_operator_signal"
+
+# The HARD launch gate — requires approval (irreversible Meta spend).
+LAUNCH = "mcp_pipeline_operator_pipeline_operator_launch"
+META_ACTIVATE = "mcp_Meta_ads_activate_entity"
+
+#: Every allowlisted operator tool (read + author + render + the P3 persisters).
+ALLOWLISTED_TOOLS = (
+    READ,
+    CLIENT_READ,
+    BRIEF,
+    RENDER,
+    QA_RESULT,
+    COMPLIANCE_RESULT,
+    COPY,
+    SPEC_RESULT,
+    FINALIZE_RESULT,
+    MONITOR_RESULT,
+    SIGNAL,
+)
+
 
 @pytest.fixture
 def operator_overlay() -> PolicyOverlay:
@@ -94,6 +122,65 @@ def test_brief_tool_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
 
 
 # ---------------------------------------------------------------------------
+# P3 stage-persist tools are all allowlisted (free writes; clear no gate)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [QA_RESULT, COMPLIANCE_RESULT, COPY, SPEC_RESULT, FINALIZE_RESULT, MONITOR_RESULT, SIGNAL],
+)
+def test_stage_persist_tools_are_allowlisted(
+    operator_overlay: PolicyOverlay, tool: str
+) -> None:
+    """The post-generation persist tools record evidence + roll the per-creative
+    gate; they clear NO gate (the worker adjudicates qa/compliance, the manager
+    clears gates), so they are allowlisted — no spend, no round-trip."""
+    decision = operator_overlay.evaluate(tool, {})
+    assert decision.action == "allow"
+    assert "allowlist" in decision.reason
+
+
+def test_stage_persist_tools_allowed_with_array_payload(
+    operator_overlay: PolicyOverlay,
+) -> None:
+    """The persist tools stay allowed regardless of the array payload shape."""
+    decision = operator_overlay.evaluate(
+        COPY,
+        {"pipeline_id": "p-1", "variants": [{"creative_id": "cr-1"}]},
+    )
+    assert decision.action == "allow"
+
+
+# ---------------------------------------------------------------------------
+# The HARD launch gate requires approval (irreversible Meta spend)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_tool_requires_approval(operator_overlay: PolicyOverlay) -> None:
+    """The Meta launch / activate is irreversible spend — it must ask the
+    manager (the HARD launch gate), never allow silently."""
+    decision = operator_overlay.evaluate(LAUNCH, {})
+    assert decision.action == "ask_operator"
+    assert "policy overlay" in decision.reason
+
+
+def test_meta_activate_tool_requires_approval(
+    operator_overlay: PolicyOverlay,
+) -> None:
+    """The raw Meta activate-entity tool is also gated — defense in depth in
+    case the operator reaches the platform tool directly."""
+    decision = operator_overlay.evaluate(META_ACTIVATE, {})
+    assert decision.action == "ask_operator"
+
+
+def test_launch_tool_is_not_allowlisted(operator_overlay: PolicyOverlay) -> None:
+    """The launch tool must NOT be in the allowlist (gating wins over allowing)."""
+    assert LAUNCH not in operator_overlay.allowlist
+    assert LAUNCH in operator_overlay.extra_requires_approval
+
+
+# ---------------------------------------------------------------------------
 # Matching is exact full-name equality — short names do NOT match
 # ---------------------------------------------------------------------------
 
@@ -119,13 +206,21 @@ def test_bare_short_render_name_is_not_gated_by_overlay(
 
 def test_shipped_operator_policy_contents() -> None:
     overlay = load_overlay(OPERATOR_POLICY_PATH)
-    # Renders are free — the per-render spend gate was removed live, so nothing
-    # is in extra_requires_approval.
-    assert overlay.extra_requires_approval == frozenset()
-    # The allowlist now carries all four operator tools: read + client_read +
-    # brief + render (renders are free; the manager gates spend at stage gates).
-    assert overlay.allowlist == frozenset({READ, CLIENT_READ, BRIEF, RENDER})
+    # Only the irreversible Meta launch / activate requires approval (the HARD
+    # launch gate); renders are free so they stay allowlisted.
+    assert overlay.extra_requires_approval == frozenset({LAUNCH, META_ACTIVATE})
+    # The allowlist carries the read/author/render tools PLUS the P3
+    # stage-persist tools (qa/compliance/copy/spec/finalize/monitor/signal) —
+    # all free writes that clear no gate.
+    assert overlay.allowlist == frozenset(ALLOWLISTED_TOOLS)
     assert overlay.blocklist == frozenset({"execute_code", "terminal", "shell"})
+
+
+def test_launch_not_in_allowlist_shipped() -> None:
+    """The shipped file must keep the launch tools OUT of the allowlist."""
+    overlay = load_overlay(OPERATOR_POLICY_PATH)
+    assert LAUNCH not in overlay.allowlist
+    assert META_ACTIVATE not in overlay.allowlist
 
 
 def test_operator_overlay_blocks_shell_tools() -> None:

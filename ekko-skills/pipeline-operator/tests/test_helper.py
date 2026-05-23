@@ -984,3 +984,272 @@ def test_aliases_point_at_canonical_functions() -> None:
     assert get_pipeline is pipeline_operator_read
     assert post_brief is pipeline_operator_brief
     assert post_render is pipeline_operator_render
+
+
+# ===========================================================================
+# P3 stage-persist wrappers (qa/compliance/copy/spec/finalize/monitor/signal)
+# ===========================================================================
+
+from helper import (  # noqa: E402
+    SIGNAL_STATUSES,
+    pipeline_operator_compliance_result,
+    pipeline_operator_copy,
+    pipeline_operator_finalize_result,
+    pipeline_operator_monitor_result,
+    pipeline_operator_qa_result,
+    pipeline_operator_signal,
+    pipeline_operator_spec_result,
+)
+
+
+# ---------------------------------------------------------------------------
+# qa_result -> POST /work/pipeline/tools/qa_run
+# ---------------------------------------------------------------------------
+
+
+def test_qa_result_posts_array_to_qa_run(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    out = pipeline_operator_qa_result(
+        pipeline_id="p-1",
+        results=[{"creative_id": "cr-1", "verdict": "pass", "scores": {}}],
+    )
+    assert out == {"ok": True}
+    req = built[0].requests[0]
+    assert req.method == "POST"
+    assert req.url == "/work/pipeline/tools/qa_run"
+    assert req.json_body == {
+        "pipeline_id": "p-1",
+        "results": [{"creative_id": "cr-1", "verdict": "pass", "scores": {}}],
+    }
+
+
+def test_qa_result_rejects_empty_results(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="results must be a non-empty list"):
+        pipeline_operator_qa_result(pipeline_id="p-1", results=[])
+
+
+def test_qa_result_rejects_item_without_creative_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"results\[0\].creative_id"):
+        pipeline_operator_qa_result(pipeline_id="p-1", results=[{"verdict": "pass"}])
+
+
+def test_qa_result_rejects_non_dict_item(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"results\[0\] must be a dict"):
+        pipeline_operator_qa_result(pipeline_id="p-1", results=["nope"])  # type: ignore[list-item]
+
+
+# ---------------------------------------------------------------------------
+# compliance_result -> POST /work/pipeline/tools/compliance_run
+# ---------------------------------------------------------------------------
+
+
+def test_compliance_result_posts_candidates_to_compliance_run(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    candidates = [
+        {"creative_id": "cr-1", "findings": [{"rule_id": "meta.pa", "label": "clear"}]}
+    ]
+    pipeline_operator_compliance_result(pipeline_id="p-1", candidates=candidates)
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/compliance_run"
+    assert req.json_body == {"pipeline_id": "p-1", "candidates": candidates}
+
+
+def test_compliance_result_rejects_empty(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="candidates must be a non-empty list"):
+        pipeline_operator_compliance_result(pipeline_id="p-1", candidates=[])
+
+
+def test_compliance_result_rejects_missing_creative_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"candidates\[0\].creative_id"):
+        pipeline_operator_compliance_result(
+            pipeline_id="p-1", candidates=[{"findings": []}]
+        )
+
+
+# ---------------------------------------------------------------------------
+# copy -> POST /work/pipeline/tools/copy
+# ---------------------------------------------------------------------------
+
+
+def test_copy_posts_variants(env_set: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    variants = [
+        {"creative_id": "cr-1", "platform": "meta", "variant_index": 1, "headline": "h"}
+    ]
+    pipeline_operator_copy(pipeline_id="p-1", variants=variants)
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/copy"
+    assert req.json_body == {"pipeline_id": "p-1", "variants": variants}
+
+
+def test_copy_rejects_empty(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="variants must be a non-empty list"):
+        pipeline_operator_copy(pipeline_id="p-1", variants=[])
+
+
+def test_copy_rejects_missing_creative_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"variants\[0\].creative_id"):
+        pipeline_operator_copy(pipeline_id="p-1", variants=[{"headline": "h"}])
+
+
+# ---------------------------------------------------------------------------
+# spec_result -> POST /work/pipeline/tools/spec_result
+# ---------------------------------------------------------------------------
+
+
+def test_spec_result_posts_results(env_set: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    results = [{"creative_id": "cr-1", "placement": "feed", "status": "pass"}]
+    pipeline_operator_spec_result(pipeline_id="p-1", results=results)
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/spec_result"
+    assert req.json_body == {"pipeline_id": "p-1", "results": results}
+
+
+def test_spec_result_rejects_missing_creative_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"results\[0\].creative_id"):
+        pipeline_operator_spec_result(
+            pipeline_id="p-1", results=[{"placement": "feed", "status": "pass"}]
+        )
+
+
+# ---------------------------------------------------------------------------
+# finalize_result -> POST /work/pipeline/tools/finalize_result
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_result_posts_results(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    results = [{"creative_id": "cr-1", "asset_name": "n", "verified": True}]
+    pipeline_operator_finalize_result(pipeline_id="p-1", results=results)
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/finalize_result"
+    assert req.json_body == {"pipeline_id": "p-1", "results": results}
+
+
+def test_finalize_result_rejects_empty(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="results must be a non-empty list"):
+        pipeline_operator_finalize_result(pipeline_id="p-1", results=[])
+
+
+# ---------------------------------------------------------------------------
+# monitor_result -> POST /work/pipeline/tools/monitor_result
+# ---------------------------------------------------------------------------
+
+
+def test_monitor_result_posts_results(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    results = [
+        {"campaign_id": "camp-1", "window_days": 30, "spend": 300, "ghl_leads": 10, "verdict": "keep"}
+    ]
+    pipeline_operator_monitor_result(
+        pipeline_id="p-1", results=results, client_id="c-1"
+    )
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/monitor_result"
+    assert req.json_body == {
+        "pipeline_id": "p-1",
+        "results": results,
+        "client_id": "c-1",
+    }
+
+
+def test_monitor_result_omits_client_id_when_none(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    pipeline_operator_monitor_result(
+        pipeline_id="p-1",
+        results=[{"campaign_id": "camp-1", "window_days": 7, "verdict": "kill"}],
+    )
+    assert "client_id" not in built[0].requests[0].json_body
+
+
+def test_monitor_result_rejects_missing_campaign_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"results\[0\].campaign_id"):
+        pipeline_operator_monitor_result(
+            pipeline_id="p-1", results=[{"window_days": 7, "verdict": "kill"}]
+        )
+
+
+# ---------------------------------------------------------------------------
+# signal -> POST /work/pipeline/tools/signal
+# ---------------------------------------------------------------------------
+
+
+def test_signal_posts_full_body(env_set: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    pipeline_operator_signal(
+        pipeline_id="p-1",
+        dispatch_id="d-1",
+        status="completed",
+        stage="copy",
+        expected_status="copy",
+        exec_id="exec-9",
+        summary="3 of 3 done",
+    )
+    req = built[0].requests[0]
+    assert req.url == "/work/pipeline/tools/signal"
+    assert req.json_body == {
+        "pipeline_id": "p-1",
+        "dispatch_id": "d-1",
+        "status": "completed",
+        "stage": "copy",
+        "expected_status": "copy",
+        "exec_id": "exec-9",
+        "summary": "3 of 3 done",
+    }
+
+
+def test_signal_minimal_body_omits_optionals(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(monkeypatch, responses=[_FakeResponse(200, {"ok": True})])
+    pipeline_operator_signal(pipeline_id="p-1", dispatch_id="d-1", status="stale")
+    body = built[0].requests[0].json_body
+    assert body == {"pipeline_id": "p-1", "dispatch_id": "d-1", "status": "stale"}
+
+
+def test_signal_rejects_bad_status(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="status must be one of"):
+        pipeline_operator_signal(pipeline_id="p-1", dispatch_id="d-1", status="boom")
+
+
+def test_signal_rejects_blank_dispatch_id(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="dispatch_id"):
+        pipeline_operator_signal(pipeline_id="p-1", dispatch_id="  ", status="running")
+
+
+def test_signal_statuses_set_contents() -> None:
+    assert SIGNAL_STATUSES == frozenset(
+        {
+            "dispatched",
+            "running",
+            "completed",
+            "failed",
+            "timed_out",
+            "stale",
+            "waiting",
+            "partial",
+            "error",
+        }
+    )
+
+
+def test_stage_persist_wrappers_propagate_http_errors(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A worker 5xx surfaces as PipelineOperatorError (shared _request path)."""
+    _install_fake_client(monkeypatch, responses=[_FakeResponse(500, {"detail": "boom"})])
+    with pytest.raises(PipelineOperatorError, match="failed: 500"):
+        pipeline_operator_copy(
+            pipeline_id="p-1", variants=[{"creative_id": "cr-1"}]
+        )
