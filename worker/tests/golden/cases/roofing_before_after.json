@@ -1,0 +1,31 @@
+{
+  "name": "roofing before/after passes (property, not health)",
+  "description": "Before/after is ALLOWED for property verticals (roofing/remodel) and only banned for health/cosmetic/weight-loss. vertical.before_after must NOT fire for roofing, so this MUST PASS overall.",
+  "context": {
+    "creative": { "id": "img-roof-before-after", "has_overlay_text": false },
+    "copy": {
+      "headline": "$1,000 off your new roof",
+      "body": "See the before and after on this Memphis home. We replaced the whole roof in two days.",
+      "description": "Real photos from a real install.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "roofing",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    {
+      "rule_id": "meta.personal_attributes",
+      "label": "clear",
+      "confidence": 0.95
+    }
+  ],
+  "expect": {
+    "overall_verdict": "pass",
+    "rule_verdicts": {
+      "meta.personal_attributes": "pass"
+    }
+  }
+}

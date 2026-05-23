@@ -1,0 +1,32 @@
+{
+  "name": "old embarrassed-by-bathroom hook fails personal attributes",
+  "description": "The P0.5 donor line the build-out flagged. Meta prohibits asserting/implying a personal attribute (self-perception). This MUST FAIL meta.personal_attributes (block) so the old hook can never ship.",
+  "context": {
+    "creative": { "id": "img-bathroom-01" },
+    "copy": {
+      "headline": "Are you embarrassed by your bathroom?",
+      "body": "We remodel bathrooms across Weatherford. Get a free quote today.",
+      "description": "Family-owned remodelers.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "remodeling",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    {
+      "rule_id": "meta.personal_attributes",
+      "label": "violation",
+      "confidence": 0.95,
+      "evidence_span": "Are you embarrassed by your bathroom?"
+    }
+  ],
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "meta.personal_attributes": "fail"
+    }
+  }
+}

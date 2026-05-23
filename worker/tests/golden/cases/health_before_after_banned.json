@@ -1,0 +1,28 @@
+{
+  "name": "before/after banned for health/cosmetic verticals",
+  "description": "The contrast to the roofing case: identical before/after framing in a cosmetic vertical MUST FAIL vertical.before_after (block). Locks the vertical-aware split.",
+  "context": {
+    "creative": { "id": "img-medspa-ba" },
+    "copy": {
+      "headline": "See the transformation",
+      "body": "Before and after results from our med spa clients.",
+      "description": "Book your consultation.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "med_spa",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    { "rule_id": "meta.personal_attributes", "label": "clear", "confidence": 0.9 },
+    { "rule_id": "vertical.before_after", "label": "violation", "confidence": 0.92, "evidence_span": "Before and after results" }
+  ],
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "vertical.before_after": "fail"
+    }
+  }
+}

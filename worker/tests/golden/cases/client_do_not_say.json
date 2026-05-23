@@ -1,0 +1,29 @@
+{
+  "name": "per-client do-not-say constraint synthesized at eval time",
+  "description": "A client whose offer_constraints forbid 'free roof' MUST FAIL client.do_not_say.0 when the copy says it. Locks the eval-time synthesis of per-client rules.",
+  "context": {
+    "creative": { "id": "img-client-constraint" },
+    "copy": {
+      "headline": "Get a free roof this month",
+      "body": "Limited spots available in Memphis.",
+      "description": "Call now.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "roofing",
+      "offer_constraints": [
+        { "phrase": "free roof", "reason": "the client does not give away free roofs", "severity": "block" }
+      ]
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    { "rule_id": "meta.personal_attributes", "label": "clear", "confidence": 0.9 }
+  ],
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "client.do_not_say.0": "fail"
+    }
+  }
+}

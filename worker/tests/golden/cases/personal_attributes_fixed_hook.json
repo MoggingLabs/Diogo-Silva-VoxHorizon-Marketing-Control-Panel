@@ -1,0 +1,32 @@
+{
+  "name": "benefit-framed bathroom hook passes",
+  "description": "The fixed, benefit-framed replacement from ad-copy-standards.md. No personal-attribute framing, no other violations, so this MUST PASS overall. Operator classifies meta.personal_attributes as clear.",
+  "context": {
+    "creative": { "id": "img-bathroom-02" },
+    "copy": {
+      "headline": "Ready for a bathroom you'll love?",
+      "body": "We remodel bathrooms across Weatherford. Get a free quote today.",
+      "description": "Family-owned remodelers.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "remodeling",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    {
+      "rule_id": "meta.personal_attributes",
+      "label": "clear",
+      "confidence": 0.9,
+      "evidence_span": "Ready for a bathroom you'll love?"
+    }
+  ],
+  "expect": {
+    "overall_verdict": "pass",
+    "rule_verdicts": {
+      "meta.personal_attributes": "pass"
+    }
+  }
+}
