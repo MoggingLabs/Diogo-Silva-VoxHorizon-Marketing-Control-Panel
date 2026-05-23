@@ -120,11 +120,11 @@ describe("HorizontalStepper", () => {
     }
   });
 
-  it("renders a parallel mobile pill stack with the same five stages", () => {
+  it("renders a parallel mobile pill stack with the same stages", () => {
     render(<HorizontalStepper stages={stages} current="ideation" />);
 
     const mobile = getMobileButtons();
-    expect(mobile).toHaveLength(5);
+    expect(mobile).toHaveLength(stages.length);
     // The active stage is the second one (ideation).
     expect(mobile[0]!.getAttribute("aria-label")).toMatch(/past/);
     expect(mobile[1]!.getAttribute("aria-label")).toMatch(/active/);
