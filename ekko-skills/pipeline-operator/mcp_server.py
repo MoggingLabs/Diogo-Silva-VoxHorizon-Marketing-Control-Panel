@@ -2,9 +2,9 @@
 
 This is the *transport* half of the ``pipeline-operator`` skill. ``SKILL.md``
 is the playbook, ``helper.py`` is the validated HTTP client, and this module
-publishes that client's three capabilities as **real, named MCP tools** so the
+publishes the helper's capabilities as **real, named MCP tools** so the
 operator agent invokes them as first-class tools (and the voxhorizon-approvals
-plugin can gate the spend tool ``pipeline_operator_render`` by name).
+plugin can gate the approval-gated tools by name).
 
 Single source of truth
 -----------------------
@@ -15,14 +15,16 @@ thin wrapper that delegates straight to the matching ``helper.py`` function;
 
 The gating contract (tool names)
 --------------------------------
-The three tools are published under the helper's exact entrypoint names so the
+The tools are published under the helper's exact entrypoint names so the
 approval policy (``ekko-plugins/voxhorizon_approvals/policy.operator.yaml``)
 maps one-for-one:
 
 * ``pipeline_operator_read``        — READ tool (allowlisted; no spend)
 * ``pipeline_operator_client_read`` — CLIENT-CONTEXT tool (allowlisted; no spend)
 * ``pipeline_operator_brief``       — BRIEF tool (free Supabase write)
-* ``pipeline_operator_render``      — RENDER tool (**spend; requires approval**)
+* ``pipeline_operator_render``      — RENDER tool (free codex render, $0; allowlisted)
+* (the only approval-gated action is the Meta launch ``pipeline_operator_launch``,
+  the integrations agent's tool, intentionally NOT published here)
 
 Run it over stdio (the default Hermes MCP transport)::
 
@@ -125,7 +127,7 @@ def pipeline_operator_render(
     kind: str,
     items: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Render a stage's images in ONE deterministic pass — THE SPEND-GATED TOOL.
+    """Render a stage's images in ONE deterministic pass (free codex render).
 
     PREFERRED: OMIT ``items``. The worker then renders the PERSISTED plan —
     every concept spec you stored via ``pipeline_operator_brief(concepts=...)``
@@ -143,13 +145,13 @@ def pipeline_operator_render(
     deterministic path threads it from the picks; 9:16 finals come back as a true
     864x1536).
 
-    The backend is chosen by the operator container's ``RENDER_BACKEND`` env: by
-    default (``openai-codex``) the image is generated in-container on the
-    manager's ChatGPT/Codex subscription ($0) and uploaded to the worker;
-    ``kie`` restores the legacy paid path. Either way the approval plugin gates
-    this call by name — the manager approves in the dashboard before any render
-    runs. Returns ``{ok, renders, total_cost_usd, errors, skipped}``
-    (``total_cost_usd`` is 0 on the codex backend).
+    Routing is by ``kind``, not an env var: ideation is hardwired to the free
+    codex model (``gpt-image-2``, $0); finals use the per-pipeline finals-model
+    choice (default the same free codex model; ``kie`` is the legacy paid path).
+    Rendering is **free and allowlisted** (no per-call approval) and the manager
+    supervises spend at the dashboard STAGE gates; the only approval-gated tool
+    is ``pipeline_operator_launch``. Returns ``{ok, renders, total_cost_usd,
+    errors, skipped}`` (``total_cost_usd`` is 0 on the codex backend).
     """
     return helper.pipeline_operator_render(
         pipeline_id=pipeline_id,

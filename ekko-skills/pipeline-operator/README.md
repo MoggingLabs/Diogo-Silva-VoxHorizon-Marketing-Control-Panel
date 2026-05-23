@@ -21,13 +21,15 @@ gated by the `voxhorizon-approvals` plugin's `policy.operator.yaml`.
 ekko-skills/pipeline-operator/
 ├── SKILL.md           # the operator playbook (per-stage behavior, narration,
 │                      #   the launch-gate + stage-gate discipline)
-├── mcp_server.py      # stdio MCP server: publishes the four tools below and
+├── mcp_server.py      # stdio MCP server: publishes the operator tools below and
 │                      #   delegates each to helper.py (no logic of its own)
 ├── helper.py          # worker-tool client (single source of truth):
-│                      #   pipeline_operator_read         (GET state; allowlisted)
-│                      #   pipeline_operator_client_read  (GET client; allowlisted)
-│                      #   pipeline_operator_brief        (POST brief; free write)
-│                      #   pipeline_operator_render       (render; free, allowlisted)
+│                      #   pipeline_operator_read / _client_read   (GET; allowlisted)
+│                      #   pipeline_operator_brief                 (POST brief; free write)
+│                      #   pipeline_operator_render                (render; free, $0)
+│                      #   pipeline_operator_qa_result / _compliance_result /
+│                      #     _copy / _spec_result / _finalize_result /
+│                      #     _monitor_result / _signal             (stage-persist; allowlisted)
 ├── codex_render.py    # in-container codex image renderer (the manager's
 │                      #   ChatGPT/Codex subscription → gpt-image-2; $0). Backs
 │                      #   pipeline_operator_render.
@@ -91,15 +93,23 @@ non-canonical size — the OpenAI SDK emits a harmless serialization warning).
 
 ## Tool-name surface (the gating contract)
 
-The approval plugin gates **by tool name**. The operator's three capabilities
-are published as MCP tools (by `mcp_server.py`) under distinct, stable names so
-the operator policy can reference them one-for-one:
+The approval plugin gates **by tool name**. The operator's capabilities are
+published as MCP tools (by `mcp_server.py`) under distinct, stable names so the
+operator policy can reference them one-for-one:
 
-| MCP tool                   | Worker endpoint                    | Gate (policy.operator.yaml) |
-| -------------------------- | ---------------------------------- | --------------------------- |
-| `pipeline_operator_read`   | `GET  /work/pipeline/tools/{id}`   | **allowlist** (no prompt)   |
-| `pipeline_operator_brief`  | `POST /work/pipeline/tools/brief`  | allowlist (free write)      |
+| MCP tool | Worker endpoint | Gate (policy.operator.yaml) |
+| --- | --- | --- |
+| `pipeline_operator_read` | `GET  /work/pipeline/tools/{id}` | **allowlist** (no prompt) |
+| `pipeline_operator_client_read` | `GET  /work/client/{id}` | allowlist (no prompt) |
+| `pipeline_operator_brief` | `POST /work/pipeline/tools/brief` | allowlist (free write) |
 | `pipeline_operator_render` | `POST /work/pipeline/tools/render` | allowlist (free render, $0) |
+| `pipeline_operator_qa_result` | `POST /work/pipeline/tools/qa_run` | allowlist (worker writes) |
+| `pipeline_operator_compliance_result` | `POST /work/pipeline/tools/compliance_run` | allowlist (worker adjudicates) |
+| `pipeline_operator_copy` | `POST /work/pipeline/tools/copy` | allowlist (worker writes) |
+| `pipeline_operator_spec_result` | `POST /work/pipeline/tools/spec_result` | allowlist (worker writes) |
+| `pipeline_operator_finalize_result` | `POST /work/pipeline/tools/finalize_result` | allowlist (worker records) |
+| `pipeline_operator_monitor_result` | `POST /work/pipeline/tools/monitor_result` | allowlist (worker writes) |
+| `pipeline_operator_signal` | `POST /work/pipeline/tools/signal` | allowlist (dispatch health) |
 
 Hermes presents these to the gate as `mcp_<server>_<tool>` with single
 underscores — e.g. `mcp_pipeline_operator_pipeline_operator_render` — and the
