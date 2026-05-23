@@ -14,20 +14,34 @@ Ekko overlay (`infra/hermes/config.yaml.patch`), which targets the different
   ("the pipeline finishes itself") version that predated the QA / compliance /
   copy / spec / launch / monitor stages.
 
-## Deploy / sync (manual today)
+## Deploy / sync (`sync-operator.sh`)
 
-> The repo to operator sync is still **manual** (`OPERATOR-BUILDOUT.md` item
-> `OP-7`). No CI path rolls `/docker/hermes-operator/data` yet, so this file is
-> tracked here as the source of truth and copied to the VPS by hand.
-
-`SOUL.md` is frozen at gateway start, so a restart is required to apply a change:
+`sync-operator.sh` in this directory is the repo to operator deploy mechanism
+(`OPERATOR-BUILDOUT.md` `OP-7`). The deploy-stack workflow only rolls
+web/worker/caddy, so this script is how repo-managed operator config reaches
+`/docker/hermes-operator/data` on the VPS. Run it there as a sudo-capable user
+(e.g. `agents`):
 
 ```bash
-sudo cp infra/hermes/operator/SOUL.md /docker/hermes-operator/data/SOUL.md
-docker restart hermes-agent-operator
-docker exec hermes-agent-operator sh -c 'sed -n 1,3p /opt/data/SOUL.md'   # verify
+# on the VPS, from the repo clone
+bash /opt/voxhorizon/repo/infra/hermes/operator/sync-operator.sh                    # DRY-RUN
+bash /opt/voxhorizon/repo/infra/hermes/operator/sync-operator.sh --apply --restart  # write + restart
 ```
 
-Placement note: this directory is provisional pending the `OP-7` decision on the
-canonical repo to operator deploy/sync mechanism. If that lands elsewhere, move
-these files to match.
+What it syncs (repo is the source of truth): this `SOUL.md` and the operator
+skills (`ekko-skills/{image-ad-authoring, pipeline-operator, creative-qa,
+ad-compliance, copy-authoring, campaign-launch, campaign-monitor}`). The approval
+plugin/policy is opt-in via `--with-plugin` (it governs the launch HARD gate, so
+it is off by default).
+
+Safe by design: DRY-RUN unless `--apply`; backs up the touched surface to
+`/docker/backups/` first; per-skill `rsync --delete` scoped INSIDE each skill
+dir, so the generic Hermes library skills that ship with the image are never
+removed; never touches `.env`, `auth.json`, `config.yaml`, `sessions/`,
+`state.db`, `memories/`, `cron/`, or `hooks/`. `SOUL.md` and skills are frozen at
+gateway start, so `--restart` (or `docker restart hermes-agent-operator`) loads
+them.
+
+Placement note: this directory is provisional pending final `OP-7` sign-off; if
+the canonical location changes, move these files and update the script's
+`OPERATOR_SKILLS` and paths.
