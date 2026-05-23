@@ -1,14 +1,19 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { MonitorDecisionInput } from "@/lib/pipeline/decision-schemas";
-import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
+import {
+  type PipelineEventInsert,
+  type PipelineInsert,
+  type PipelineUpdate,
+} from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { Json } from "@/lib/supabase/types.gen";
+import type { Database, Json } from "@/lib/supabase/types.gen";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ id: string }> };
+type SupabaseClient = ReturnType<typeof createAdminClient>;
 
 /**
  * POST /api/pipelines/:id/monitor/decision
@@ -96,6 +101,27 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.monitor.decision] event insert failed: ${evErr.message}`);
   }
 
+  // The monitor → next-brief loop (P5.5, #368). A `scale` verdict means this
+  // run produced a winner worth expanding, so spawn a NEW `configuration`
+  // pipeline seeded from the winning run (same client + format + image-brief
+  // payload, tagged `spawned_from`) — the manager picks up a pre-seeded brief
+  // instead of starting from scratch. `kill` is terminal: no spawn. The spawn
+  // is non-fatal — the parent run already reached `done`; a failed spawn just
+  // means the manager starts the next pipeline by hand.
+  let spawnedPipelineId: string | null = null;
+  let spawnError: string | null = null;
+  if (decision === "scale") {
+    const spawn = await spawnNextBriefPipeline(supabase, pipeline);
+    if (spawn.ok) {
+      spawnedPipelineId = spawn.pipelineId;
+    } else {
+      spawnError = spawn.message;
+      console.warn(
+        `[pipelines.monitor.decision] next-brief spawn failed for ${id}: ${spawn.message}`,
+      );
+    }
+  }
+
   // Forward the verdict to the worker (kill → pause/archive; scale → budget
   // bump). Best-effort: the run already terminated, so a worker outage must
   // not undo it.
@@ -103,7 +129,82 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.monitor.decision] worker monitor kick failed for ${id}: ${String(e)}`);
   });
 
-  return NextResponse.json({ pipeline: updated, decision });
+  return NextResponse.json({
+    pipeline: updated,
+    decision,
+    ...(spawnedPipelineId ? { spawned_pipeline_id: spawnedPipelineId } : {}),
+    ...(spawnError ? { spawn_error: spawnError } : {}),
+  });
+}
+
+/**
+ * Spawn the next-brief pipeline from a `scale` verdict. Seeds a new
+ * `configuration` pipeline with the winning run's client + format and (best
+ * effort) its image-brief payload, tagged with `spawned_from` for lineage.
+ * Returns the new pipeline id, or an error message (non-fatal — see caller).
+ */
+async function spawnNextBriefPipeline(
+  supabase: SupabaseClient,
+  parent: Database["public"]["Tables"]["pipelines"]["Row"],
+): Promise<{ ok: true; pipelineId: string } | { ok: false; message: string }> {
+  // Seed the child's image_payload from the parent's winning brief, if present.
+  let imagePayload: Json | null = null;
+  if (parent.image_brief_id) {
+    const { data: brief } = await supabase
+      .from("briefs")
+      .select("payload")
+      .eq("id", parent.image_brief_id)
+      .maybeSingle();
+    imagePayload = (brief?.payload as Json | undefined) ?? null;
+  }
+
+  const now = new Date().toISOString();
+  const configDraft: Record<string, unknown> = {
+    spawned_from: parent.id,
+    spawn_reason: "scale",
+    note:
+      `Scaled from pipeline ${parent.id} — winning campaign. Review the seeded ` +
+      `brief and adjust the angle / budget before continuing.`,
+  };
+  if (imagePayload) configDraft.image_payload = imagePayload;
+
+  const insert: PipelineInsert = {
+    format_choice: parent.format_choice,
+    client_id: parent.client_id,
+    config_draft: configDraft as unknown as Json,
+    advanced_at: { configuration: now } as unknown as Json,
+  };
+  const { data: child, error: insertErr } = await supabase
+    .from("pipelines")
+    .insert(insert)
+    .select("id")
+    .single();
+  if (insertErr || !child) {
+    return { ok: false, message: insertErr?.message ?? "spawn insert failed" };
+  }
+
+  // Lineage events: close the loop on the parent + record the child's creation.
+  const { error: evErr } = await supabase.from("pipeline_events").insert([
+    {
+      pipeline_id: parent.id,
+      kind: "next_brief_spawned",
+      stage: "done",
+      payload: { child_pipeline_id: child.id, reason: "scale" } as Json,
+    },
+    {
+      pipeline_id: child.id,
+      kind: "stage_advanced",
+      stage: "configuration",
+      payload: { spawned_from: parent.id, reason: "scale" } as Json,
+    },
+  ]);
+  if (evErr) {
+    console.warn(
+      `[pipelines.monitor.decision] spawn lineage event insert failed: ${evErr.message}`,
+    );
+  }
+
+  return { ok: true, pipelineId: child.id };
 }
 
 /**
