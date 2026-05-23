@@ -158,6 +158,165 @@ def pipeline_operator_render(
     )
 
 
+# ---------------------------------------------------------------------------
+# STAGE-PERSIST tools (P3) — the post-generation persistence surface.
+#
+# Each delegates straight to the matching helper.py wrapper (the only thing that
+# talks to the worker). Names match the helper one-for-one so the approval
+# policy maps exactly: all are allowlisted (no spend); none clears a gate. The
+# Meta-launch tool is NOT here — it requires approval and is the integrations
+# agent's tool.
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def pipeline_operator_qa_result(
+    pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist per-creative QA verdicts (ONE array call) for the worker to write.
+
+    Use in ``creative_qa``. Pass the qa specialist's verdicts as ``results=
+    [{creative_id, verdict, scores, defects, remediation}, ...]`` — the whole
+    batch in one call, looping every OUTSTANDING final, never per creative. The
+    worker runs its deterministic backstops, writes ``qa_result`` and rolls
+    ``creative_stage_state(creative_qa)``. You persist the verdict; the manager
+    signs off QA at the gate. No spend; allowlisted.
+    """
+    return helper.pipeline_operator_qa_result(
+        pipeline_id=pipeline_id, results=results
+    )
+
+
+@mcp.tool()
+def pipeline_operator_compliance_result(
+    pipeline_id: str, candidates: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Submit per-creative compliance CANDIDATE findings — the WORKER adjudicates.
+
+    Use in ``compliance_review`` (HARD GATE). Pass the compliance specialist's
+    candidates as ``candidates=[{creative_id, findings:[{rule_id, version,
+    label, confidence, evidence_span, required_edit, citation_url}]}, ...]`` —
+    the whole batch in one call. You have NO pass-writing tool: these are
+    CANDIDATES only; the worker adjudicates and writes the verdict, escalating
+    uncertain/low-confidence to the manager queue (never auto-passing). A failed
+    unit leaves failed only via an audited manager override. No spend;
+    allowlisted.
+    """
+    return helper.pipeline_operator_compliance_result(
+        pipeline_id=pipeline_id, candidates=candidates
+    )
+
+
+@mcp.tool()
+def pipeline_operator_copy(
+    pipeline_id: str, variants: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist authored copy variants (>=1 per creative, ONE array call).
+
+    Use in ``copy``. Pass the copy specialist's drafts as ``variants=
+    [{creative_id, platform, variant_index, pattern, headline, primary_text,
+    description, cta, validation}, ...]`` — the whole batch in one call. The
+    worker upserts ``copy_variants`` (idempotent on
+    ``(creative_id, platform, variant_index)``) at ``draft`` and arms the copy
+    gate; the manager approves at the copy stage gate. Approving copy re-arms
+    that creative's compliance unit (two-pass). No spend; allowlisted.
+    """
+    return helper.pipeline_operator_copy(
+        pipeline_id=pipeline_id, variants=variants
+    )
+
+
+@mcp.tool()
+def pipeline_operator_spec_result(
+    pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Persist per-placement spec checks + derived crops (ONE array call).
+
+    Use in ``spec_validation`` (an auto stage). Pass ``results=[{creative_id,
+    platform, placement, ratio, status, checks, derived_path_supabase?,
+    derived_path_drive?}, ...]`` — the whole batch in one call. The worker
+    upserts ``spec_check`` (idempotent on ``(creative_id, platform,
+    placement)``) and rolls the spec_validation gate to the worst placement
+    status (a failing placement holds the gate for the manager, never
+    auto-passed). No spend; allowlisted.
+    """
+    return helper.pipeline_operator_spec_result(
+        pipeline_id=pipeline_id, results=results
+    )
+
+
+@mcp.tool()
+def pipeline_operator_finalize_result(
+    pipeline_id: str, results: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Record naming + Drive folder + verify report per creative (ONE array call).
+
+    Use in ``finalize_assets`` (an auto stage; Drive runs through your Drive
+    MCP, the worker is the recorder). Pass ``results=[{creative_id, asset_name,
+    drive_folder_id?, file_path_drive?, verified}, ...]``. The worker writes the
+    ``creatives`` finalize columns and resumes idempotently (a creative already
+    finalized is skipped). No spend; allowlisted.
+    """
+    return helper.pipeline_operator_finalize_result(
+        pipeline_id=pipeline_id, results=results
+    )
+
+
+@mcp.tool()
+def pipeline_operator_monitor_result(
+    pipeline_id: str,
+    results: list[dict[str, Any]],
+    client_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Persist monitor KPIs + kill/watch/keep verdicts (GHL is lead truth).
+
+    Use in ``monitor``. Pass the monitor specialist's reads as ``results=
+    [{campaign_id, ad_entity_id?, window_days, spend, ghl_leads, ctr, freq,
+    verdict, verdict_reason}, ...]`` — the whole batch in one call. The worker
+    writes ``campaign_perf_image`` rows computing ``cpl_real = spend /
+    ghl_leads`` (NEVER Meta leads) and resumes idempotently on the daily key.
+    Verdicts are recommendations; the manager approves kill/scale at the gate.
+    No spend; allowlisted.
+    """
+    return helper.pipeline_operator_monitor_result(
+        pipeline_id=pipeline_id, results=results, client_id=client_id
+    )
+
+
+@mcp.tool()
+def pipeline_operator_signal(
+    pipeline_id: str,
+    dispatch_id: str,
+    status: str,
+    stage: Optional[str] = None,
+    expected_status: Optional[str] = None,
+    exec_id: Optional[str] = None,
+    summary: Optional[str] = None,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Signal dispatch completion / health to the workflow — call this LAST.
+
+    End EVERY dispatch with this so the workflow knows the dispatch landed and
+    the watchdog does not re-dispatch a healthy stage. ``status`` is one of:
+    ``dispatched|running|completed|failed|timed_out|stale|waiting|partial|
+    error``. On a stale/duplicate dispatch (``status != expected_status`` on
+    read) signal ``stale`` and STOP. On a capped per-creative batch signal
+    ``partial``. The worker opens / heartbeats / closes the
+    ``operator_dispatches`` row idempotently on ``(pipeline_id, dispatch_id)``.
+    No spend; allowlisted.
+    """
+    return helper.pipeline_operator_signal(
+        pipeline_id=pipeline_id,
+        dispatch_id=dispatch_id,
+        status=status,
+        stage=stage,
+        expected_status=expected_status,
+        exec_id=exec_id,
+        summary=summary,
+        error=error,
+    )
+
+
 def main() -> None:
     """Run the server over stdio (the default Hermes MCP transport)."""
     mcp.run()

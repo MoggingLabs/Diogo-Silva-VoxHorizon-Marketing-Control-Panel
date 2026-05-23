@@ -19,6 +19,7 @@ from .routes import (
     hermes_kanban,
     hermes_webhook,
     integrations,
+    operator_stage_tools,
     pipeline,
     pipeline_tools,
     ping,
@@ -98,6 +99,16 @@ def create_app() -> FastAPI:
     # operator after a stage-gate action. They EXTEND the pipeline (reuse
     # its services / event kinds / tables / triggers), never duplicate it.
     app.include_router(pipeline_tools.router, tags=["pipeline-tools"])
+
+    # === P3 operator stage-persist endpoints ===
+    # The post-generation siblings of the pipeline-tools router: the operator
+    # delegates the judgment (copy / spec / finalize / monitor) and POSTs the
+    # structured result here, where the worker validates + writes it and rolls
+    # the per-(creative, stage) gate state forward. /signal tracks dispatch
+    # completion + health. The operator has no tool here that clears a gate.
+    app.include_router(
+        operator_stage_tools.router, tags=["operator-stage-tools"]
+    )
 
     # /work/creative/generate + /work/creative/composite — the per-brief
     # image generation + compositor surface used by the pipeline producers

@@ -47,6 +47,14 @@ EXPECTED_TOOLS = {
     "pipeline_operator_client_read",
     "pipeline_operator_brief",
     "pipeline_operator_render",
+    # P3 stage-persist tools (all allowlisted; none clears a gate).
+    "pipeline_operator_qa_result",
+    "pipeline_operator_compliance_result",
+    "pipeline_operator_copy",
+    "pipeline_operator_spec_result",
+    "pipeline_operator_finalize_result",
+    "pipeline_operator_monitor_result",
+    "pipeline_operator_signal",
 }
 
 
@@ -219,3 +227,178 @@ def test_render_passes_errors_through(
 
     with pytest.raises(helper.PipelineOperatorError):
         mcp_server.pipeline_operator_render("p-1", "nope", [{}])
+
+
+# ---------------------------------------------------------------------------
+# P3 stage-persist tools: registration + delegation
+# ---------------------------------------------------------------------------
+
+
+def test_launch_tool_is_not_registered_here() -> None:
+    """The Meta launch tool requires approval and is the integrations agent's —
+    it must NOT be advertised by this server (so the gate isn't bypassed)."""
+    names = {t.name for t in _list_tools()}
+    assert "pipeline_operator_launch" not in names
+
+
+def test_stage_persist_tools_have_array_params() -> None:
+    schemas = {t.name: t.inputSchema for t in _list_tools()}
+    for name, array_key in (
+        ("pipeline_operator_qa_result", "results"),
+        ("pipeline_operator_compliance_result", "candidates"),
+        ("pipeline_operator_copy", "variants"),
+        ("pipeline_operator_spec_result", "results"),
+        ("pipeline_operator_finalize_result", "results"),
+        ("pipeline_operator_monitor_result", "results"),
+    ):
+        props = set(schemas[name].get("properties", {}))
+        assert {"pipeline_id", array_key} <= props
+    signal_props = set(schemas["pipeline_operator_signal"].get("properties", {}))
+    assert {"pipeline_id", "dispatch_id", "status"} <= signal_props
+
+
+def test_qa_result_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, results):
+        captured["pipeline_id"] = pipeline_id
+        captured["results"] = results
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_qa_result", fake)
+    out = mcp_server.pipeline_operator_qa_result("p-1", [{"creative_id": "cr-1"}])
+    assert captured == {"pipeline_id": "p-1", "results": [{"creative_id": "cr-1"}]}
+    assert out == {"ok": True}
+
+
+def test_compliance_result_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, candidates):
+        captured["pipeline_id"] = pipeline_id
+        captured["candidates"] = candidates
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_compliance_result", fake)
+    mcp_server.pipeline_operator_compliance_result("p-1", [{"creative_id": "cr-1"}])
+    assert captured == {"pipeline_id": "p-1", "candidates": [{"creative_id": "cr-1"}]}
+
+
+def test_copy_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, variants):
+        captured["pipeline_id"] = pipeline_id
+        captured["variants"] = variants
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_copy", fake)
+    mcp_server.pipeline_operator_copy("p-1", [{"creative_id": "cr-1"}])
+    assert captured == {"pipeline_id": "p-1", "variants": [{"creative_id": "cr-1"}]}
+
+
+def test_spec_result_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, results):
+        captured["results"] = results
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_spec_result", fake)
+    mcp_server.pipeline_operator_spec_result("p-1", [{"creative_id": "cr-1"}])
+    assert captured["results"] == [{"creative_id": "cr-1"}]
+
+
+def test_finalize_result_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, results):
+        captured["results"] = results
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_finalize_result", fake)
+    mcp_server.pipeline_operator_finalize_result("p-1", [{"creative_id": "cr-1"}])
+    assert captured["results"] == [{"creative_id": "cr-1"}]
+
+
+def test_monitor_result_delegates_with_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, results, client_id=None):
+        captured["pipeline_id"] = pipeline_id
+        captured["results"] = results
+        captured["client_id"] = client_id
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_monitor_result", fake)
+    mcp_server.pipeline_operator_monitor_result(
+        "p-1", [{"campaign_id": "c"}], client_id="cl-1"
+    )
+    assert captured == {
+        "pipeline_id": "p-1",
+        "results": [{"campaign_id": "c"}],
+        "client_id": "cl-1",
+    }
+
+
+def test_monitor_result_defaults_client_id_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict = {}
+
+    def fake(*, pipeline_id, results, client_id=None):
+        captured["client_id"] = client_id
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_monitor_result", fake)
+    mcp_server.pipeline_operator_monitor_result("p-1", [{"campaign_id": "c"}])
+    assert captured["client_id"] is None
+
+
+def test_signal_delegates_full_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict = {}
+
+    def fake(
+        *,
+        pipeline_id,
+        dispatch_id,
+        status,
+        stage=None,
+        expected_status=None,
+        exec_id=None,
+        summary=None,
+        error=None,
+    ):
+        captured.update(
+            pipeline_id=pipeline_id,
+            dispatch_id=dispatch_id,
+            status=status,
+            stage=stage,
+            expected_status=expected_status,
+            exec_id=exec_id,
+            summary=summary,
+            error=error,
+        )
+        return {"ok": True}
+
+    monkeypatch.setattr(helper, "pipeline_operator_signal", fake)
+    mcp_server.pipeline_operator_signal(
+        "p-1", "d-1", "completed", stage="copy", expected_status="copy", summary="done"
+    )
+    assert captured["pipeline_id"] == "p-1"
+    assert captured["dispatch_id"] == "d-1"
+    assert captured["status"] == "completed"
+    assert captured["stage"] == "copy"
+    assert captured["summary"] == "done"
+    assert captured["error"] is None
+
+
+def test_signal_propagates_helper_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake(**_kw):
+        raise helper.PipelineOperatorError("bad status")
+
+    monkeypatch.setattr(helper, "pipeline_operator_signal", fake)
+    with pytest.raises(helper.PipelineOperatorError):
+        mcp_server.pipeline_operator_signal("p-1", "d-1", "boom")
