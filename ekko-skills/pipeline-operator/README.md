@@ -117,8 +117,10 @@ overlay keys on that exact full name (no fuzzy matching). Renders are **free**
 (codex `gpt-image-2`, $0) and the per-render spend gate was removed live, so
 `pipeline_operator_render` is **allowlisted**; the manager supervises spend at
 the dashboard STAGE gates (brief review, concept picks, finals approval). The
-only approval-gated tool is `pipeline_operator_launch` (plus `Meta_ads_activate_entity`)
-— the irreversible Meta launch. **Do not rename** these tools (or the MCP
+only approval-gated action is the irreversible Meta launch, gated on the
+operator's Meta MCP tool `Meta_ads_activate_entity` (there is no
+`pipeline_operator_launch` tool; the legacy name is kept in the policy
+forward-compatibly). **Do not rename** these tools (or the MCP
 server name) without updating `ekko-plugins/voxhorizon_approvals/policy.operator.yaml`,
 which keys on the exact full names.
 
@@ -181,9 +183,11 @@ bind-mounts the skills directory.
 
 3. Ensure the `voxhorizon-approvals` plugin in the operator container uses
    the **operator** policy (`policy.operator.yaml` dropped as its
-   `policy.yaml`) so `pipeline_operator_launch` (and `Meta_ads_activate_entity`)
-   is approval-gated and `pipeline_operator_render` / `pipeline_operator_read`
-   are allowlisted. See the plugin README's "Operator policy profile" section.
+   `policy.yaml`) so `Meta_ads_activate_entity` is approval-gated (the launch
+   HARD gate; the legacy `pipeline_operator_launch` name is also listed,
+   forward-compatibly, though no such tool is published) and
+   `pipeline_operator_render` / `pipeline_operator_read` are allowlisted. See
+   the plugin README's "Operator policy profile" section.
 
 4. Restart the operator agent:
 

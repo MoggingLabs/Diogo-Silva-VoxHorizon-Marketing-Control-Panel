@@ -72,7 +72,7 @@ one tool it calls.
 | `pipeline_operator_copy`              | Persist per-creative copy variants (array)            | no      | reviewed via the copy stage gate                               |
 | `pipeline_operator_spec_result`       | Persist per-placement spec checks + derived crops     | no      | allowlisted; auto-stage                                        |
 | `pipeline_operator_finalize_result`   | Record naming + Drive URLs + verify report            | no      | allowlisted; worker recorder                                   |
-| `pipeline_operator_launch`            | Submit the assembled launch package (PAUSED-first)    | **yes** | **requires approval** (HARD launch gate)                       |
+| _(no launch tool)_                    | Launch runs on your **Meta MCP** (create entities PAUSED-first) + the worker recorder; there is no `pipeline_operator_launch` | n/a     | **approval on `Meta_ads_activate_entity`** (HARD launch gate)  |
 | `pipeline_operator_monitor_result`    | Persist monitor KPIs + kill/scale verdicts            | no      | allowlisted; recommendation only                               |
 | `pipeline_operator_signal`            | Signal dispatch completion / health to the workflow   | no      | allowlisted (always last)                                      |
 
@@ -82,9 +82,11 @@ one tool it calls.
 > findings (`{rule_id, label, confidence, evidence_span}`); the **worker
 > adjudicates** and writes the verdict. A `failed` compliance unit leaves
 > `failed` only through an **audited manager override** (a manager-authed route,
-> a required `override_note`). `pipeline_operator_launch` only **submits** a
-> PAUSED-first package; the manager's approval at the HARD launch gate is what
-> releases it. You never route around either gate.
+> a required `override_note`). At launch you have **no pipeline_operator tool**:
+> you create the Meta entities PAUSED-first on your own Meta MCP and record them
+> via the worker (`POST /work/pipeline/tools/launch`), which re-checks the
+> preconditions server-side. Nothing goes live until the manager approves and the
+> gated `Meta_ads_activate_entity` runs. You never route around either gate.
 
 > **Render backend (transparent to you):** `pipeline_operator_render` renders
 > via the manager's ChatGPT/Codex subscription (`gpt-image-2`, $0) and uploads
@@ -108,9 +110,11 @@ one tool it calls.
 The MCP server reads `WORKER_BASE_URL` / `WORKER_SHARED_SECRET` from the
 operator container env on your behalf — you never handle the secret. Hermes
 presents these tools to the approval gate as `mcp_<server>_<tool>` with single
-underscores — e.g. `pipeline_operator_launch` becomes
-`mcp_pipeline_operator_pipeline_operator_launch` — and the gate keys on that
-exact full name; you just call the tools by their normal name.
+underscores — e.g. `pipeline_operator_render` becomes
+`mcp_pipeline_operator_pipeline_operator_render` — and the gate keys on that
+exact full name; you just call the tools by their normal name. (The launch
+approval keys on your Meta MCP tool `mcp_Meta_ads_activate_entity`, not on a
+`pipeline_operator_*` name.)
 
 ---
 
@@ -531,10 +535,14 @@ graph. Only the manager's approval at the launch gate activates anything.
   per-ad copy, destination URL + plain-text UTMs, AI-enhancement OFF, the
   PAUSED-first plan as an orchestrated saga: create-campaign -> adset -> ad,
   each PAUSED with its own idempotency key).
-- **MCP tool:** `pipeline_operator_launch(pipeline_id, package=...)` —
-  **requires approval** (the Meta activate name is in `extra_requires_approval`;
-  it long-polls the dashboard). The worker records entities after the MCP
-  calls. If the manager declines, narrate the decline and stop.
+- **MCP tools:** your **Meta MCP** creates the campaign/adset/ad **PAUSED-first**
+  (each with its own idempotency key), then you record the entity ids via the
+  worker (`POST /work/pipeline/tools/launch`), which re-checks the preconditions
+  server-side and stamps the gate with the manager's `approved_by`. There is no
+  `pipeline_operator_launch`. Activating anything live is the separate
+  `Meta_ads_activate_entity` call, which **requires approval** (it is in
+  `extra_requires_approval` and long-polls the dashboard). If the manager
+  declines, narrate the decline and stop.
 - **HARD launch-gate invariant:** Never create anything `ACTIVE`. Never launch
   from casual wording. You submit a PAUSED-first package; the manager's audited
   approval is the only thing that releases spend. Compensation on failure is
@@ -608,9 +616,10 @@ reason, next_move}, ...])` — ONE array call.
 kind)` call with NO `items`. Never loop the render tool per image. A retry
    resumes the remainder.
 7. **The launch gate is the manager's, not yours.** Rendering is free and
-   ungated — just render. The approval gate is `pipeline_operator_launch` (and
-   `Meta_ads_activate_entity`): when it's blocked (declined / no approval),
-   narrate the decline plainly and stop. PAUSED-first always; never create `ACTIVE`.
+   ungated — just render. The approval gate is your Meta MCP
+   `Meta_ads_activate_entity` (there is no `pipeline_operator_launch`): when it
+   is blocked (declined / no approval), narrate the decline plainly and stop.
+   PAUSED-first always; never create `ACTIVE`.
 8. **Be idempotent.** Use `events_tail` and the existing
    brief/concepts/finals/verdicts/copy to avoid redoing work.
 9. **Delegate the judgment stages.** `copy`, `creative_qa`, `compliance_review`,
@@ -634,6 +643,8 @@ kind)` call with NO `items`. Never loop the render tool per image. A retry
   sub-agent contracts for the four judgment stages.
 - `mcp_server.py` — the stdio MCP server publishing the `pipeline_operator_*`
   tools; it delegates to `helper.py` (the only thing that talks to the worker).
-- `voxhorizon-approvals` plugin (`policy.operator.yaml`) — gates `..._launch`
-  (and `Meta_ads_activate_entity`) for approval; allowlists the render +
-  read/persist/signal tools (render is free); blocklists the shell.
+- `voxhorizon-approvals` plugin (`policy.operator.yaml`) — gates
+  `Meta_ads_activate_entity` for approval (the HARD launch gate; the legacy
+  `..._launch` name is also listed, forward-compatibly, though no such tool is
+  published); allowlists the render + read/persist/signal tools (render is
+  free); blocklists the shell.
