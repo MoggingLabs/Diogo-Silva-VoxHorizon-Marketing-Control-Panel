@@ -2,8 +2,14 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { BriefPayload, type BriefInsert } from "@/lib/briefs";
 import { dispatchOperator, isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
-import { activeTracksLocal, canAdvance } from "@/lib/pipeline/transitions";
+import {
+  PER_CREATIVE_STAGES,
+  activeTracksLocal,
+  canAdvance,
+  nextStage,
+} from "@/lib/pipeline/transitions";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { VideoBriefInput, type VideoBriefInsertRow } from "@/lib/video-briefs";
@@ -78,6 +84,15 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   if (pipeline.status === "ideation") {
     return advanceFromIdeation(supabase, pipeline);
   }
+  // Per-creative gated stages (creative_qa, compliance_review, copy,
+  // spec_validation): the server re-computes the per-creative rollup from
+  // creative_stage_state and HARD-BLOCKS the advance until the gate clears.
+  // Compliance is the HARD gate — it (and launch) never auto-advance: a failed
+  // creative without an audited override keeps the rollup uncleared, so this
+  // route refuses with 422.
+  if (PER_CREATIVE_STAGES.has(pipeline.status as PipelineStatus)) {
+    return advanceFromPerCreativeStage(supabase, pipeline);
+  }
 
   // Every other status is a stage gate we haven't wired up yet.
   return NextResponse.json(
@@ -87,6 +102,138 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     },
     { status: 422 },
   );
+}
+
+/**
+ * A `creative_stage_state` row, read by name (the 0018 table is on `main` but
+ * not yet in `types.gen.ts`, so the generated `Database` type doesn't know it).
+ */
+type StageStateRow = {
+  status: "pending" | "in_progress" | "passed" | "failed" | "overridden" | "skipped";
+};
+
+/**
+ * Compute the per-creative rollup for `(pipeline, stage)` exactly as the DB
+ * `pipeline_rollup_cleared()` function does (migration 0018): cleared iff ≥1
+ * row exists AND every row is in a terminal-good state
+ * (`passed | overridden | skipped`). Reading it here (instead of trusting a
+ * client-supplied flag) is the server-side enforcement — the route and the UI
+ * gate read the same predicate so they agree by construction.
+ *
+ * Returns `{ cleared, total, blocking }` so the 422 body can name what is still
+ * holding the gate. A read error is surfaced (caller turns it into a 500).
+ */
+async function computeRollup(
+  supabase: SupabaseClient,
+  pipelineId: string,
+  stage: PipelineStatus,
+): Promise<
+  { ok: true; cleared: boolean; total: number; blocking: number } | { ok: false; message: string }
+> {
+  const { data, error } = await supabase
+    .from("creative_stage_state" as never)
+    .select("status")
+    .eq("pipeline_id" as never, pipelineId as never)
+    .eq("stage" as never, stage as never);
+  if (error) {
+    return { ok: false, message: error.message };
+  }
+  const rows = (data ?? []) as unknown as StageStateRow[];
+  const total = rows.length;
+  const blocking = rows.filter(
+    (r) => r.status !== "passed" && r.status !== "overridden" && r.status !== "skipped",
+  ).length;
+  // Mirror pipeline_rollup_cleared(): at least one row AND none blocking.
+  const cleared = total > 0 && blocking === 0;
+  return { ok: true, cleared, total, blocking };
+}
+
+/**
+ * Handle the four per-creative gated stages
+ * (`creative_qa → compliance_review → copy → spec_validation`). The server
+ * recomputes the rollup from `creative_stage_state` and feeds it to
+ * `canAdvance(pipeline, { rollupCleared })`. When the gate predicate fails the
+ * advance is refused with 422 — this is the hard block. Compliance is special
+ * only in its 422 message; the enforcement (a `failed` creative leaves the
+ * rollup uncleared) is identical for every per-creative stage.
+ */
+async function advanceFromPerCreativeStage(
+  supabase: SupabaseClient,
+  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+): Promise<NextResponse> {
+  const status = pipeline.status as PipelineStatus;
+  const rollup = await computeRollup(supabase, pipeline.id, status);
+  if (!rollup.ok) {
+    return NextResponse.json({ error: rollup.message }, { status: 500 });
+  }
+
+  const gate = canAdvance(
+    {
+      status,
+      format_choice: pipeline.format_choice,
+      config_draft: pipeline.config_draft as Record<string, unknown> | null,
+    },
+    { rollupCleared: rollup.cleared },
+  );
+  if (!gate.ok) {
+    return NextResponse.json(
+      {
+        error: gate.reason,
+        field: "rollup",
+        stage: status,
+        rollup: { total: rollup.total, blocking: rollup.blocking },
+      },
+      { status: 422 },
+    );
+  }
+
+  const next = nextStage(status);
+  if (!next) {
+    // Unreachable for the per-creative stages (all have a successor), but keep
+    // the type narrow and fail loudly rather than write a null status.
+    return NextResponse.json({ error: `no successor stage for ${status}` }, { status: 422 });
+  }
+
+  const now = new Date().toISOString();
+  const advancedAt =
+    pipeline.advanced_at &&
+    typeof pipeline.advanced_at === "object" &&
+    !Array.isArray(pipeline.advanced_at)
+      ? (pipeline.advanced_at as Record<string, string>)
+      : {};
+  const nextAdvancedAt = { ...advancedAt, [next]: now };
+  const update: PipelineUpdate = {
+    status: next,
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  // Compare-and-set on the current status so a concurrent second advance (or a
+  // stale double-click) can't double-promote.
+  const { data: updated, error: updateErr } = await supabase
+    .from("pipelines")
+    .update(update)
+    .eq("id", pipeline.id)
+    .eq("status", status)
+    .select()
+    .single();
+  if (updateErr || !updated) {
+    return NextResponse.json(
+      { error: updateErr?.message ?? "pipeline advance failed" },
+      { status: 500 },
+    );
+  }
+
+  const event: PipelineEventInsert = {
+    pipeline_id: pipeline.id,
+    kind: "stage_advanced",
+    stage: next,
+    payload: { from: status, rollup_cleared: rollup.cleared } as Json,
+  };
+  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
+  if (evErr) {
+    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+  }
+
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**
