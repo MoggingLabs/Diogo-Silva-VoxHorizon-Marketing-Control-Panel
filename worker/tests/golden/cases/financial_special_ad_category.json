@@ -1,0 +1,28 @@
+{
+  "name": "financing offer trips the Financial Special Ad Category rule",
+  "description": "A '$199/month, no deposit' financing offer MUST FAIL meta.financial_special_ad (block) — financing must run under Meta's Financial Special Ad Category (effective 2025-01-21).",
+  "context": {
+    "creative": { "id": "img-roof-finance" },
+    "copy": {
+      "headline": "New roof for $199/month",
+      "body": "No deposit, easy monthly payments. Get yours today.",
+      "description": "Financing available for qualified homeowners.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "roofing",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": [
+    { "rule_id": "meta.personal_attributes", "label": "clear", "confidence": 0.9 },
+    { "rule_id": "meta.financial_special_ad", "label": "violation", "confidence": 0.88, "evidence_span": "New roof for $199/month" }
+  ],
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "meta.financial_special_ad": "fail"
+    }
+  }
+}

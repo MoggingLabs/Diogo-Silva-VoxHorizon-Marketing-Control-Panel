@@ -1,0 +1,25 @@
+{
+  "name": "guarantee claim without disclosure fails FTC",
+  "description": "A 'lifetime guarantee' with no material terms of the guarantee disclosed. ftc.guarantee_disclosure is deterministic (block) and MUST FAIL. This case needs no LLM candidate.",
+  "context": {
+    "creative": { "id": "img-roof-guarantee" },
+    "copy": {
+      "headline": "$7,999 for a new roof in Memphis",
+      "body": "Lifetime guarantee on every roof we install. Call today.",
+      "description": "Family-owned, 20 years in business.",
+      "cta": "Learn More"
+    },
+    "client": {
+      "service_type": "roofing",
+      "offer_constraints": []
+    },
+    "surface": "copy"
+  },
+  "llm_candidates": null,
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "ftc.guarantee_disclosure": "fail"
+    }
+  }
+}
