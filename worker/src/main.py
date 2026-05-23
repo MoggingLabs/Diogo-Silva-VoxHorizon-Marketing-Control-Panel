@@ -164,6 +164,19 @@ def create_app() -> FastAPI:
         hermes_approval_mode.router, tags=["hermes-approval-mode"]
     )
 
+    # === seed the compliance_rule lookup (#394) ===
+    # The compliance engine adjudicates from the in-memory ruleset
+    # (services.compliance_rules), but the compliance_rule TABLE is a
+    # display/lookup surface the UI joins findings against. Populate it from the
+    # SAME source of truth on boot via an idempotent UPSERT, so the table is
+    # never empty in any environment and never drifts from the Python ruleset.
+    # Best-effort: this NEVER crashes startup — when Supabase isn't configured
+    # (local boot, tests) or the table isn't migrated yet it logs and skips,
+    # exactly like the worker booting without the admin client.
+    from .services.compliance_rules_seed import seed_compliance_rules_safe
+
+    seed_compliance_rules_safe()
+
     structlog.get_logger(__name__).info(
         "worker_started",
         tailscale_hostname=settings.tailscale_hostname,
