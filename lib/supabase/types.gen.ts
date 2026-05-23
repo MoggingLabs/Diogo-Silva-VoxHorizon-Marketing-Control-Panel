@@ -1247,6 +1247,14 @@ export type Database = {
         | "ideation"
         | "review"
         | "generation"
+        | "creative_qa"
+        | "compliance_review"
+        | "copy"
+        | "spec_validation"
+        | "variant_plan"
+        | "finalize_assets"
+        | "launch_handoff"
+        | "monitor"
         | "done"
         | "cancelled"
       ratio: "1x1" | "9x16" | "16x9"
@@ -1455,6 +1463,14 @@ export const Constants = {
         "ideation",
         "review",
         "generation",
+        "creative_qa",
+        "compliance_review",
+        "copy",
+        "spec_validation",
+        "variant_plan",
+        "finalize_assets",
+        "launch_handoff",
+        "monitor",
         "done",
         "cancelled",
       ],

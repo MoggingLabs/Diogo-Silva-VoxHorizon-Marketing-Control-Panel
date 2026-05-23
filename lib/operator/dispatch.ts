@@ -1,5 +1,7 @@
 import "server-only";
 
+import type { PipelineStatus } from "@/lib/pipeline/types";
+
 /**
  * Server-side helper to re-task the Hermes "operator" agent.
  *
@@ -24,7 +26,19 @@ import "server-only";
  * throws so the caller's `.catch()` can log it without failing the request.
  */
 
-export type OperatorStage = "configuration" | "ideation" | "review" | "generation";
+export type OperatorStage =
+  | "configuration"
+  | "ideation"
+  | "review"
+  | "generation"
+  | "creative_qa"
+  | "compliance_review"
+  | "copy"
+  | "spec_validation"
+  | "variant_plan"
+  | "finalize_assets"
+  | "launch_handoff"
+  | "monitor";
 
 /**
  * Build the natural-language instruction the operator receives for a given
@@ -54,6 +68,22 @@ export function operatorInstruction(
       // has nothing to do until it transitions to generation. Exposed for
       // completeness so callers don't special-case the enum.
       return `Pipeline ${pipelineId} is awaiting the manager's review. Stand by.`;
+    case "creative_qa":
+      return `Run the QA pass on each final for pipeline ${pipelineId}: pass/fail with defects, flag re-renders, then stop for the manager's QA sign-off.`;
+    case "compliance_review":
+      return `Screen each final and its copy against the Meta/FTC ruleset for pipeline ${pipelineId}. Record pass/block with required edits. You cannot pass a blocked item — stop for the manager.`;
+    case "copy":
+      return `Author the copy for pipeline ${pipelineId}: three variants per final, owner voice, sourced from the winning-copy registry and humanized. Stop for the manager's copy approval.`;
+    case "spec_validation":
+      return `Validate placement specs and derive the crops for pipeline ${pipelineId}; surface any exceptions, then stop.`;
+    case "variant_plan":
+      return `Build the A/B test matrix for pipeline ${pipelineId}, one variable per cell, sized to the budget. Stop for the manager's test-plan approval.`;
+    case "finalize_assets":
+      return `Finalize assets for pipeline ${pipelineId}: apply the naming convention, register, upload to Drive, and verify. Stop with the verify report.`;
+    case "launch_handoff":
+      return `Assemble and validate the launch package for pipeline ${pipelineId}. Do not touch Meta without an explicit approval naming the live action; create PAUSED first. Stop at the launch gate.`;
+    case "monitor":
+      return `Monitor the live ads for pipeline ${pipelineId}. Pull GHL leads as the source of truth, apply the kill/watch/keep thresholds, and recommend kill or scale. Stop for the manager's call.`;
   }
 }
 
@@ -98,7 +128,22 @@ export function isOperatorDriven(configDraft: unknown): boolean {
  * — a worker outage must never block a stage transition or kickoff, since the
  * pipeline row + events are the primary artifacts.
  */
-export async function dispatchOperator(pipelineId: string, instruction: string): Promise<void> {
+/**
+ * Typed dispatch envelope. The operator asserts `pipeline.status ===
+ * expected_status` on read and stops (no-op) if it mismatches — this kills the
+ * stale/duplicate-dispatch race (the stage already advanced or was raced).
+ */
+export type DispatchEnvelope = {
+  stage?: OperatorStage;
+  expectedStatus?: PipelineStatus;
+  dispatchId?: string;
+};
+
+export async function dispatchOperator(
+  pipelineId: string,
+  instruction: string,
+  envelope: DispatchEnvelope = {},
+): Promise<void> {
   const base = process.env.WORKER_URL?.replace(/\/$/, "");
   const secret = process.env.WORKER_SHARED_SECRET;
   if (!base || !secret) return;
@@ -108,7 +153,13 @@ export async function dispatchOperator(pipelineId: string, instruction: string):
       Authorization: `Bearer ${secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ pipeline_id: pipelineId, instruction }),
+    body: JSON.stringify({
+      pipeline_id: pipelineId,
+      instruction,
+      stage: envelope.stage,
+      expected_status: envelope.expectedStatus,
+      dispatch_id: envelope.dispatchId,
+    }),
     cache: "no-store",
   });
   if (!res.ok && res.status !== 404) {

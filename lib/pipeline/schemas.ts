@@ -31,12 +31,20 @@ import type { Database } from "@/lib/supabase/types.gen";
 export const PipelineFormat = z.enum(["image", "video", "both"]);
 export type PipelineFormatT = z.infer<typeof PipelineFormat>;
 
-/** Source of truth: `pipeline_status_enum` in the DB. */
+/** Source of truth: `pipeline_status_enum` in the DB (0006 + 0016). */
 export const PipelineStatus = z.enum([
   "configuration",
   "ideation",
   "review",
   "generation",
+  "creative_qa",
+  "compliance_review",
+  "copy",
+  "spec_validation",
+  "variant_plan",
+  "finalize_assets",
+  "launch_handoff",
+  "monitor",
   "done",
   "cancelled",
 ]);

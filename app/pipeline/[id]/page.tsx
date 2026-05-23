@@ -40,6 +40,16 @@ const STAGE_PLACEHOLDER_LABEL: Record<PipelineStatus, { label: string; wave: str
   ideation: { label: "Ideation", wave: "PF-C-X" },
   review: { label: "Review", wave: "PF-D-X" },
   generation: { label: "Generation", wave: "PF-E-X" },
+  // New 12-stage flow — real stage components land in P4 (UX rebuild); until
+  // then these render via the StagePlaceholder fall-through in the switch below.
+  creative_qa: { label: "Creative QA", wave: "P4" },
+  compliance_review: { label: "Compliance", wave: "P4" },
+  copy: { label: "Copy", wave: "P4" },
+  spec_validation: { label: "Spec Validation", wave: "P4" },
+  variant_plan: { label: "Variant Plan", wave: "P4" },
+  finalize_assets: { label: "Finalize", wave: "P4" },
+  launch_handoff: { label: "Launch", wave: "P4" },
+  monitor: { label: "Monitor", wave: "P4" },
   done: { label: "Done", wave: "PF-F-X" },
   cancelled: { label: "Cancelled", wave: "PF-X-X" },
 };

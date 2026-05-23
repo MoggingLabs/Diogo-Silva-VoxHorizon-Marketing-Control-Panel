@@ -59,7 +59,20 @@ _NON_TERMINAL_TASK_KINDS = {EVENT_TASK_QUEUED, EVENT_TASK_RUNNING}
 
 
 PipelineStage = Literal[
-    "configuration", "ideation", "review", "generation", "done", "cancelled"
+    "configuration",
+    "ideation",
+    "review",
+    "generation",
+    "creative_qa",
+    "compliance_review",
+    "copy",
+    "spec_validation",
+    "variant_plan",
+    "finalize_assets",
+    "launch_handoff",
+    "monitor",
+    "done",
+    "cancelled",
 ]
 
 
