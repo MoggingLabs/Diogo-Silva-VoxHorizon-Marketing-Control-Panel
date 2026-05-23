@@ -83,6 +83,169 @@ jobs:
         run: uv run pytest
 
   # ---------------------------------------------------------------------------
+  # End-to-end: drive the full 12-stage pipeline to `done` with NO stall (T.5 /
+  # T.6, #318 / #319). Brings up the LOCAL Supabase stack (Docker is available
+  # on GitHub runners), applies the full forward-only migration chain
+  # (db/migrations/0001..0025 — the repo has no supabase/migrations dir, so we
+  # apply them explicitly via psql), starts the Python worker with ALL FAKE_*
+  # flags on (zero external calls, deterministic), starts the Next app, and runs
+  # the no-stall workflow spec (chromium). Local-only secrets: the printed
+  # service_role key + a dummy worker bearer. NEVER a cloud project / real key.
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: E2E (12-stage no-stall workflow)
+    runs-on: ubuntu-latest
+    env:
+      # Local Supabase stack endpoints (supabase start defaults).
+      NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+      LOCAL_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
+      # Dummy local worker bearer — NEVER a real key. The Python worker reads it
+      # (verify_secret) and the e2e driver presents it; deliberately NOT exported
+      # to the Next app (see note on the build/start steps).
+      WORKER_SHARED_SECRET: e2e-local-worker-secret
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Node deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install uv (worker toolchain)
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install worker deps
+        working-directory: worker
+        run: uv sync --frozen --extra dev
+
+      - name: Setup Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Start Supabase (local stack)
+        run: supabase start
+
+      - name: Resolve local service_role key
+        id: sb
+        run: |
+          set -euo pipefail
+          # `jq` is preinstalled on ubuntu runners. CLI versions vary the casing
+          # of the key, so try each candidate and take the first non-empty one.
+          JSON="$(supabase status --output json)"
+          KEY="$(echo "$JSON" | jq -r '.SERVICE_ROLE_KEY // .service_role_key // .serviceRoleKey // empty')"
+          if [ -z "$KEY" ]; then
+            echo "service_role key not found in supabase status JSON"; echo "$JSON"; exit 1
+          fi
+          echo "::add-mask::$KEY"
+          echo "service_role_key=$KEY" >> "$GITHUB_OUTPUT"
+
+      - name: Apply migrations (db/migrations 0001..0025)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          for f in db/migrations/[0-9][0-9][0-9][0-9]_*.sql; do
+            echo "==> applying $f"
+            psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          # Reload PostgREST's schema cache so the freshly-migrated tables are
+          # exposed at the REST API the Next + worker clients use.
+          psql "$LOCAL_DB_URL" -v ON_ERROR_STOP=1 -c "notify pgrst, 'reload schema';"
+
+      - name: Start worker (uvicorn, FAKE integrations)
+        env:
+          SUPABASE_URL: ${{ env.NEXT_PUBLIC_SUPABASE_URL }}
+          SUPABASE_SECRET_KEY: ${{ steps.sb.outputs.service_role_key }}
+          WORKER_SHARED_SECRET: ${{ env.WORKER_SHARED_SECRET }}
+          # All FAKE_* on → zero external calls (Meta/GHL/Drive/render). The
+          # compliance + QA verdicts are NEVER faked (real worker engines).
+          FAKE_RENDER: "true"
+          FAKE_META: "true"
+          FAKE_GHL: "true"
+          FAKE_DRIVE: "true"
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          uv run uvicorn src.main:app --host 127.0.0.1 --port 8000 > "$GITHUB_WORKSPACE/worker.log" 2>&1 &
+          echo "WORKER_PID=$!" >> "$GITHUB_ENV"
+          # Wait for /work/health (bearer-authed) to return 200.
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer ${WORKER_SHARED_SECRET}" \
+              http://127.0.0.1:8000/work/health || true)"
+            if [ "$code" = "200" ]; then echo "worker up"; break; fi
+            if [ "$i" = "60" ]; then echo "worker did not start"; cat "$GITHUB_WORKSPACE/worker.log"; exit 1; fi
+            sleep 1
+          done
+
+      # NOTE: WORKER_URL is deliberately NOT exported to the Next app. The
+      # advance / review-decision routes fire-and-forget at the worker's
+      # ideation/generation producers when WORKER_URL is set; in this e2e the
+      # test drives generation deterministically (seeded finals + closure
+      # events), so we keep the Next→worker push OFF (the routes no-op without
+      # WORKER_URL) to avoid the real producer racing the seeded state. The e2e
+      # test calls the worker tool endpoints directly instead.
+      - name: Build Next app
+        env:
+          SUPABASE_SECRET_KEY: ${{ steps.sb.outputs.service_role_key }}
+        run: pnpm build
+
+      - name: Start Next app
+        env:
+          SUPABASE_SECRET_KEY: ${{ steps.sb.outputs.service_role_key }}
+        run: |
+          set -euo pipefail
+          pnpm start > "$GITHUB_WORKSPACE/next.log" 2>&1 &
+          echo "NEXT_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 60); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:3000/pipeline || true)"
+            # Any HTTP response (200/3xx/4xx) means the server is listening.
+            if [ -n "$code" ] && [ "$code" != "000" ]; then echo "next up ($code)"; break; fi
+            if [ "$i" = "60" ]; then echo "next did not start"; cat "$GITHUB_WORKSPACE/next.log"; exit 1; fi
+            sleep 1
+          done
+
+      - name: Install Playwright chromium
+        run: pnpm test:e2e:install
+
+      - name: Run no-stall workflow e2e (chromium)
+        env:
+          # The e2e harness reads Supabase + worker config from the env. Setting
+          # PLAYWRIGHT_BASE_URL makes playwright.config.ts skip the auto-spawned
+          # webServer and target the pre-started Next server above.
+          SUPABASE_SECRET_KEY: ${{ steps.sb.outputs.service_role_key }}
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:3000
+          WORKER_URL: http://127.0.0.1:8000
+          CI: "true"
+        run: pnpm exec playwright test pipeline-workflow.spec.ts --project=chromium
+
+      - name: Dump server logs on failure
+        if: failure()
+        run: |
+          echo "===== worker.log ====="; cat "$GITHUB_WORKSPACE/worker.log" || true
+          echo "===== next.log ====="; cat "$GITHUB_WORKSPACE/next.log" || true
+
+      - name: Stop background servers
+        if: always()
+        run: |
+          [ -n "${WORKER_PID:-}" ] && kill "${WORKER_PID}" 2>/dev/null || true
+          [ -n "${NEXT_PID:-}" ] && kill "${NEXT_PID}" 2>/dev/null || true
+          supabase stop || true
+
+  # ---------------------------------------------------------------------------
   # Workflow YAML lint — catches typos / misconfigured actions before merge.
   # Cheap, runs in seconds.
   # ---------------------------------------------------------------------------

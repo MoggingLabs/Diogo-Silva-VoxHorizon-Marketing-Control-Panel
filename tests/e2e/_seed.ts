@@ -183,6 +183,21 @@ export async function cleanupPipelines(clientId: string): Promise<void> {
   const pipelineIds = (pipes ?? []).map((p) => p.id);
   if (pipelineIds.length === 0) return;
 
+  // The rebuild added `creatives.pipeline_id` (migration 0023) with NO ON
+  // DELETE rule (NO ACTION), so a creative that points at a pipeline blocks the
+  // pipeline delete with a FK violation. The workflow e2e seeds finals carrying
+  // `pipeline_id` (so the per-creative review fetch finds them), so null that FK
+  // out first. Best-effort: the column may not exist on an older DB / the update
+  // may match nothing — either way the delete below is the load-bearing step.
+  const nulled = await admin
+    .from("creatives")
+    .update({ pipeline_id: null } as never)
+    .in("pipeline_id" as never, pipelineIds as never);
+  if (nulled.error) {
+    // Surface only unexpected failures; a missing column / no-match is fine.
+    console.warn(`cleanupPipelines (null creatives.pipeline_id): ${nulled.error.message}`);
+  }
+
   const res = await admin.from("pipelines").delete().in("id", pipelineIds);
   if (res.error) {
     throw new Error(`cleanupPipelines (delete) failed: ${res.error.message}`);

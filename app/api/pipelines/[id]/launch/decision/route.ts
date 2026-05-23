@@ -22,14 +22,18 @@ type RouteContext = { params: Promise<{ id: string }> };
  *   - **re-derives the preconditions server-side** from the live per-creative
  *     data (never trusts the client) and refuses (422) if they aren't met —
  *     the compliance/launch gates never auto-pass,
- *   - on approve: records the decision, advances to `monitor`, and forwards to
- *     the worker launch endpoint (PAUSED-first; failures are swallowed so a
- *     worker outage doesn't undo the committed gate),
+ *   - on approve: records the decision and advances to `monitor`,
  *   - on reject: stays in `launch_handoff` (the manager can re-evaluate); the
  *     rejection is recorded on the timeline.
  *
- * NOTE: the Meta *activate* step is a separate, approval-gated operator action
- * (the approvals plugin). This route only opens the launch handoff.
+ * NOTE: there is NO worker push from this route. Per the locked design (Layer 6,
+ * PIPELINE-REBUILD-ARCHITECTURE.md) the Meta launch is operator-held MCP: the
+ * operator creates the PAUSED-first entities and records them via
+ * `POST /work/pipeline/tools/launch` (the recorder + server-side hard gate)
+ * BEFORE the manager approves here, and the Meta *activate* step is a separate,
+ * approval-gated operator action (the approvals plugin). This route only
+ * re-derives the preconditions and opens the launch handoff to `monitor`; the
+ * operator's own monitor dispatch carries the run forward from there.
  */
 export async function POST(req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -136,35 +140,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.launch.decision] event insert failed: ${evErr.message}`);
   }
 
-  // Forward to the worker launch endpoint (PAUSED-first). Best-effort: the gate
-  // has committed and must not be undone by a worker outage.
-  void fireWorkerLaunch(id).catch((e) => {
-    console.warn(`[pipelines.launch.decision] worker launch kick failed for ${id}: ${String(e)}`);
-  });
-
+  // No worker push: the operator already recorded the PAUSED-first Meta entities
+  // via `POST /work/pipeline/tools/launch` (the recorder + server-side hard
+  // gate) before this approval, and the Meta activate step is a separate
+  // approval-gated operator MCP action. Advancing to `monitor` here is the
+  // committed gate; the operator's own monitor dispatch drives the next stage.
   return NextResponse.json({ pipeline: updated, decision, preconditions });
-}
-
-/**
- * Fire-and-forget POST to the worker's launch endpoint. Mirrors the advance
- * route's worker helpers: skip when WORKER_URL / WORKER_SHARED_SECRET unset,
- * swallow a 404, throw on any other non-2xx so the caller's `.catch()` logs it.
- */
-async function fireWorkerLaunch(pipelineId: string): Promise<void> {
-  const base = process.env.WORKER_URL?.replace(/\/$/, "");
-  const secret = process.env.WORKER_SHARED_SECRET;
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/launch`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ pipeline_id: pipelineId }),
-    cache: "no-store",
-  });
-  if (!res.ok && res.status !== 404) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/launch -> ${res.status}: ${text.slice(0, 200)}`);
-  }
 }
