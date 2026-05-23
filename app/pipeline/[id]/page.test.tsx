@@ -3,6 +3,30 @@ import { describe, expect, it, vi } from "vitest";
 
 import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
+// The page imports the server-only review/monitor fetch helpers; neutralise the
+// sentinel and stub the helpers so this jsdom test can import the page.
+vi.mock("server-only", () => ({}));
+
+const getReviewBundle = vi.fn(async () => ({
+  creatives: [{ id: "a", concept: "A", status: "draft" }],
+  states: [],
+  copyVariants: [],
+  signedUrls: {},
+}));
+const getCopyVariants = vi.fn(async () => []);
+const getVariantPlan = vi.fn(async () => null);
+const getClientCplTarget = vi.fn(async () => null);
+vi.mock("@/lib/review/fetch", () => ({
+  getReviewBundle: (...a: unknown[]) => getReviewBundle(...(a as [])),
+  getCopyVariants: (...a: unknown[]) => getCopyVariants(...(a as [])),
+  getVariantPlan: (...a: unknown[]) => getVariantPlan(...(a as [])),
+  getClientCplTarget: (...a: unknown[]) => getClientCplTarget(...(a as [])),
+}));
+const getMonitorRows = vi.fn(async () => []);
+vi.mock("@/lib/monitor/fetch", () => ({
+  getMonitorRows: (...a: unknown[]) => getMonitorRows(...(a as [])),
+}));
+
 const getPipeline = vi.fn();
 vi.mock("@/lib/pipeline/client", () => ({
   getPipeline: (...args: unknown[]) => getPipeline(...args),
@@ -20,10 +44,27 @@ vi.mock("@/components/pipeline/PipelineDetailRealtime", () => ({
 vi.mock("@/components/pipeline/CancelPipelineButton", () => ({
   CancelPipelineButton: () => <button data-testid="cancel">cancel</button>,
 }));
-vi.mock("@/components/pipeline/HorizontalStepper", () => ({
-  HorizontalStepper: ({ current }: { current: string }) => (
+vi.mock("@/components/pipeline/PhaseStepper", () => ({
+  PhaseStepper: ({ current }: { current: string }) => (
     <div data-testid="stepper" data-current={current} />
   ),
+}));
+vi.mock("@/components/pipeline/StageCreativeReview", () => ({
+  StageCreativeReview: ({ mode }: { mode: string }) => (
+    <div data-testid="stage" data-stage={mode} />
+  ),
+}));
+vi.mock("@/components/pipeline/StageCopy", () => ({
+  StageCopy: () => <div data-testid="stage" data-stage="copy" />,
+}));
+vi.mock("@/components/pipeline/StageVariantPlan", () => ({
+  StageVariantPlan: () => <div data-testid="stage" data-stage="variant_plan" />,
+}));
+vi.mock("@/components/launch/LaunchGate", () => ({
+  LaunchGate: () => <div data-testid="stage" data-stage="launch_handoff" />,
+}));
+vi.mock("@/components/monitor/MonitorDashboard", () => ({
+  MonitorDashboard: () => <div data-testid="stage" data-stage="monitor" />,
 }));
 vi.mock("@/components/pipeline/StageConfiguration", () => ({
   StageConfiguration: ({ clients }: { clients: unknown[] }) => (
@@ -234,5 +275,68 @@ describe("PipelineDetailPage", () => {
   it("generateMetadata returns truncated id", async () => {
     const m = await generateMetadata({ params: Promise.resolve({ id: "abcdef12-rest" }) });
     expect(m.title).toBe("Pipeline abcdef12 — VoxHorizon");
+  });
+
+  it.each(["creative_qa", "compliance_review", "spec_validation"] as const)(
+    "routes the %s status to the per-creative review host",
+    async (status) => {
+      getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status }), events: [] });
+      currentSupabase = mockSupabaseClient();
+      const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+      render(el);
+      expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", status);
+      expect(getReviewBundle).toHaveBeenCalled();
+    },
+  );
+
+  it("routes copy to StageCopy", async () => {
+    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "copy" }), events: [] });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "copy");
+    expect(getCopyVariants).toHaveBeenCalled();
+  });
+
+  it("routes variant_plan to StageVariantPlan", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "variant_plan" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "variant_plan");
+  });
+
+  it("routes launch_handoff to the LaunchGate", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "launch_handoff" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "launch_handoff");
+  });
+
+  it("routes monitor to the MonitorDashboard", async () => {
+    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "monitor" }), events: [] });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "monitor");
+    expect(getMonitorRows).toHaveBeenCalled();
+  });
+
+  it("falls through finalize_assets (auto stage) to the placeholder", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "finalize_assets" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    expect(screen.getByTestId("placeholder")).toBeInTheDocument();
   });
 });

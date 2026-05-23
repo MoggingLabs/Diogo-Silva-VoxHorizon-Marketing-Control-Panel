@@ -18,6 +18,402 @@ export type Database = {
   }
   public: {
     Tables: {
+      ad_entity: {
+        Row: {
+          client_id: string | null
+          copy_variant_id: string | null
+          created_at: string
+          creative_id: string | null
+          id: string
+          kind: Database["public"]["Enums"]["ad_entity_kind_enum"]
+          launch_package_id: string | null
+          meta_id: string
+          meta_payload: Json | null
+          parent_meta_id: string | null
+          pipeline_id: string
+          state: Database["public"]["Enums"]["ad_entity_state_enum"]
+          updated_at: string
+        }
+        Insert: {
+          client_id?: string | null
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          id?: string
+          kind: Database["public"]["Enums"]["ad_entity_kind_enum"]
+          launch_package_id?: string | null
+          meta_id: string
+          meta_payload?: Json | null
+          parent_meta_id?: string | null
+          pipeline_id: string
+          state?: Database["public"]["Enums"]["ad_entity_state_enum"]
+          updated_at?: string
+        }
+        Update: {
+          client_id?: string | null
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          id?: string
+          kind?: Database["public"]["Enums"]["ad_entity_kind_enum"]
+          launch_package_id?: string | null
+          meta_id?: string
+          meta_payload?: Json | null
+          parent_meta_id?: string | null
+          pipeline_id?: string
+          state?: Database["public"]["Enums"]["ad_entity_state_enum"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ad_entity_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      compliance_finding: {
+        Row: {
+          checked_at: string
+          checked_by: string
+          citation_url: string | null
+          copy_variant_id: string | null
+          created_at: string
+          creative_id: string | null
+          evidence: Json | null
+          id: string
+          overridden: boolean
+          overridden_at: string | null
+          overridden_by: string | null
+          override_reason: string | null
+          pass: number
+          pipeline_id: string
+          required_edit: string | null
+          rule_id: string
+          rule_version: number
+          severity: Database["public"]["Enums"]["verdict_severity_enum"]
+          verdict: Database["public"]["Enums"]["compliance_verdict_enum"]
+        }
+        Insert: {
+          checked_at?: string
+          checked_by?: string
+          citation_url?: string | null
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          evidence?: Json | null
+          id?: string
+          overridden?: boolean
+          overridden_at?: string | null
+          overridden_by?: string | null
+          override_reason?: string | null
+          pass?: number
+          pipeline_id: string
+          required_edit?: string | null
+          rule_id: string
+          rule_version: number
+          severity: Database["public"]["Enums"]["verdict_severity_enum"]
+          verdict: Database["public"]["Enums"]["compliance_verdict_enum"]
+        }
+        Update: {
+          checked_at?: string
+          checked_by?: string
+          citation_url?: string | null
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          evidence?: Json | null
+          id?: string
+          overridden?: boolean
+          overridden_at?: string | null
+          overridden_by?: string | null
+          override_reason?: string | null
+          pass?: number
+          pipeline_id?: string
+          required_edit?: string | null
+          rule_id?: string
+          rule_version?: number
+          severity?: Database["public"]["Enums"]["verdict_severity_enum"]
+          verdict?: Database["public"]["Enums"]["compliance_verdict_enum"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "compliance_finding_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "compliance_finding_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      creative_stage_state: {
+        Row: {
+          created_at: string
+          creative_id: string
+          decided_at: string | null
+          decided_by: string | null
+          id: string
+          override_note: string | null
+          pipeline_id: string
+          stage: Database["public"]["Enums"]["creative_stage_enum"]
+          status: Database["public"]["Enums"]["stage_state_enum"]
+          summary: Json
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          creative_id: string
+          decided_at?: string | null
+          decided_by?: string | null
+          id?: string
+          override_note?: string | null
+          pipeline_id: string
+          stage: Database["public"]["Enums"]["creative_stage_enum"]
+          status?: Database["public"]["Enums"]["stage_state_enum"]
+          summary?: Json
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          creative_id?: string
+          decided_at?: string | null
+          decided_by?: string | null
+          id?: string
+          override_note?: string | null
+          pipeline_id?: string
+          stage?: Database["public"]["Enums"]["creative_stage_enum"]
+          status?: Database["public"]["Enums"]["stage_state_enum"]
+          summary?: Json
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "creative_stage_state_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "creative_stage_state_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      qa_result: {
+        Row: {
+          attempt: number
+          brand_consistency: Json | null
+          checked_by: string
+          checks: Json
+          created_at: string
+          creative_id: string
+          defects: Json
+          id: string
+          model: string | null
+          pipeline_id: string
+          status: Database["public"]["Enums"]["qa_status_enum"]
+        }
+        Insert: {
+          attempt?: number
+          brand_consistency?: Json | null
+          checked_by?: string
+          checks?: Json
+          created_at?: string
+          creative_id: string
+          defects?: Json
+          id?: string
+          model?: string | null
+          pipeline_id: string
+          status: Database["public"]["Enums"]["qa_status_enum"]
+        }
+        Update: {
+          attempt?: number
+          brand_consistency?: Json | null
+          checked_by?: string
+          checks?: Json
+          created_at?: string
+          creative_id?: string
+          defects?: Json
+          id?: string
+          model?: string | null
+          pipeline_id?: string
+          status?: Database["public"]["Enums"]["qa_status_enum"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "qa_result_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "qa_result_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      spec_check: {
+        Row: {
+          checks: Json
+          created_at: string
+          creative_id: string
+          derived_path_drive: string | null
+          derived_path_supabase: string | null
+          id: string
+          pipeline_id: string
+          placement: Database["public"]["Enums"]["placement_enum"]
+          platform: Database["public"]["Enums"]["platform_enum"]
+          ratio: Database["public"]["Enums"]["ratio"] | null
+          status: Database["public"]["Enums"]["spec_status_enum"]
+        }
+        Insert: {
+          checks?: Json
+          created_at?: string
+          creative_id: string
+          derived_path_drive?: string | null
+          derived_path_supabase?: string | null
+          id?: string
+          pipeline_id: string
+          placement: Database["public"]["Enums"]["placement_enum"]
+          platform: Database["public"]["Enums"]["platform_enum"]
+          ratio?: Database["public"]["Enums"]["ratio"] | null
+          status: Database["public"]["Enums"]["spec_status_enum"]
+        }
+        Update: {
+          checks?: Json
+          created_at?: string
+          creative_id?: string
+          derived_path_drive?: string | null
+          derived_path_supabase?: string | null
+          id?: string
+          pipeline_id?: string
+          placement?: Database["public"]["Enums"]["placement_enum"]
+          platform?: Database["public"]["Enums"]["platform_enum"]
+          ratio?: Database["public"]["Enums"]["ratio"] | null
+          status?: Database["public"]["Enums"]["spec_status_enum"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "spec_check_creative_id_fkey"
+            columns: ["creative_id"]
+            isOneToOne: false
+            referencedRelation: "creatives"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "spec_check_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      variant_plan: {
+        Row: {
+          approved_at: string | null
+          approved_by: string | null
+          created_at: string
+          hypothesis: string | null
+          id: string
+          notes: string | null
+          pipeline_id: string
+          status: string
+          test_variable: string
+          updated_at: string
+        }
+        Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          created_at?: string
+          hypothesis?: string | null
+          id?: string
+          notes?: string | null
+          pipeline_id: string
+          status?: string
+          test_variable: string
+          updated_at?: string
+        }
+        Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          created_at?: string
+          hypothesis?: string | null
+          id?: string
+          notes?: string | null
+          pipeline_id?: string
+          status?: string
+          test_variable?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "variant_plan_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      variant_plan_cell: {
+        Row: {
+          audience: Json | null
+          cell_index: number
+          copy_variant_id: string | null
+          created_at: string
+          creative_id: string | null
+          id: string
+          label: string | null
+          variant_plan_id: string
+        }
+        Insert: {
+          audience?: Json | null
+          cell_index: number
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          id?: string
+          label?: string | null
+          variant_plan_id: string
+        }
+        Update: {
+          audience?: Json | null
+          cell_index?: number
+          copy_variant_id?: string | null
+          created_at?: string
+          creative_id?: string | null
+          id?: string
+          label?: string | null
+          variant_plan_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "variant_plan_cell_variant_plan_id_fkey"
+            columns: ["variant_plan_id"]
+            isOneToOne: false
+            referencedRelation: "variant_plan"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       approval_mode: {
         Row: {
           expires_at: string | null
@@ -218,6 +614,7 @@ export type Database = {
       }
       campaign_perf_image: {
         Row: {
+          ad_entity_id: string | null
           campaign_id: string
           clicks: number | null
           client_id: string | null
@@ -228,6 +625,7 @@ export type Database = {
           impressions: number | null
           leads_ghl: number | null
           leads_meta: number | null
+          pipeline_id: string | null
           pulled_at: string
           spend: number | null
           verdict: Database["public"]["Enums"]["ad_verdict"] | null
@@ -235,6 +633,7 @@ export type Database = {
           window_days: number
         }
         Insert: {
+          ad_entity_id?: string | null
           campaign_id: string
           clicks?: number | null
           client_id?: string | null
@@ -245,6 +644,7 @@ export type Database = {
           impressions?: number | null
           leads_ghl?: number | null
           leads_meta?: number | null
+          pipeline_id?: string | null
           pulled_at?: string
           spend?: number | null
           verdict?: Database["public"]["Enums"]["ad_verdict"] | null
@@ -252,6 +652,7 @@ export type Database = {
           window_days: number
         }
         Update: {
+          ad_entity_id?: string | null
           campaign_id?: string
           clicks?: number | null
           client_id?: string | null
@@ -262,6 +663,7 @@ export type Database = {
           impressions?: number | null
           leads_ghl?: number | null
           leads_meta?: number | null
+          pipeline_id?: string | null
           pulled_at?: string
           spend?: number | null
           verdict?: Database["public"]["Enums"]["ad_verdict"] | null
@@ -270,10 +672,24 @@ export type Database = {
         }
         Relationships: [
           {
+            foreignKeyName: "campaign_perf_image_ad_entity_id_fkey"
+            columns: ["ad_entity_id"]
+            isOneToOne: false
+            referencedRelation: "ad_entity"
+            referencedColumns: ["id"]
+          },
+          {
             foreignKeyName: "campaign_perf_image_client_id_fkey"
             columns: ["client_id"]
             isOneToOne: false
             referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "campaign_perf_image_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
             referencedColumns: ["id"]
           },
         ]
@@ -452,34 +868,73 @@ export type Database = {
       }
       copy_variants: {
         Row: {
+          approved_at: string | null
+          approved_by: string | null
+          author: string
           body: string | null
           created_at: string
           creative_id: string
           cta: string | null
+          decided_notes: string | null
+          description: string | null
           headline: string | null
           humanized: boolean | null
+          humanized_at: string | null
           id: string
-          status: string | null
+          pattern: string | null
+          pipeline_id: string | null
+          placement: Database["public"]["Enums"]["placement_enum"] | null
+          platform: Database["public"]["Enums"]["platform_enum"]
+          status: Database["public"]["Enums"]["copy_variant_status_enum"] | null
+          updated_at: string
+          validation: Json
+          variant_index: number
         }
         Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
+          author?: string
           body?: string | null
           created_at?: string
           creative_id: string
           cta?: string | null
+          decided_notes?: string | null
+          description?: string | null
           headline?: string | null
           humanized?: boolean | null
+          humanized_at?: string | null
           id?: string
-          status?: string | null
+          pattern?: string | null
+          pipeline_id?: string | null
+          placement?: Database["public"]["Enums"]["placement_enum"] | null
+          platform?: Database["public"]["Enums"]["platform_enum"]
+          status?: Database["public"]["Enums"]["copy_variant_status_enum"] | null
+          updated_at?: string
+          validation?: Json
+          variant_index?: number
         }
         Update: {
+          approved_at?: string | null
+          approved_by?: string | null
+          author?: string
           body?: string | null
           created_at?: string
           creative_id?: string
           cta?: string | null
+          decided_notes?: string | null
+          description?: string | null
           headline?: string | null
           humanized?: boolean | null
+          humanized_at?: string | null
           id?: string
-          status?: string | null
+          pattern?: string | null
+          pipeline_id?: string | null
+          placement?: Database["public"]["Enums"]["placement_enum"] | null
+          platform?: Database["public"]["Enums"]["platform_enum"]
+          status?: Database["public"]["Enums"]["copy_variant_status_enum"] | null
+          updated_at?: string
+          validation?: Json
+          variant_index?: number
         }
         Relationships: [
           {
@@ -487,6 +942,13 @@ export type Database = {
             columns: ["creative_id"]
             isOneToOne: false
             referencedRelation: "creatives"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "copy_variants_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
             referencedColumns: ["id"]
           },
         ]
@@ -542,13 +1004,20 @@ export type Database = {
       creatives: {
         Row: {
           approved_at: string | null
+          asset_name: string | null
           brief_id: string
           concept: string | null
+          concept_id: string | null
           created_at: string
+          deleted_at: string | null
+          drive_folder_id: string | null
           file_path_drive: string | null
           file_path_supabase: string | null
+          finalize_verified: boolean
+          finalized_at: string | null
           id: string
           offer_text: string | null
+          pipeline_id: string | null
           prompt_used: Json | null
           ratio: Database["public"]["Enums"]["ratio"] | null
           status: Database["public"]["Enums"]["image_creative_status"]
@@ -557,13 +1026,20 @@ export type Database = {
         }
         Insert: {
           approved_at?: string | null
+          asset_name?: string | null
           brief_id: string
           concept?: string | null
+          concept_id?: string | null
           created_at?: string
+          deleted_at?: string | null
+          drive_folder_id?: string | null
           file_path_drive?: string | null
           file_path_supabase?: string | null
+          finalize_verified?: boolean
+          finalized_at?: string | null
           id?: string
           offer_text?: string | null
+          pipeline_id?: string | null
           prompt_used?: Json | null
           ratio?: Database["public"]["Enums"]["ratio"] | null
           status?: Database["public"]["Enums"]["image_creative_status"]
@@ -572,13 +1048,20 @@ export type Database = {
         }
         Update: {
           approved_at?: string | null
+          asset_name?: string | null
           brief_id?: string
           concept?: string | null
+          concept_id?: string | null
           created_at?: string
+          deleted_at?: string | null
+          drive_folder_id?: string | null
           file_path_drive?: string | null
           file_path_supabase?: string | null
+          finalize_verified?: boolean
+          finalized_at?: string | null
           id?: string
           offer_text?: string | null
+          pipeline_id?: string | null
           prompt_used?: Json | null
           ratio?: Database["public"]["Enums"]["ratio"] | null
           status?: Database["public"]["Enums"]["image_creative_status"]
@@ -591,6 +1074,13 @@ export type Database = {
             columns: ["brief_id"]
             isOneToOne: false
             referencedRelation: "briefs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "creatives_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
             referencedColumns: ["id"]
           },
         ]
@@ -668,30 +1158,51 @@ export type Database = {
       }
       launch_packages: {
         Row: {
+          approved_at: string | null
+          approved_by: string | null
           brief_id: string
           created_at: string
           decided_at: string | null
           decided_notes: string | null
           id: string
+          launched_at: string | null
+          meta_campaign_id: string | null
+          meta_entities: Json | null
           payload: Json
+          pipeline_id: string | null
+          preconditions: Json
           status: string
         }
         Insert: {
+          approved_at?: string | null
+          approved_by?: string | null
           brief_id: string
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
           id?: string
+          launched_at?: string | null
+          meta_campaign_id?: string | null
+          meta_entities?: Json | null
           payload: Json
+          pipeline_id?: string | null
+          preconditions?: Json
           status?: string
         }
         Update: {
+          approved_at?: string | null
+          approved_by?: string | null
           brief_id?: string
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
           id?: string
+          launched_at?: string | null
+          meta_campaign_id?: string | null
+          meta_entities?: Json | null
           payload?: Json
+          pipeline_id?: string | null
+          preconditions?: Json
           status?: string
         }
         Relationships: [
@@ -700,6 +1211,13 @@ export type Database = {
             columns: ["brief_id"]
             isOneToOne: false
             referencedRelation: "briefs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "launch_packages_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
             referencedColumns: ["id"]
           },
         ]
@@ -1200,9 +1718,69 @@ export type Database = {
       show_trgm: { Args: { "": string }; Returns: string[] }
     }
     Enums: {
+      ad_entity_kind_enum: "campaign" | "adset" | "ad" | "creative"
+      ad_entity_state_enum:
+        | "paused"
+        | "active"
+        | "archived"
+        | "deleted"
+        | "error"
       ad_verdict: "kill" | "watch" | "keep"
       approval_decision_enum: "approved" | "rejected" | "approved_with_caveat"
       approval_status_enum: "pending" | "decided" | "expired" | "cancelled"
+      compliance_verdict_enum:
+        | "pending"
+        | "pass"
+        | "fail"
+        | "needs_review"
+        | "override_released"
+      copy_variant_status_enum:
+        | "draft"
+        | "validated"
+        | "approved"
+        | "rejected"
+        | "retired"
+      cost_kind_enum:
+        | "image_gen"
+        | "video_gen"
+        | "vision_qa"
+        | "copy_llm"
+        | "meta_spend"
+        | "other"
+      creative_stage_enum:
+        | "creative_qa"
+        | "compliance_review"
+        | "copy"
+        | "spec_validation"
+      launch_package_status_enum:
+        | "assembling"
+        | "validating"
+        | "blocked"
+        | "ready"
+        | "approved"
+        | "queued"
+        | "live"
+        | "failed"
+        | "cancelled"
+      placement_enum:
+        | "feed"
+        | "stories"
+        | "reels"
+        | "marketplace"
+        | "search"
+        | "display"
+        | "pmax"
+      platform_enum: "meta" | "google" | "tiktok"
+      qa_status_enum: "pass" | "fail" | "needs_review"
+      spec_status_enum: "pending" | "pass" | "warn" | "fail" | "exception"
+      stage_state_enum:
+        | "pending"
+        | "in_progress"
+        | "passed"
+        | "failed"
+        | "overridden"
+        | "skipped"
+      verdict_severity_enum: "info" | "low" | "medium" | "high" | "critical"
       brief_status:
         | "draft"
         | "posted"
@@ -1235,7 +1813,7 @@ export type Database = {
         | "annotate"
         | "comment"
         | "user_edit"
-      iteration_author: "user" | "ekko"
+      iteration_author: "user" | "ekko" | "operator" | "system"
       pipeline_event_source_enum:
         | "worker"
         | "hermes-hook"
@@ -1257,7 +1835,7 @@ export type Database = {
         | "monitor"
         | "done"
         | "cancelled"
-      ratio: "1x1" | "9x16" | "16x9"
+      ratio: "1x1" | "9x16" | "16x9" | "4x5" | "1.91x1"
       service_type: "roofing" | "remodeling"
       sync_status: "running" | "ok" | "error"
       video_brief_status:
@@ -1411,9 +1989,71 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      ad_entity_kind_enum: ["campaign", "adset", "ad", "creative"],
+      ad_entity_state_enum: ["paused", "active", "archived", "deleted", "error"],
       ad_verdict: ["kill", "watch", "keep"],
       approval_decision_enum: ["approved", "rejected", "approved_with_caveat"],
       approval_status_enum: ["pending", "decided", "expired", "cancelled"],
+      compliance_verdict_enum: [
+        "pending",
+        "pass",
+        "fail",
+        "needs_review",
+        "override_released",
+      ],
+      copy_variant_status_enum: [
+        "draft",
+        "validated",
+        "approved",
+        "rejected",
+        "retired",
+      ],
+      cost_kind_enum: [
+        "image_gen",
+        "video_gen",
+        "vision_qa",
+        "copy_llm",
+        "meta_spend",
+        "other",
+      ],
+      creative_stage_enum: [
+        "creative_qa",
+        "compliance_review",
+        "copy",
+        "spec_validation",
+      ],
+      launch_package_status_enum: [
+        "assembling",
+        "validating",
+        "blocked",
+        "ready",
+        "approved",
+        "queued",
+        "live",
+        "failed",
+        "cancelled",
+      ],
+      placement_enum: [
+        "feed",
+        "stories",
+        "reels",
+        "marketplace",
+        "search",
+        "display",
+        "pmax",
+      ],
+      platform_enum: ["meta", "google", "tiktok"],
+      qa_status_enum: ["pass", "fail", "needs_review"],
+      spec_status_enum: ["pending", "pass", "warn", "fail", "exception"],
+      stage_state_enum: [
+        "pending",
+        "in_progress",
+        "passed",
+        "failed",
+        "overridden",
+        "skipped",
+      ],
+      verdict_severity_enum: ["info", "low", "medium", "high", "critical"],
       brief_status: [
         "draft",
         "posted",
@@ -1450,7 +2090,7 @@ export const Constants = {
         "comment",
         "user_edit",
       ],
-      iteration_author: ["user", "ekko"],
+      iteration_author: ["user", "ekko", "operator", "system"],
       pipeline_event_source_enum: [
         "worker",
         "hermes-hook",
@@ -1474,7 +2114,7 @@ export const Constants = {
         "done",
         "cancelled",
       ],
-      ratio: ["1x1", "9x16", "16x9"],
+      ratio: ["1x1", "9x16", "16x9", "4x5", "1.91x1"],
       service_type: ["roofing", "remodeling"],
       sync_status: ["running", "ok", "error"],
       video_brief_status: [

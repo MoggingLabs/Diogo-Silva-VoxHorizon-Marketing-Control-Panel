@@ -5,20 +5,31 @@ import { Bell } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
-import { HorizontalStepper } from "@/components/pipeline/HorizontalStepper";
+import { MonitorDashboard } from "@/components/monitor/MonitorDashboard";
 import { OperatorNarration } from "@/components/pipeline/OperatorNarration";
+import { PhaseStepper } from "@/components/pipeline/PhaseStepper";
 import { PipelineDetailRealtime } from "@/components/pipeline/PipelineDetailRealtime";
 import { StageConfiguration } from "@/components/pipeline/StageConfiguration";
+import { StageCopy } from "@/components/pipeline/StageCopy";
+import { StageCreativeReview } from "@/components/pipeline/StageCreativeReview";
 import { StageDone } from "@/components/pipeline/StageDone";
 import { StageGeneration } from "@/components/pipeline/StageGeneration";
 import { StageIdeation } from "@/components/pipeline/StageIdeation";
 import { StagePlaceholder } from "@/components/pipeline/StagePlaceholder";
 import { StageReview } from "@/components/pipeline/StageReview";
+import { StageVariantPlan } from "@/components/pipeline/StageVariantPlan";
+import { LaunchGate } from "@/components/launch/LaunchGate";
+import { getMonitorRows } from "@/lib/monitor/fetch";
 import { getPipeline } from "@/lib/pipeline/client";
+import {
+  getClientCplTarget,
+  getCopyVariants,
+  getReviewBundle,
+  getVariantPlan,
+} from "@/lib/review/fetch";
 import {
   PIPELINE_FORMAT_BADGE,
   PIPELINE_FORMAT_LABEL,
-  PIPELINE_STAGES,
   PIPELINE_STATUS_BADGE,
   PIPELINE_STATUS_LABEL,
   type Pipeline,
@@ -105,6 +116,27 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
     clients = (data ?? []) as typeof clients;
   }
 
+  // Per-creative review surfaces (P4.2–P4.6) read through the service-role
+  // fetch helpers (RLS deny-all on the new tables). We pull only what the
+  // current stage needs so legacy stages stay light.
+  const PER_CREATIVE: PipelineStatus[] = [
+    "creative_qa",
+    "compliance_review",
+    "copy",
+    "spec_validation",
+  ];
+  const reviewBundle =
+    PER_CREATIVE.includes(pipeline.status) || pipeline.status === "launch_handoff"
+      ? await getReviewBundle(pipeline.id)
+      : null;
+  // The copy stage lists a CopyComposer per creative; reviewBundle (fetched for
+  // the PER_CREATIVE set, which includes "copy") carries the creatives.
+  const copyVariants = pipeline.status === "copy" ? await getCopyVariants(pipeline.id) : [];
+  const variantPlan = pipeline.status === "variant_plan" ? await getVariantPlan(pipeline.id) : null;
+  const monitorRows = pipeline.status === "monitor" ? await getMonitorRows(pipeline.id) : [];
+  const cplTarget =
+    pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
+
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
   const isCancellable = pipeline.status !== "done" && pipeline.status !== "cancelled";
   // Spend approvals for this run surface in the global ApprovalQueue (header
@@ -157,10 +189,10 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         </div>
       ) : (
         <section
-          aria-label="Pipeline stages"
+          aria-label="Pipeline phases"
           className="rounded-lg border border-border bg-card px-4 py-4 sm:px-6 sm:py-5"
         >
-          <HorizontalStepper stages={[...PIPELINE_STAGES]} current={pipeline.status} />
+          <PhaseStepper current={pipeline.status} />
         </section>
       )}
 
@@ -194,6 +226,39 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
               />
             ) : pipeline.status === "generation" ? (
               <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
+            ) : (pipeline.status === "creative_qa" ||
+                pipeline.status === "spec_validation" ||
+                pipeline.status === "compliance_review") &&
+              reviewBundle ? (
+              <StageCreativeReview
+                pipelineId={pipeline.id}
+                mode={pipeline.status}
+                creatives={reviewBundle.creatives}
+                states={reviewBundle.states}
+                signedUrls={reviewBundle.signedUrls}
+              />
+            ) : pipeline.status === "copy" && reviewBundle ? (
+              <StageCopy
+                pipelineId={pipeline.id}
+                creatives={reviewBundle.creatives}
+                variants={copyVariants}
+              />
+            ) : pipeline.status === "variant_plan" ? (
+              <StageVariantPlan
+                pipelineId={pipeline.id}
+                testVariable={variantPlan?.test_variable ?? null}
+                hypothesis={variantPlan?.hypothesis ?? null}
+                cells={variantPlan?.cells ?? []}
+              />
+            ) : pipeline.status === "launch_handoff" && reviewBundle ? (
+              <LaunchGate
+                pipelineId={pipeline.id}
+                creatives={reviewBundle.creatives}
+                states={reviewBundle.states}
+                copyVariants={reviewBundle.copyVariants}
+              />
+            ) : pipeline.status === "monitor" ? (
+              <MonitorDashboard pipelineId={pipeline.id} rows={monitorRows} cplTarget={cplTarget} />
             ) : pipeline.status === "done" ? (
               <StageDone
                 pipeline={pipeline}
@@ -201,6 +266,8 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
                 videoBriefId={pipeline.video_brief_id}
               />
             ) : (
+              // finalize_assets (auto stage) + any legacy status fall through to
+              // the placeholder — no live run breaks (strangler-fig).
               <StagePlaceholder stageLabel={placeholder.label} upcoming={placeholder.wave} />
             )}
           </div>

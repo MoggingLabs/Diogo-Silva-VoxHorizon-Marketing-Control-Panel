@@ -32,15 +32,26 @@ afterEach(() => {
 });
 
 describe("PipelineDetailRealtime", () => {
-  it("subscribes to pipelines + pipeline_events filtered by the id", () => {
+  it("subscribes to pipelines + pipeline_events + creative_stage_state by id", () => {
     render(<PipelineDetailRealtime pipelineId="p1" />);
     const specs = realtime.listeners.map((l) => ({ table: l.table, filter: l.filter }));
     expect(specs).toEqual(
       expect.arrayContaining([
         { table: "pipelines", filter: "id=eq.p1" },
         { table: "pipeline_events", filter: "pipeline_id=eq.p1" },
+        { table: "creative_stage_state", filter: "pipeline_id=eq.p1" },
       ]),
     );
+  });
+
+  it("refreshes the grid when a creative_stage_state row changes (P4.8)", () => {
+    render(<PipelineDetailRealtime pipelineId="p1" />);
+    act(() => {
+      realtime.emit("creative_stage_state", "UPDATE", {
+        new: { creative_id: "a", stage: "creative_qa", status: "passed" },
+      });
+    });
+    expect(routerRefresh).toHaveBeenCalledTimes(1);
   });
 
   it("registers listeners (the relay hook owns its own teardown)", () => {
