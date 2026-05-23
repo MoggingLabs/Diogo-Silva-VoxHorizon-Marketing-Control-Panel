@@ -19,6 +19,7 @@ alter table copy_variants
   add column if not exists placement     placement_enum,
   add column if not exists description   text,
   add column if not exists pattern       text,
+  add column if not exists validation    jsonb not null default '{}'::jsonb,
   add column if not exists humanized_at  timestamptz,
   add column if not exists author        text not null default 'operator',
   add column if not exists approved_by   text,
