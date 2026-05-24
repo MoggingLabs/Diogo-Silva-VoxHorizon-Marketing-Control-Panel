@@ -131,6 +131,143 @@ def emit_pipeline_event(
     return None
 
 
+# Terminal vs open states for the durable pipeline_work_units ledger
+# (migration 0019). The ledger -- not the event-count heuristic -- is the
+# authority for "did the stage finish?".
+_WORK_UNIT_OPEN_STATUSES = {"queued", "running"}
+_WORK_UNIT_SUCCESS_STATUS = "done"
+
+
+# ---------------------------------------------------------------------------
+# Durable work-unit ledger (pipeline_work_units, migration 0019)
+# ---------------------------------------------------------------------------
+#
+# The event-COUNT closure heuristic (queued/running minus done/error over the
+# pipeline_events timeline) already mis-closed an all-failed batch once: with
+# no per-unit identity it cannot tell "all 4 renders failed" from "all 4
+# succeeded" -- both leave queued+running == done+error. pipeline_work_units is
+# the durable, key-addressable ledger seeded BEFORE dispatch, so a stage's
+# closure is exact:
+#
+#   open      = a unit is still in {queued, running}
+#   closed    = NO unit is open AND >= 1 unit exists
+#   succeeded = closed AND >= 1 unit reached 'done'   (all-error => NOT success)
+#
+# This mirrors the SQL predicate pipeline_work_closed(pipeline_id, stage) from
+# 0019; we evaluate it in the worker layer too so completion does not depend on
+# the 0024 trigger having fired.
+
+
+@dataclass(frozen=True)
+class WorkUnitState:
+    """Closure summary for an agent-work stage from ``pipeline_work_units``."""
+
+    total: int
+    """How many work units exist for ``(pipeline_id, stage)``. ``0`` means the
+    stage seeded no ledger rows -- callers should fall back to the event
+    heuristic for that stage."""
+
+    open: int
+    """Units still in ``queued`` / ``running``. ``> 0`` means work is in flight."""
+
+    done: int
+    """Units that reached the terminal success state ``done``."""
+
+    error: int
+    """Units that reached the terminal failure state ``error``."""
+
+    @property
+    def has_units(self) -> bool:
+        """True when the ledger has at least one row for this stage."""
+        return self.total > 0
+
+    @property
+    def closed(self) -> bool:
+        """True when every unit is terminal AND at least one unit exists.
+
+        This is the *closed* predicate -- it says nothing about success. An
+        all-error batch is ``closed`` but not ``succeeded``.
+        """
+        return self.total > 0 and self.open == 0
+
+    @property
+    def succeeded(self) -> bool:
+        """True when the stage is closed AND >= 1 unit reached ``done``.
+
+        Mirrors ``pipeline_work_closed`` from migration 0019: an all-failed
+        batch returns ``False`` so the stage never advances on failure.
+        """
+        return self.closed and self.done >= 1
+
+
+def fetch_work_unit_state(
+    *, pipeline_id: str, stage: PipelineStage
+) -> WorkUnitState:
+    """Summarise the ``pipeline_work_units`` ledger for ``(pipeline_id, stage)``.
+
+    Reads every unit row for the stage and buckets by terminal/open status.
+    Returns an all-zero :class:`WorkUnitState` (``has_units`` False) when the
+    stage seeded no ledger rows OR on a read error -- so callers transparently
+    fall back to the event-count heuristic rather than wrongly closing a stage
+    that simply has no ledger.
+    """
+    sb = get_supabase_admin()
+    try:
+        resp = (
+            sb.table("pipeline_work_units")
+            .select("status")
+            .eq("pipeline_id", pipeline_id)
+            .eq("stage", stage)
+            .execute()
+        )
+    except Exception as e:  # noqa: BLE001 -- treat a read error as "no ledger"
+        log.warning(
+            "work_unit_state_read_failed",
+            pipeline_id=pipeline_id,
+            stage=stage,
+            error=str(e),
+        )
+        return WorkUnitState(total=0, open=0, done=0, error=0)
+
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    total = 0
+    open_ = 0
+    done = 0
+    error = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        status = str(row.get("status") or "")
+        total += 1
+        if status in _WORK_UNIT_OPEN_STATUSES:
+            open_ += 1
+        elif status == _WORK_UNIT_SUCCESS_STATUS:
+            done += 1
+        elif status == "error":
+            error += 1
+    return WorkUnitState(total=total, open=open_, done=done, error=error)
+
+
+def work_stage_closed(*, pipeline_id: str, stage: PipelineStage) -> bool:
+    """True when the stage's work units are all terminal AND >= 1 exists.
+
+    Closure only -- says nothing about success (an all-error batch is closed).
+    Returns ``False`` when the stage seeded no ledger rows.
+    """
+    return fetch_work_unit_state(pipeline_id=pipeline_id, stage=stage).closed
+
+
+def work_stage_succeeded(*, pipeline_id: str, stage: PipelineStage) -> bool:
+    """True when the stage is closed AND >= 1 unit reached ``done``.
+
+    The all-failed guard applied in the worker layer: an all-error batch
+    returns ``False`` so the stage is never advanced as a success. Mirrors the
+    ``pipeline_work_closed`` SQL predicate (migration 0019) and the 0024
+    trigger's ``v_done >= 1`` guard.
+    """
+    return fetch_work_unit_state(pipeline_id=pipeline_id, stage=stage).succeeded
+
+
 # ---------------------------------------------------------------------------
 # Idempotency probes
 # ---------------------------------------------------------------------------
@@ -267,14 +404,13 @@ class GenerationState:
     """Idempotency outcome for ``/work/pipeline/generation``."""
 
     already_running: bool
-    """True if any non-terminal task events exist since the latest
-    ``stage_advanced→generation``. The route returns 200 with
-    ``already_running: true`` and skips the producer."""
+    """True if the generation stage still has work in flight. The route
+    returns 200 with ``already_running: true`` and skips the producer."""
 
     already_complete: bool
-    """True if at least one task event exists since the latest stage
-    advance AND every task event is terminal. The route returns 200 with
-    ``already_complete: true``."""
+    """True if generation has finished SUCCESSFULLY (at least one unit done
+    and no unit open). An all-failed batch is NOT complete -- the route may
+    re-dispatch. The route returns 200 with ``already_complete: true``."""
 
     started_at: str | None
     """The ``stage_advanced→generation`` timestamp, surfaced so the
@@ -282,8 +418,39 @@ class GenerationState:
 
 
 def generation_state(pipeline_id: str) -> GenerationState:
-    """Compute the idempotency state for the generation endpoint."""
+    """Compute the idempotency state for the generation endpoint.
+
+    Authority order:
+
+    1. **``pipeline_work_units`` ledger** (migration 0019) when the stage
+       seeded units. Closure is exact and key-addressable -- ``already_running``
+       is "a unit is still open", ``already_complete`` is "closed AND >= 1
+       done". Crucially an all-error batch is ``closed`` but NOT ``complete``,
+       so the documented count-heuristic mis-close (all-failed reaching done)
+       cannot happen. This guard lives in the worker layer, not just the 0024
+       trigger.
+
+    2. **Event-count heuristic** (``fetch_stage_events``) as the fallback when
+       the stage seeded no ledger rows -- preserving the prior behaviour for
+       any path that hasn't adopted the ledger yet.
+
+    ``started_at`` always comes from the ``stage_advanced→generation`` event so
+    the front-end "started N minutes ago" copy is unaffected by the source.
+    """
     snapshot = fetch_stage_events(pipeline_id=pipeline_id, stage="generation")
+    units = fetch_work_unit_state(pipeline_id=pipeline_id, stage="generation")
+
+    if units.has_units:
+        # Ledger is authoritative: open => running; closed+>=1 done => complete.
+        # An all-error batch (closed, done == 0) is neither running nor complete,
+        # so the route is free to re-dispatch instead of advancing on failure.
+        return GenerationState(
+            already_running=units.open > 0,
+            already_complete=units.succeeded,
+            started_at=snapshot.stage_advanced_at,
+        )
+
+    # Fallback: no ledger rows -> the legacy event-count heuristic.
     running = bool(snapshot.non_terminal_task_kinds)
     complete = snapshot.any_task_event and not running
     return GenerationState(

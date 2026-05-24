@@ -85,6 +85,17 @@ class _FakeTable:
         # Read paths
         if self.name == "pipelines":
             return SimpleNamespace(data=self.parent.pipeline_row)
+        if self.name == "pipeline_work_units":
+            # Durable closure ledger (migration 0019). Honour the
+            # (pipeline_id, stage) equality filters fetch_work_unit_state sets.
+            # Non-dict rows pass through unfiltered so the helper's own
+            # isinstance() guard is exercised (mirrors a stray REST row).
+            rows = list(self.parent.work_units)
+            for col, val in self._eqs:
+                rows = [
+                    r for r in rows if not isinstance(r, dict) or r.get(col) == val
+                ]
+            return SimpleNamespace(data=rows)
         if self.name == "pipeline_events":
             # Mimic the two-query strategy: most-recent stage_advanced
             # then "events since cutoff". The caller passes a kind filter
@@ -108,6 +119,7 @@ class _FakeSupabase:
     def __init__(self) -> None:
         self.events: list[dict] = []
         self.pipeline_row: dict | None = None
+        self.work_units: list[dict] = []
         self.inserts: list[tuple[str, dict]] = []
         self.raise_on_execute: bool = False
         self.execute_returns_none: bool = False
@@ -658,3 +670,199 @@ def test_pipeline_is_cancelled_false_on_supabase_error(
     next emit_pipeline_event call would surface a real outage."""
     fake_sb.raise_on_execute = True
     assert pr.pipeline_is_cancelled("p-err") is False
+
+
+# ===========================================================================
+# Durable work-unit ledger: closure authoritative on pipeline_work_units (0019)
+# ===========================================================================
+#
+# These exercise the replacement for the event-COUNT closure heuristic. The
+# ledger is exact and key-addressable: closure = no open unit AND >= 1 exists;
+# success = closed AND >= 1 done. The all-failed batch -- which the count
+# heuristic mis-closed once -- must read as closed-but-NOT-success.
+
+
+def _unit(pipeline_id: str, stage: str, status: str) -> dict:
+    return {"pipeline_id": pipeline_id, "stage": stage, "status": status}
+
+
+def test_fetch_work_unit_state_empty_when_no_ledger(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """No ledger rows -> all-zero state, has_units False (callers fall back)."""
+    fake_sb.work_units = []
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.total == 0
+    assert st.has_units is False
+    assert st.closed is False
+    assert st.succeeded is False
+
+
+def test_fetch_work_unit_state_open_when_unit_running(
+    fake_sb: _FakeSupabase,
+) -> None:
+    fake_sb.work_units = [
+        _unit("p", "generation", "done"),
+        _unit("p", "generation", "running"),
+    ]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.total == 2
+    assert st.open == 1
+    assert st.done == 1
+    assert st.closed is False  # a running unit keeps the stage open
+    assert st.succeeded is False
+
+
+def test_fetch_work_unit_state_queued_counts_as_open(
+    fake_sb: _FakeSupabase,
+) -> None:
+    fake_sb.work_units = [_unit("p", "generation", "queued")]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.open == 1
+    assert st.closed is False
+
+
+def test_work_stage_succeeded_when_closed_with_a_done(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Closed AND >= 1 done -> success."""
+    fake_sb.work_units = [
+        _unit("p", "generation", "done"),
+        _unit("p", "generation", "error"),
+    ]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.closed is True
+    assert st.succeeded is True
+    assert pr.work_stage_closed(pipeline_id="p", stage="generation") is True
+    assert pr.work_stage_succeeded(pipeline_id="p", stage="generation") is True
+
+
+def test_work_stage_all_failed_is_closed_but_not_success(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """The documented bug guard: an ALL-ERROR batch is closed but NOT a
+    success, so the stage must never advance on failure."""
+    fake_sb.work_units = [
+        _unit("p", "generation", "error"),
+        _unit("p", "generation", "error"),
+    ]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.closed is True  # all terminal
+    assert st.succeeded is False  # but zero done
+    assert pr.work_stage_succeeded(pipeline_id="p", stage="generation") is False
+
+
+def test_fetch_work_unit_state_scopes_by_pipeline_and_stage(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Units for a different pipeline / stage are not counted."""
+    fake_sb.work_units = [
+        _unit("p", "generation", "done"),
+        _unit("p", "finalize_assets", "running"),  # different stage
+        _unit("other", "generation", "running"),  # different pipeline
+    ]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.total == 1
+    assert st.done == 1
+    assert st.open == 0
+    assert st.succeeded is True
+
+
+def test_fetch_work_unit_state_ignores_non_dict_rows(
+    fake_sb: _FakeSupabase,
+) -> None:
+    fake_sb.work_units = [
+        _unit("p", "generation", "done"),
+        "garbage",  # type: ignore[list-item]
+    ]
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.total == 1
+    assert st.done == 1
+
+
+def test_fetch_work_unit_state_read_error_is_no_ledger(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """A read error degrades to the all-zero state so the caller falls back
+    to the event heuristic rather than wrongly closing the stage."""
+    fake_sb.raise_on_execute = True
+    st = pr.fetch_work_unit_state(pipeline_id="p", stage="generation")
+    assert st.has_units is False
+    assert st.closed is False
+
+
+# ---------------------------------------------------------------------------
+# generation_state now reads the ledger first, event heuristic as fallback
+# ---------------------------------------------------------------------------
+
+
+def _gen_advance(pipeline_id: str = "p") -> dict:
+    return _event(
+        pipeline_id,
+        id="e0",
+        kind="stage_advanced",
+        stage="generation",
+        created_at="2025-01-01T00:00:00Z",
+    )
+
+
+def test_generation_state_ledger_running_when_unit_open(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """An open ledger unit => already_running, regardless of events."""
+    fake_sb.events = [_gen_advance()]
+    fake_sb.work_units = [_unit("p", "generation", "running")]
+    s = pr.generation_state("p")
+    assert s.already_running is True
+    assert s.already_complete is False
+    assert s.started_at == "2025-01-01T00:00:00Z"
+
+
+def test_generation_state_ledger_complete_when_succeeded(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """Ledger closed with a done => already_complete."""
+    fake_sb.events = [_gen_advance()]
+    fake_sb.work_units = [
+        _unit("p", "generation", "done"),
+        _unit("p", "generation", "error"),
+    ]
+    s = pr.generation_state("p")
+    assert s.already_running is False
+    assert s.already_complete is True
+
+
+def test_generation_state_ledger_all_failed_neither_running_nor_complete(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """The key regression: an ALL-FAILED ledger batch is neither running nor
+    complete, so the route is free to re-dispatch instead of advancing."""
+    fake_sb.events = [_gen_advance()]
+    fake_sb.work_units = [
+        _unit("p", "generation", "error"),
+        _unit("p", "generation", "error"),
+    ]
+    s = pr.generation_state("p")
+    assert s.already_running is False
+    assert s.already_complete is False
+
+
+def test_generation_state_falls_back_to_events_without_ledger(
+    fake_sb: _FakeSupabase,
+) -> None:
+    """No ledger rows => the legacy event-count heuristic still drives state."""
+    fake_sb.work_units = []
+    fake_sb.events = [
+        _gen_advance(),
+        _event(
+            "p",
+            id="e1",
+            kind="task_done",
+            stage="generation",
+            created_at="2025-01-01T00:00:01Z",
+        ),
+    ]
+    s = pr.generation_state("p")
+    # Event heuristic: a terminal-only timeline reads as complete.
+    assert s.already_running is False
+    assert s.already_complete is True
