@@ -1,0 +1,77 @@
+# Operator policy profile for voxhorizon-approvals.
+#
+# This is the policy.yaml the DEDICATED OPERATOR agent (hermes-agent-operator)
+# runs with. Deployment drops this file in as the operator container's
+# `policy.yaml`; it does NOT replace Ekko's own policy.yaml (Ekko keeps the
+# shipped empty overlay, so Ekko's behavior is unchanged).
+#
+# It maps one-for-one to the pipeline-operator skill's MCP tools
+# (ekko-skills/pipeline-operator/mcp_server.py, which delegates to helper.py).
+# The approval plugin gates by tool name, so these keys reference the tools'
+# EXACT FULL names as Hermes presents them to the pre_tool_call hook.
+#
+# MCP namespacing (verified live on the VPS): Hermes presents an MCP tool to
+# the pre_tool_call hook as `mcp_<server>_<tool>` with SINGLE underscores. The
+# server name "pipeline-operator" is normalized to "pipeline_operator", and the
+# tool functions are already named `pipeline_operator_<verb>`, so the live names
+# are doubled: e.g. `mcp_pipeline_operator_pipeline_operator_render`. List those
+# EXACT FULL names here — policy_overlay matches by exact equality (no fuzzy
+# suffix matching), so a short name like `pipeline_operator_render` is NOT gated.
+#
+# Merge semantics (see policy_overlay.py / the plugin README): in-code
+# defaults always win over a softening override; gating wins over allowing.
+
+# Renders are FREE by default (the operator renders ideation — and finals when
+# the manager keeps the free model — on the manager's ChatGPT/Codex subscription,
+# $0). The render gate was removed LIVE on the VPS so the operator runs the whole
+# pipeline without pestering the manager for a spend approval on every render.
+# This file is the source `operator-deploy.sh` deploys, so it MUST match the live
+# state — with render in the allowlist below — or a redeploy would silently
+# RE-GATE renders (the footgun). The manager still supervises spend at the
+# dashboard STAGE gates (brief review, concept picks, finals approval);
+# per-render long-poll gating is intentionally gone.
+#
+# The ONE tool that DOES require approval is the irreversible Meta launch /
+# activate (the HARD launch gate): creating live ad entities spends real money
+# and cannot be undone, so it long-polls the dashboard for the manager's audited
+# approval before the operator's MCP creates anything. PAUSED-first is the
+# operator's contract; this gate is the server-side backstop. (The launch tool
+# is the integrations agent's; its name is listed here so the gate is in place
+# the moment that tool ships.)
+extra_requires_approval:
+  - mcp_pipeline_operator_pipeline_operator_launch
+  - mcp_Meta_ads_activate_entity
+
+# The read/client-read tools are pure GETs (no spend), the brief tool is a free
+# Supabase write the manager reviews via the dashboard STAGE gate, and the
+# render tool is allowlisted (renders are free; the manager gates spend at the
+# stage gates). The P3 stage-persist tools (qa_result / compliance_result /
+# copy / spec_result / finalize_result / monitor_result / signal) are all free
+# DB writes that record evidence + roll the per-creative gate forward — they
+# clear NO gate (the worker adjudicates qa/compliance; the manager clears gates),
+# so they are allowlisted to keep the operator's per-stage loop running without
+# a round-trip. The Meta-launch tool is the EXCEPTION (extra_requires_approval
+# above). Shell stays blocklisted below.
+allowlist:
+  - mcp_pipeline_operator_pipeline_operator_read
+  - mcp_pipeline_operator_pipeline_operator_client_read
+  - mcp_pipeline_operator_pipeline_operator_brief
+  - mcp_pipeline_operator_pipeline_operator_render
+  - mcp_pipeline_operator_pipeline_operator_qa_result
+  - mcp_pipeline_operator_pipeline_operator_compliance_result
+  - mcp_pipeline_operator_pipeline_operator_copy
+  - mcp_pipeline_operator_pipeline_operator_spec_result
+  - mcp_pipeline_operator_pipeline_operator_finalize_result
+  - mcp_pipeline_operator_pipeline_operator_monitor_result
+  - mcp_pipeline_operator_pipeline_operator_signal
+
+# Hard-block the shell/code tools. A focused marketing operator authors brief
+# and concept payloads directly (in reasoning) and persists them via the MCP
+# pipeline tools — it never needs a shell. Blocking these (instant reject, no
+# long-poll) stops the operator from shelling out to run helper.py, which would
+# otherwise hit the spend-gate long-poll and hang for the full timeout. The
+# worker validates every payload server-side, so authoring-by-reasoning is safe.
+blocklist:
+  - execute_code
+  - terminal
+  - shell

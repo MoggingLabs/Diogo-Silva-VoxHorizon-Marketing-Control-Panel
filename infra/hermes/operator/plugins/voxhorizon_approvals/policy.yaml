@@ -1,0 +1,31 @@
+# Operator-tunable policy overrides for voxhorizon-approvals.
+#
+# This file lives next to plugin.yaml in the deployed plugin directory
+# (/opt/data/home/.hermes/plugins/voxhorizon-approvals/policy.yaml on the
+# VPS) and is reloaded on file-mtime change so the operator can widen or
+# narrow the policy without restarting Ekko.
+#
+# Three keys are recognised:
+#
+#   allowlist:
+#     Tools added here join the in-code ``ALLOWLIST``. Use only for
+#     tools that are PROVABLY read-only or have no security impact.
+#
+#   extra_requires_approval:
+#     Tools added here join the in-code ``REQUIRES_APPROVAL``. Use this
+#     to cover internal tools the operator wants gated even though the
+#     plugin doesn't know about them.
+#
+#   blocklist:
+#     Tools added here are ALWAYS rejected with no operator prompt.
+#     Reserved for known-bad tools; should be empty in normal use.
+#
+# In-code defaults always WIN over a softening override: a tool can be
+# added to ``allowlist`` here but NOT removed from
+# ``ALWAYS_ASK_PATTERNS`` (those are baked into the binary on purpose).
+
+allowlist: []
+
+extra_requires_approval: []
+
+blocklist: []
