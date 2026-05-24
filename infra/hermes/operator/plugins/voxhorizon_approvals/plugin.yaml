@@ -1,0 +1,32 @@
+# voxhorizon-approvals — Hermes/Ekko plugin manifest.
+#
+# Deployed on the VPS to `/opt/data/home/.hermes/plugins/voxhorizon-approvals/`.
+# Hermes reads this file when it loads the plugin; the entry point is the
+# package's ``register(ctx)`` function in __init__.py.
+#
+# Performance budget (enforced by the design, asserted by tests):
+#   * Allowlisted tool calls: <1ms (in-process map lookup, no I/O)
+#   * Cached approvals:        <1ms (in-process dict lookup)
+#   * First-time ask:          ~30ms RTT + operator response time
+#
+# Fail-closed semantics: every error path (worker unreachable, env unset,
+# invalid response, plugin bug) results in ``{"action": "block", ...}``
+# so a misconfigured plugin can never silently widen the agent's reach.
+name: voxhorizon-approvals
+version: "1.0"
+description: |
+  Dashboard-driven tool-call approvals. Allowlists safe tools, caches
+  per-session "approve-and-remember" decisions, and POSTs to the
+  VoxHorizon dashboard worker for sensitive ones. Fail-closed.
+requires_env:
+  # Base URL of the VoxHorizon worker (FastAPI). Example: http://worker:8000
+  # The plugin POSTs to ``$VOXHORIZON_APPROVAL_WORKER_URL/work/hermes/approval``.
+  - VOXHORIZON_APPROVAL_WORKER_URL
+  # Shared bearer token (same value the worker reads from its environment).
+  # NEVER the dashboard ``WORKER_SHARED_SECRET`` and NEVER the hook secret.
+  - VOXHORIZON_APPROVAL_TOKEN
+hooks:
+  # Single hook registered by ``register(ctx)``; surfaced here for
+  # documentation / static inspection. Hermes does NOT use this list — it
+  # invokes ``register`` and lets the plugin wire whatever it wants.
+  - pre_tool_call

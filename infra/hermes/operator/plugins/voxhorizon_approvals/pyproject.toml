@@ -1,0 +1,8 @@
+[tool.pytest.ini_options]
+# Scope pytest to the tests/ directory so it doesn't try to import the plugin
+# root's __init__.py as a test module — that file uses relative imports which
+# only resolve when Hermes' plugin loader has set up the synthetic package
+# context. The conftest.py in this directory does the same alias setup for
+# pytest's import system; testpaths just keeps pytest from collecting
+# __init__.py itself.
+testpaths = ["tests"]

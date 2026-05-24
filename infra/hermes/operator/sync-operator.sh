@@ -35,15 +35,33 @@ RESTART=0
 PULL=1
 WITH_PLUGIN=0
 
-OPERATOR_SKILLS=(
+# The operator agent's OWN skills live in the self-contained operator home
+# (infra/hermes/operator/skills) so the agent does not depend on the legacy
+# ekko-skills namespace. The remaining gate/rubric skills are still sourced from
+# ekko-skills (shared provenance with the worker's seeded compliance/QA rules).
+OPERATOR_OWNED_DIR="$REPO/infra/hermes/operator/skills"
+SHARED_SKILLS_DIR="$REPO/ekko-skills"
+OPERATOR_OWNED_SKILLS=(
+  image-ad-authoring
+  pipeline-operator
+  video-ad-authoring
+)
+SHARED_SKILLS=(
   ad-compliance
   campaign-launch
   campaign-monitor
   copy-authoring
   creative-qa
-  image-ad-authoring
-  pipeline-operator
 )
+OPERATOR_SKILLS=("${OPERATOR_OWNED_SKILLS[@]}" "${SHARED_SKILLS[@]}")
+
+# Resolve the repo source dir for a skill (operator-owned home vs shared ekko).
+skill_src() {
+  for o in "${OPERATOR_OWNED_SKILLS[@]}"; do
+    [ "$o" = "$1" ] && { echo "$OPERATOR_OWNED_DIR/$1"; return; }
+  done
+  echo "$SHARED_SKILLS_DIR/$1"
+}
 EXCLUDES=(--exclude 'tests/' --exclude '__pycache__/' --exclude '*.pyc' --exclude '.venv/' --exclude '*.log')
 
 while [ $# -gt 0 ]; do
@@ -92,7 +110,7 @@ fi
 echo "repo at $(gitc rev-parse --short HEAD 2>/dev/null || echo '?')"
 
 SOUL_SRC="$REPO/infra/hermes/operator/SOUL.md"
-PLUGIN_SRC="$REPO/ekko-plugins/voxhorizon_approvals"
+PLUGIN_SRC="$REPO/infra/hermes/operator/plugins/voxhorizon_approvals"
 DRY="--dry-run"; [ "$APPLY" -eq 1 ] && DRY=""
 
 # --- backup the touched surface before writing ---
@@ -106,10 +124,13 @@ if [ "$APPLY" -eq 1 ]; then
 fi
 
 # --- sync each operator skill (scoped --delete; generic skills untouched) ---
+# Operator-owned skills come from the self-contained operator home; the shared
+# gate/rubric skills still come from ekko-skills (see skill_src).
 for s in "${OPERATOR_SKILLS[@]}"; do
-  if [ ! -d "$REPO/ekko-skills/$s" ]; then echo "WARN: repo skill missing, skipping: $s"; continue; fi
-  log "skill $s ${DRY:+(dry-run)}"
-  $SUDO rsync -a --delete $DRY --itemize-changes "${EXCLUDES[@]}" "$REPO/ekko-skills/$s/" "$DATA/skills/$s/"
+  SRC="$(skill_src "$s")"
+  if [ ! -d "$SRC" ]; then echo "WARN: repo skill missing, skipping: $s ($SRC)"; continue; fi
+  log "skill $s ${DRY:+(dry-run)} [from ${SRC#"$REPO"/}]"
+  $SUDO rsync -a --delete $DRY --itemize-changes "${EXCLUDES[@]}" "$SRC/" "$DATA/skills/$s/"
 done
 
 # --- SOUL.md ---
