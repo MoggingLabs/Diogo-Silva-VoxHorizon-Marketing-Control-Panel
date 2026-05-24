@@ -403,3 +403,178 @@ def test_verify_webhook_signature() -> None:
     assert KieVideoClient.verify_webhook_signature(task_id, ts, "wrong", secret) is False
     assert KieVideoClient.verify_webhook_signature("", ts, good, secret) is False
     assert KieVideoClient.verify_webhook_signature(task_id, ts, good, "") is False
+
+
+def test_verify_webhook_signature_duplicate_is_stable() -> None:
+    """A replayed (identical) signature verifies the same way every time -- the
+    callback receiver leans on this for its duplicate-callback 200 no-op."""
+    secret = "whk-secret"
+    task_id = "task-dup"
+    ts = "1748000111"
+    good = base64.b64encode(
+        hmac.new(secret.encode(), f"{task_id}.{ts}".encode(), hashlib.sha256).digest()
+    ).decode()
+    assert KieVideoClient.verify_webhook_signature(task_id, ts, good, secret) is True
+    assert KieVideoClient.verify_webhook_signature(task_id, ts, good, secret) is True
+
+
+# ---------------------------------------------------------------------------
+# poll_status (single-shot probe for the callback + reconciliation sweep)
+# ---------------------------------------------------------------------------
+
+
+def test_poll_status_veo_success() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "data": {
+                    "successFlag": 1,
+                    "response": {"resultUrls": ["https://kie/ps.mp4"]},
+                },
+            },
+        )
+
+    client = KieVideoClient(api_key="k", transport=_transport(handler))
+    status = asyncio.run(client.poll_status("veo-ps", is_veo=True))
+    assert status.state == "success"
+    assert status.urls == ["https://kie/ps.mp4"]
+
+
+def test_poll_status_veo_pending() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 200, "data": {"successFlag": 0}})
+
+    client = KieVideoClient(api_key="k", transport=_transport(handler))
+    status = asyncio.run(client.poll_status("veo-pend", is_veo=True))
+    assert status.state == "pending"
+    assert status.urls == []
+
+
+def test_poll_status_veo_failed() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"code": 200, "data": {"successFlag": 2, "errorMessage": "nsfw"}},
+        )
+
+    client = KieVideoClient(api_key="k", transport=_transport(handler))
+    status = asyncio.run(client.poll_status("veo-bad", is_veo=True))
+    assert status.state == "failed"
+    assert status.error == "nsfw"
+
+
+def test_poll_status_unified_success_and_fail() -> None:
+    def ok(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "data": {
+                    "state": "success",
+                    "resultJson": json.dumps({"resultUrls": ["https://k/u.mp4"]}),
+                },
+            },
+        )
+
+    def fail(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"code": 200, "data": {"state": "fail", "failMsg": "quota"}}
+        )
+
+    c_ok = KieVideoClient(api_key="k", transport=_transport(ok))
+    s_ok = asyncio.run(c_ok.poll_status("u-1", is_veo=False))
+    assert s_ok.state == "success" and s_ok.urls == ["https://k/u.mp4"]
+
+    c_fail = KieVideoClient(api_key="k", transport=_transport(fail))
+    s_fail = asyncio.run(c_fail.poll_status("u-2", is_veo=False))
+    assert s_fail.state == "failed" and s_fail.error == "quota"
+
+
+def test_poll_status_http_error_raises() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    client = KieVideoClient(api_key="k", transport=_transport(handler))
+    with pytest.raises(KieVideoError, match="record-info responded 500"):
+        asyncio.run(client.poll_status("x", is_veo=True))
+
+
+def test_poll_status_fake_mode_is_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_RENDER", "true")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    client = KieVideoClient()
+    status = asyncio.run(client.poll_status("fake-vid-abc", is_veo=True))
+    assert status.state == "success"
+    assert status.urls and status.urls[0].endswith(".mp4")
+
+
+# ---------------------------------------------------------------------------
+# persist_submitted_render (the durable safety-net write at submit, E5.2)
+# ---------------------------------------------------------------------------
+
+
+def test_persist_submitted_render_inserts_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.conftest import FakeSupabase
+
+    sb = FakeSupabase()
+    monkeypatch.setattr(
+        "src.supabase_client.get_supabase_admin", lambda: sb
+    )
+    wrote = vid_mod.persist_submitted_render(
+        task_id="veo-persist", is_veo=True, prompt="a roof"
+    )
+    assert wrote is True
+    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    assert len(rows) == 1
+    assert rows[0]["task_id"] == "veo-persist"
+    assert rows[0]["status"] == "submitted"
+    assert rows[0]["is_veo"] is True
+
+
+def test_persist_submitted_render_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.conftest import FakeSupabase
+
+    sb = FakeSupabase()
+    sb.set_single("video_render_tasks", {"task_id": "dup"})
+    monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
+    wrote = vid_mod.persist_submitted_render(task_id="dup", is_veo=False)
+    assert wrote is False
+    assert not [r for n, r in sb.inserts if n == "video_render_tasks"]
+
+
+def test_persist_submitted_render_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom() -> object:
+        raise RuntimeError("no supabase")
+
+    monkeypatch.setattr("src.supabase_client.get_supabase_admin", _boom)
+    # Best-effort: a persistence failure must NOT abort a submit.
+    assert vid_mod.persist_submitted_render(task_id="t", is_veo=True) is False
+
+
+def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """generate_video's submit writes the durable video_render_tasks row."""
+    from tests.conftest import FakeSupabase
+
+    sb = FakeSupabase()
+    monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "/veo/generate" in url:
+            return httpx.Response(200, json={"code": 200, "data": {"taskId": "veo-sp"}})
+        return httpx.Response(
+            200,
+            json={
+                "code": 200,
+                "data": {"successFlag": 1, "response": {"resultUrls": ["https://k/x.mp4"]}},
+            },
+        )
+
+    client = KieVideoClient(api_key="k", transport=_transport(handler))
+    asyncio.run(client.generate_video("p"))
+    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    assert rows and rows[0]["task_id"] == "veo-sp"

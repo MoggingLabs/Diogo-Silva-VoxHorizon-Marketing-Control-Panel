@@ -360,7 +360,7 @@ def fake_supabase(monkeypatch: pytest.MonkeyPatch) -> FakeSupabase:
     sb = FakeSupabase()
 
     from src import supabase_client
-    from src.routes import integrations, pipeline_tools, qa_compliance
+    from src.routes import integrations, pipeline_tools, qa_compliance, video_callback
     from src.services import atomic_inserts, cost_ledger, pipeline_runner
 
     for mod in (
@@ -371,6 +371,7 @@ def fake_supabase(monkeypatch: pytest.MonkeyPatch) -> FakeSupabase:
         pipeline_runner,
         atomic_inserts,
         cost_ledger,
+        video_callback,
     ):
         if hasattr(mod, "get_supabase_admin"):
             monkeypatch.setattr(mod, "get_supabase_admin", lambda: sb)
