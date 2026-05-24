@@ -1,0 +1,19 @@
+# CODEOWNERS: review ownership for single-source-of-truth artifacts
+#
+# Per ADR-0003 (Single source of truth per invariant), the artifacts below
+# are the one authoritative home for a cross-cutting invariant. Changes to
+# them must be reviewed by the owner so drift and accidental edits are
+# caught at PR time. The last matching pattern wins.
+
+# Schema is defined by forward-only migrations (see db/SCHEMA.md).
+/db/migrations/**                         @pveloso01
+
+# Generated Supabase types (derived from the live schema, not hand-edited).
+/lib/supabase/types.gen.ts                @pveloso01
+
+# Compliance ruleset surface (versioned rules live in compliance_rule data).
+/worker/src/services/compliance_rules.py  @pveloso01
+
+# Stage-list manifest: the canonical stage list (added in a later milestone;
+# the pattern is reserved here so ownership applies the moment the file lands).
+/lib/pipeline/stages.ts                   @pveloso01
