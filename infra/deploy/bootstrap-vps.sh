@@ -45,7 +45,7 @@ VOXHORIZON_ROOT="${VOXHORIZON_ROOT:-/opt/voxhorizon}"
 REPO_DIR="${VOXHORIZON_ROOT}/repo"
 ENV_FILE="${VOXHORIZON_ROOT}/.env"
 COMPOSE_LINK="${VOXHORIZON_ROOT}/docker-compose.yml"
-REPO_URL="https://github.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git"
+REPO_URL="https://github.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git"
 
 DRY_RUN=0
 SKIP_FIREWALL=0

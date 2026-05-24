@@ -16,7 +16,7 @@ Preferred (download, inspect, then run):
 
 ```bash
 ssh root@<vps-host>
-curl -fsSL https://raw.githubusercontent.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh \
+curl -fsSL https://raw.githubusercontent.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh \
   -o /root/bootstrap-vps.sh
 less /root/bootstrap-vps.sh                # read it before executing
 bash /root/bootstrap-vps.sh
@@ -25,7 +25,7 @@ bash /root/bootstrap-vps.sh
 One-liner (only if you trust the source and have already inspected the script once):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh | sudo bash
 ```
 
 Useful flags:
@@ -72,8 +72,8 @@ v1 production is a single-host Docker Compose stack on one Hostinger VPS. Three 
 | Service             | Image                                        | Managed by | Public?   | Port             | Purpose                                                                                            |
 | ------------------- | -------------------------------------------- | ---------- | --------- | ---------------- | -------------------------------------------------------------------------------------------------- |
 | `caddy`             | `caddy:2-alpine`                             | ours       | yes       | `80/443/443-udp` | TLS termination + reverse proxy to `web` only.                                                     |
-| `web`               | `ghcr.io/pveloso01/voxhorizon-web:<tag>`     | ours       | via Caddy | (none)           | Next.js 15 standalone server, port 3000 on the compose network.                                    |
-| `worker`            | `ghcr.io/pveloso01/voxhorizon-worker:<tag>`  | ours       | no        | (none)           | FastAPI Hermes bridge. Mounts `/var/run/docker.sock` rw + `group_add: docker`. Port 8000 internal. |
+| `web`               | `ghcr.io/mogginglabs/voxhorizon-web:<tag>`     | ours       | via Caddy | (none)           | Next.js 15 standalone server, port 3000 on the compose network.                                    |
+| `worker`            | `ghcr.io/mogginglabs/voxhorizon-worker:<tag>`  | ours       | no        | (none)           | FastAPI Hermes bridge. Mounts `/var/run/docker.sock` rw + `group_add: docker`. Port 8000 internal. |
 | `hermes-agent-ekko` | `ghcr.io/hostinger/hvps-hermes-agent:latest` | operator   | no\*      | (varies)         | Hermes runtime + 42 marketing skills + 3 dashboard-aware skills + `voxhorizon-approvals` plugin.   |
 
 \* `hermes-agent-ekko` exposes `ttyd :4860` on localhost only by default; it has no public hostname. Our worker addresses it via the shared Docker socket using the container name `HERMES_CONTAINER_NAME=hermes-agent-ekko`. The worker is reachable only at `http://worker:8000` over the Docker network; the host firewall blocks inbound `:8000`.
@@ -159,14 +159,14 @@ Plus a manual `workflow_dispatch` trigger for bootstrap, hotfix, and validation 
 The pipeline is three workflows working together:
 
 1. **`build-web.yml`** — checks out the repo, sets up Buildx, logs into GHCR with the run's `GITHUB_TOKEN`, builds the repo-root `Dockerfile` (Next.js standalone), and pushes:
-   - `ghcr.io/pveloso01/voxhorizon-web:latest`
-   - `ghcr.io/pveloso01/voxhorizon-web:<commit-sha>`
+   - `ghcr.io/mogginglabs/voxhorizon-web:latest`
+   - `ghcr.io/mogginglabs/voxhorizon-web:<commit-sha>`
 
    `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and `NEXT_PUBLIC_VAPID_PUBLIC_KEY` are passed as Docker `--build-arg`s from GitHub Actions repo secrets (see [`SECRETS.md`](../../SECRETS.md#github-actions-deploy-secrets)). Next.js inlines them at compile time.
 
 2. **`build-worker.yml`** — checks out the repo, sets up Buildx, logs into GHCR, builds `worker/Dockerfile` (context: `worker/`), and pushes:
-   - `ghcr.io/pveloso01/voxhorizon-worker:latest`
-   - `ghcr.io/pveloso01/voxhorizon-worker:<commit-sha>`
+   - `ghcr.io/mogginglabs/voxhorizon-worker:latest`
+   - `ghcr.io/mogginglabs/voxhorizon-worker:<commit-sha>`
 
    The worker reads every secret at runtime from `/opt/voxhorizon/.env`. No build-time secrets.
 
@@ -203,7 +203,7 @@ The dashboard is broken; the worker is fine.
 
 1. Find the previous web SHA. Either:
    - GitHub Actions history (last green `build-web.yml` run before the bad one) and copy the commit SHA.
-   - Or the GHCR tags page: `https://github.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/pkgs/container/voxhorizon-web`.
+   - Or the GHCR tags page: `https://github.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/pkgs/container/voxhorizon-web`.
 
 2. SSH in and pin **only** the web container:
 
@@ -211,7 +211,7 @@ The dashboard is broken; the worker is fine.
    ssh deploy@<vps-host>
    cd /opt/voxhorizon
    # Pull the rollback image explicitly so it's local
-   docker compose pull ghcr.io/pveloso01/voxhorizon-web:<prev-web-sha>
+   docker compose pull ghcr.io/mogginglabs/voxhorizon-web:<prev-web-sha>
    # Roll only the web service to the pinned tag (worker stays on current)
    WEB_IMAGE_TAG=<prev-web-sha> docker compose up -d web
    # Confirm
@@ -236,7 +236,7 @@ The worker is broken; the dashboard is fine. (Caveat: a broken worker often surf
    ```bash
    ssh deploy@<vps-host>
    cd /opt/voxhorizon
-   docker compose pull ghcr.io/pveloso01/voxhorizon-worker:<prev-worker-sha>
+   docker compose pull ghcr.io/mogginglabs/voxhorizon-worker:<prev-worker-sha>
    WORKER_IMAGE_TAG=<prev-worker-sha> docker compose up -d worker
    # Confirm
    docker compose ps

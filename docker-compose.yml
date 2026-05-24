@@ -15,7 +15,7 @@ services:
     build:
       context: ./worker
       dockerfile: Dockerfile
-    image: ghcr.io/pveloso01/voxhorizon-worker:${WORKER_IMAGE_TAG:-latest}
+    image: ghcr.io/mogginglabs/voxhorizon-worker:${WORKER_IMAGE_TAG:-latest}
     restart: unless-stopped
     # Production path: env file lives at the canonical absolute path on
     # the VPS (chmod 600, owned by the deploy user). Dev override:
@@ -91,7 +91,7 @@ services:
         NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
         NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
         NEXT_PUBLIC_VAPID_PUBLIC_KEY: ${NEXT_PUBLIC_VAPID_PUBLIC_KEY:-}
-    image: ghcr.io/pveloso01/voxhorizon-web:${WEB_IMAGE_TAG:-latest}
+    image: ghcr.io/mogginglabs/voxhorizon-web:${WEB_IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file:
       - /opt/voxhorizon/.env

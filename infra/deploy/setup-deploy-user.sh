@@ -116,7 +116,7 @@ cat <<EOF
          from="<gh-actions-cidr>",no-port-forwarding,no-agent-forwarding,no-X11-forwarding ssh-ed25519 AAAA... github-actions-deploy
 
     2. Clone the repo into ${VOXHORIZON_ROOT} as the deploy user:
-         sudo -u ${DEPLOY_USER} git clone https://github.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git ${VOXHORIZON_ROOT}
+         sudo -u ${DEPLOY_USER} git clone https://github.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git ${VOXHORIZON_ROOT}
        (Or move an existing checkout in and fix ownership.)
 
     3. Drop /opt/voxhorizon/.env (chmod 600, owned by ${DEPLOY_USER}:${DEPLOY_USER}).

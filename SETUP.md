@@ -67,7 +67,7 @@ These are one-time. Mark them off in the project secrets vault as they're create
 
 ```bash
 mkdir -p ~/github && cd ~/github
-git clone git@github.com:pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git
+git clone git@github.com:MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git
 cd Diogo-Silva-VoxHorizon-Marketing-Control-Panel
 pnpm install
 cd worker && uv sync --extra dev && cd ..

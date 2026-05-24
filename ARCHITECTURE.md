@@ -468,8 +468,8 @@ v1 production runs as a single-host Docker Compose stack on one Hostinger VPS: `
 
 ### Image pipeline
 
-- **`build-web.yml`** builds the repo-root `Dockerfile` (Next.js standalone) and pushes `ghcr.io/pveloso01/voxhorizon-web:{latest,<sha>}`. Build-time secrets (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_VAPID_PUBLIC_KEY`) are injected as `--build-arg`s — Next.js inlines them at build time.
-- **`build-worker.yml`** builds `worker/Dockerfile` and pushes `ghcr.io/pveloso01/voxhorizon-worker:{latest,<sha>}`. The worker reads every secret at runtime; no build-time secrets needed. The worker image includes the Python Docker SDK (`docker>=7.0`) so the `hermes_bridge.py` service can `exec_run` into Ekko.
+- **`build-web.yml`** builds the repo-root `Dockerfile` (Next.js standalone) and pushes `ghcr.io/mogginglabs/voxhorizon-web:{latest,<sha>}`. Build-time secrets (`NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_VAPID_PUBLIC_KEY`) are injected as `--build-arg`s — Next.js inlines them at build time.
+- **`build-worker.yml`** builds `worker/Dockerfile` and pushes `ghcr.io/mogginglabs/voxhorizon-worker:{latest,<sha>}`. The worker reads every secret at runtime; no build-time secrets needed. The worker image includes the Python Docker SDK (`docker>=7.0`) so the `hermes_bridge.py` service can `exec_run` into Ekko.
 
 ### Compose stack
 

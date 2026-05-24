@@ -43,7 +43,7 @@ source of truth.
 
    ```bash
    ssh root@<new-vps-host>
-   curl -fsSL https://raw.githubusercontent.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh \
+   curl -fsSL https://raw.githubusercontent.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel/main/infra/deploy/bootstrap-vps.sh \
      -o /root/bootstrap-vps.sh
    less /root/bootstrap-vps.sh        # read before running
    bash /root/bootstrap-vps.sh
@@ -69,7 +69,7 @@ source of truth.
 
    ```bash
    sudo -u deploy git clone \
-     https://github.com/pveloso01/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git \
+     https://github.com/MoggingLabs/Diogo-Silva-VoxHorizon-Marketing-Control-Panel.git \
      /opt/voxhorizon/repo
    ```
 
