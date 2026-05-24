@@ -806,6 +806,151 @@ def test_brief_404_when_pipeline_missing(
 
 
 # ===========================================================================
+# POST /work/pipeline/tools/video/brief  (VID-7)
+# ===========================================================================
+
+
+def _video_payload(**over: Any) -> dict[str, Any]:
+    base = {
+        "market": "Austin TX roofing",
+        "offer_text": "$99 roof inspection",
+        "angles": ["before_after", "urgency"],
+        "target_duration_s": 24,
+        "voice_id": "voice-xyz",
+    }
+    base.update(over)
+    return base
+
+
+def test_video_brief_requires_auth(client: TestClient) -> None:
+    resp = client.post("/work/pipeline/tools/video/brief", json={})
+    assert resp.status_code == 401
+
+
+def test_video_brief_validates_required_keys(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row()
+    # Missing target_duration_s + voice_id (video-required).
+    resp = client.post(
+        "/work/pipeline/tools/video/brief",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "video_payload": {
+                "market": "Austin",
+                "offer_text": "$99",
+                "angles": ["urgency"],
+            },
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_video_brief_inserts_and_splits_columns(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(video_brief_id=None)
+    tools_sb.client_row = {"slug": "acme"}
+
+    resp = client.post(
+        "/work/pipeline/tools/video/brief",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "video_payload": _video_payload(
+                hook_style="problem_callout", broll_selection_mode="auto"
+            ),
+            "notes": "storm season push",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["brief_id"] == "video_briefs-id-1"
+
+    vb_inserts = [d for n, d in tools_sb.inserts if n == "video_briefs"]
+    assert len(vb_inserts) == 1
+    row = vb_inserts[0]
+    # First-class columns land at the top level of the row.
+    assert row["target_duration_s"] == 24
+    assert row["voice_id"] == "voice-xyz"
+    assert row["hook_style"] == "problem_callout"
+    assert row["broll_selection_mode"] == "auto"
+    assert row["status"] == "draft"
+    assert row["brief_id_human"]  # minted via rpc
+    # Strategy fields live in the jsonb payload, NOT as columns.
+    assert row["payload"]["market"] == "Austin TX roofing"
+    assert row["payload"]["angles"] == ["before_after", "urgency"]
+    assert "target_duration_s" not in row["payload"]
+
+    # Pipeline linked + config_draft merged.
+    pipe_updates = [d for n, d in tools_sb.updates if n == "pipelines"]
+    assert pipe_updates and pipe_updates[0]["video_brief_id"] == "video_briefs-id-1"
+    assert pipe_updates[0]["config_draft"]["notes"] == "storm season push"
+
+    events = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
+    authored = [e for e in events if e["kind"] == "brief_authored"]
+    assert authored and authored[0]["payload"]["kind"] == "video"
+
+
+def test_video_brief_updates_when_linked(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(video_brief_id="vb-existing")
+    resp = client.post(
+        "/work/pipeline/tools/video/brief",
+        headers=_auth(),
+        json={"pipeline_id": "p-1", "video_payload": _video_payload()},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["brief_id"] == "vb-existing"
+    assert not any(n == "video_briefs" for n, _ in tools_sb.inserts)
+    vb_updates = [d for n, d in tools_sb.updates if n == "video_briefs"]
+    assert len(vb_updates) == 1
+    assert vb_updates[0]["voice_id"] == "voice-xyz"
+
+
+def test_video_brief_persists_concepts(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = _pipeline_row(video_brief_id="vb-existing")
+    concepts = [
+        {"concept": "urgency__a", "angle": "urgency", "script": {"hook": "h1"}},
+        {"concept": "savings__b", "angle": "savings", "script": {"hook": "h2"}},
+    ]
+    resp = client.post(
+        "/work/pipeline/tools/video/brief",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "video_payload": _video_payload(),
+            "concepts": concepts,
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    vb_updates = [d for n, d in tools_sb.updates if n == "video_briefs"]
+    assert vb_updates[0]["payload"]["concepts"] == concepts
+    pipe_updates = [d for n, d in tools_sb.updates if n == "pipelines"]
+    assert pipe_updates[0]["config_draft"]["video_concepts"] == concepts
+    events = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
+    authored = [e for e in events if e["kind"] == "brief_authored"]
+    assert authored[0]["payload"]["concept_count"] == 2
+
+
+def test_video_brief_404_when_pipeline_missing(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    tools_sb.pipeline_row = None
+    resp = client.post(
+        "/work/pipeline/tools/video/brief",
+        headers=_auth(),
+        json={"pipeline_id": "nope", "video_payload": _video_payload()},
+    )
+    assert resp.status_code == 404
+
+
+# ===========================================================================
 # POST /work/pipeline/tools/render
 # ===========================================================================
 

@@ -768,6 +768,168 @@ async def author_brief(body: BriefInput) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# POST /work/pipeline/tools/video/brief  (VID-7)
+# ---------------------------------------------------------------------------
+
+
+# video_briefs first-class columns the operator may set (migration 0001).
+# Anything else authored lands in the jsonb ``payload`` column.
+_VIDEO_BRIEF_COLUMNS: tuple[str, ...] = (
+    "target_duration_s",
+    "voice_id",
+    "music_track",
+    "hook_style",
+    "dimensions",
+    "captions_style",
+    "broll_selection_mode",
+)
+
+
+class VideoBriefPayload(BaseModel):
+    """Operator-authored video brief payload (build with ``video-ad-authoring``).
+
+    ``market`` / ``offer_text`` / ``angles`` / ``target_duration_s`` / ``voice_id``
+    are the required inputs; everything else is optional and passed through
+    (``extra='allow'``). The endpoint routes the ``_VIDEO_BRIEF_COLUMNS`` keys to
+    first-class ``video_briefs`` columns and the rest into ``payload``.
+    """
+
+    model_config = {"extra": "allow"}
+
+    market: str = Field(..., min_length=1)
+    offer_text: str = Field(..., min_length=1)
+    angles: list[str] = Field(..., min_length=1)
+    target_duration_s: int = Field(..., ge=1)
+    voice_id: str = Field(..., min_length=1)
+    audience: str | None = None
+    service_type: str | None = None
+
+
+class VideoConceptSpec(BaseModel):
+    """One persisted video script concept (``video-ad-authoring.build_video_concept``).
+
+    Shape ``{concept, angle?, script}``; extra keys allowed. Persisted on the
+    brief payload so ideation can fan out over the stored plan.
+    """
+
+    model_config = {"extra": "allow"}
+
+    concept: str = Field(..., min_length=1)
+    script: dict[str, Any]
+    angle: str | None = None
+
+
+class VideoBriefInput(BaseModel):
+    """POST body for ``/work/pipeline/tools/video/brief``."""
+
+    pipeline_id: str = Field(..., min_length=1)
+    video_payload: VideoBriefPayload
+    notes: str | None = None
+    concepts: list[VideoConceptSpec] | None = None
+
+
+def _gen_video_brief_id_human(slug: str) -> str:
+    """Mint a human video-brief id via ``gen_video_brief_id_human``, uuid fallback."""
+    sb = get_supabase_admin()
+    try:
+        resp = sb.rpc("gen_video_brief_id_human", {"p_client_slug": slug}).execute()
+        value = resp.data
+        if isinstance(value, str) and value:
+            return value
+    except Exception:  # noqa: BLE001 — fall through to the local fallback
+        pass
+    import uuid
+
+    return f"vid-{slug}-{uuid.uuid4().hex[:8]}"
+
+
+@router.post("/work/pipeline/tools/video/brief", dependencies=[Depends(verify_secret)])
+async def author_video_brief(body: VideoBriefInput) -> dict[str, Any]:
+    """Author (or update) the pipeline's VIDEO brief.
+
+    The video mirror of :func:`author_brief`. Splits the authored payload into the
+    ``video_briefs`` first-class columns and the jsonb ``payload`` (market /
+    offer_text / angles + extras + the optional script concepts), inserts at
+    ``status='draft'`` so the 0004 posted-brief CHECK is satisfied (the manager
+    posts it at the gate), links ``pipelines.video_brief_id``, and merges the
+    authored material into ``config_draft``. Idempotent on the linked brief.
+    """
+    pipeline = fetch_pipeline(body.pipeline_id)
+    if not pipeline:
+        raise HTTPException(
+            status_code=404, detail=f"pipeline not found: {body.pipeline_id}"
+        )
+
+    sb = get_supabase_admin()
+    authored = body.video_payload.model_dump(exclude_none=True)
+    columns: dict[str, Any] = {
+        k: authored[k] for k in _VIDEO_BRIEF_COLUMNS if k in authored
+    }
+    payload: dict[str, Any] = {
+        k: v for k, v in authored.items() if k not in _VIDEO_BRIEF_COLUMNS
+    }
+    concept_specs: list[dict[str, Any]] = (
+        [c.model_dump(exclude_none=True) for c in body.concepts]
+        if body.concepts
+        else []
+    )
+    if concept_specs:
+        payload["concepts"] = concept_specs
+
+    existing_brief_id = pipeline.get("video_brief_id")
+    if existing_brief_id:
+        sb.table("video_briefs").update({**columns, "payload": payload}).eq(
+            "id", str(existing_brief_id)
+        ).execute()
+        brief_id = str(existing_brief_id)
+    else:
+        slug = _client_slug(pipeline)
+        insert_row: dict[str, Any] = {
+            "brief_id_human": _gen_video_brief_id_human(slug),
+            "client_id": pipeline.get("client_id"),
+            "status": "draft",
+            "payload": payload,
+            **columns,
+        }
+        created = sb.table("video_briefs").insert(insert_row).execute().data
+        brief_id = str(created[0]["id"])
+
+    config_draft = pipeline.get("config_draft")
+    if not isinstance(config_draft, dict):
+        config_draft = {}
+    merged_draft = {
+        **config_draft,
+        "video_payload": {**columns, **payload},
+        "notes": body.notes,
+    }
+    if concept_specs:
+        merged_draft["video_concepts"] = concept_specs
+    sb.table("pipelines").update(
+        {"video_brief_id": brief_id, "config_draft": merged_draft}
+    ).eq("id", body.pipeline_id).execute()
+
+    emit_pipeline_event(
+        pipeline_id=body.pipeline_id,
+        kind="brief_authored",
+        stage="configuration",
+        payload={
+            "brief_id": brief_id,
+            "kind": "video",
+            "notes": body.notes,
+            "concept_count": len(concept_specs),
+        },
+    )
+
+    log.info(
+        "operator_video_brief_authored",
+        pipeline_id=body.pipeline_id,
+        brief_id=brief_id,
+        updated=bool(existing_brief_id),
+    )
+    return {"ok": True, "brief_id": brief_id}
+
+
+# ---------------------------------------------------------------------------
 # POST /work/pipeline/tools/render
 # ---------------------------------------------------------------------------
 
