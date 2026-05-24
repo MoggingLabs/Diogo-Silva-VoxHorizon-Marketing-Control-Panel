@@ -628,3 +628,227 @@ def test_rollup_verdict_semantics() -> None:
     assert qa_compliance._rollup_verdict(["passed", "failed"]) == "failed"
     assert qa_compliance._rollup_verdict(["passed", "pending"]) == "pending"
     assert qa_compliance._rollup_verdict(["overridden", "skipped"]) == "passed"
+
+
+# ===========================================================================
+# qa_run VIDEO branch (E3.2 #489)
+# ===========================================================================
+
+
+VIDEO_CREATIVE_ID = "66666666-6666-4666-8666-666666666666"
+
+
+def _seed_video_creative(
+    fake,
+    creative_id: str = VIDEO_CREATIVE_ID,
+    *,
+    dimensions: str = "9x16",
+    captioned_path: str | None = "vb-1/captioned-v1.mp4",
+    composed_path: str | None = "vb-1/composed-v1.mp4",
+) -> None:
+    row = {
+        "id": creative_id,
+        "brief_id": "vb-1",
+        "version": 1,
+        "composed_path": composed_path,
+        "captioned_path": captioned_path,
+        "duration_actual_s": 18,
+        "status": "draft",
+        "video_briefs": {"dimensions": dimensions},
+    }
+    fake.seed("video_creatives", [row])
+
+
+def _install_probe(monkeypatch, probe) -> list[str]:
+    """Patch ``video_probe.probe_video`` to return ``probe``; record the path."""
+    seen: list[str] = []
+
+    async def _fake_probe(path, *, ffprobe_bin=None):  # noqa: ANN001
+        seen.append(str(path))
+        return probe
+
+    monkeypatch.setattr(qa_compliance.video_probe, "probe_video", _fake_probe)
+    return seen
+
+
+def _good_video_probe():
+    from src.services import video_probe as vp
+
+    return vp.parse_probe(
+        {
+            "format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2", "duration": "18.5"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1080,
+                    "height": 1920,
+                    "avg_frame_rate": "30/1",
+                },
+                {"codec_type": "audio", "codec_name": "aac"},
+            ],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_clean_passes(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """A conformant 9:16 H.264 video creative passes the worker-owned QA verdict."""
+    _seed_video_creative(fake_supabase)
+    fake_supabase.set_storage_object("vb-1/captioned-v1.mp4", b"\x00fakebytes")
+    _install_probe(monkeypatch, _good_video_probe())
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [{"creative_id": VIDEO_CREATIVE_ID, "surface": "video"}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["rollup"] == "passed"
+    assert body["results"][0]["surface"] == "video"
+    assert body["results"][0]["verdict"] == "pass"
+    assert body["results"][0]["rerender_recommended"] is False
+
+    qa_rows = [r for (t, r) in fake_supabase.inserts if t == "qa_result"]
+    assert qa_rows and qa_rows[0]["status"] == "pass"
+    assert qa_rows[0]["checked_by"] == "worker"
+    # The probe facts ride on the persisted checks (append-only evidence).
+    assert any(c["check_id"] == "video.has_audio" for c in qa_rows[0]["checks"])
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_no_audio_fails_rerender(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """A video with no audio stream fails QA and flags a re-render."""
+    from src.services import video_probe as vp
+
+    _seed_video_creative(fake_supabase)
+    fake_supabase.set_storage_object("vb-1/captioned-v1.mp4", b"\x00fakebytes")
+    no_audio = vp.parse_probe(
+        {
+            "format": {"format_name": "mov,mp4", "duration": "18.5"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1080,
+                    "height": 1920,
+                }
+            ],
+        }
+    )
+    _install_probe(monkeypatch, no_audio)
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [{"creative_id": VIDEO_CREATIVE_ID, "surface": "video"}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["rollup"] == "failed"
+    assert body["results"][0]["verdict"] == "fail"
+    assert body["results"][0]["rerender_recommended"] is True
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_detected_even_without_surface_flag(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """A creative that lives only in video_creatives is QA'd as video.
+
+    The operator omitted ``surface='video'``; the image fetch returns nothing,
+    the worker falls back to the video store and probes the asset. The worker
+    never trusts the operator's (absent) surface claim.
+    """
+    _seed_video_creative(fake_supabase)
+    fake_supabase.set_single("creatives", None)  # not an image creative
+    fake_supabase.set_storage_object("vb-1/captioned-v1.mp4", b"\x00fakebytes")
+    _install_probe(monkeypatch, _good_video_probe())
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [{"creative_id": VIDEO_CREATIVE_ID}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["results"][0]["surface"] == "video"
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_uses_brief_ratio(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """The declared brief ratio (1x1) fails a 9:16 asset -- worker uses brief truth."""
+    _seed_video_creative(fake_supabase, dimensions="1x1")
+    fake_supabase.set_storage_object("vb-1/captioned-v1.mp4", b"\x00fakebytes")
+    _install_probe(monkeypatch, _good_video_probe())  # 1080x1920 (9:16)
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            # Operator claims 9x16 in the item, but the brief says 1x1.
+            "items": [
+                {"creative_id": VIDEO_CREATIVE_ID, "surface": "video", "ratio": "9x16"}
+            ],
+        },
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["results"][0]["verdict"] == "fail"
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_no_asset_returns_409(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """A video creative that reached QA with no rendered asset is a 409."""
+    _seed_video_creative(fake_supabase, captioned_path=None, composed_path=None)
+    _install_probe(monkeypatch, _good_video_probe())
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [{"creative_id": VIDEO_CREATIVE_ID, "surface": "video"}],
+        },
+    )
+    assert res.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_qa_run_video_prefers_captioned_over_composed(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase, monkeypatch
+) -> None:
+    """When both paths exist the worker probes the captioned (final) asset."""
+    _seed_video_creative(fake_supabase)
+    fake_supabase.set_storage_object("vb-1/captioned-v1.mp4", b"\x00fakebytes")
+    fake_supabase.set_storage_object("vb-1/composed-v1.mp4", b"\x00other")
+    seen = _install_probe(monkeypatch, _good_video_probe())
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/qa_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [{"creative_id": VIDEO_CREATIVE_ID, "surface": "video"}],
+        },
+    )
+    assert res.status_code == 200, res.text
+    # The temp file was written from the captioned bytes (the final asset).
+    assert seen, "probe_video was called"

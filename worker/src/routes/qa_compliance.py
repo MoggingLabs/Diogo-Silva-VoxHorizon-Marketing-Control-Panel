@@ -39,6 +39,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import tempfile
+from pathlib import Path
 from typing import Any, Literal
 
 import structlog
@@ -46,7 +48,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
-from ..services import compliance_engine, qa_engine
+from ..services import compliance_engine, qa_engine, video_probe
 from ..services.storage import BUCKET
 from ..supabase_client import get_supabase_admin
 
@@ -143,10 +145,16 @@ class VisionCandidate(BaseModel):
 
 
 class QAItem(BaseModel):
-    """One creative to adjudicate for QA."""
+    """One creative to adjudicate for QA.
+
+    ``surface`` is ``image`` (the default) or ``video``. For a video creative the
+    worker downloads the finished MP4 (``captioned_path`` then ``composed_path``)
+    and probes it with ffprobe instead of running the Pillow image rubric; the
+    image-only fields (``image_b64`` / ``overlay_region``) are ignored.
+    """
 
     creative_id: str = Field(..., min_length=1)
-    surface: Literal["image"] = "image"
+    surface: Literal["image", "video"] = "image"
     vertical: str | None = None
     ratio: str = "1x1"
     # Operator-supplied bytes (the common path: the operator already holds the
@@ -183,6 +191,42 @@ def _fetch_creative(creative_id: str) -> dict[str, Any] | None:
         .execute()
     )
     return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+
+
+def _fetch_video_creative(creative_id: str) -> dict[str, Any] | None:
+    """Pull the video creative columns the video QA path needs, or None.
+
+    Joins the brief so the declared ratio (``video_briefs.dimensions``, e.g.
+    ``9x16``) rides along for the resolution rail. The finished asset is the
+    ``captioned_path`` (preferred -- the last stage) or the ``composed_path``.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("video_creatives")
+        .select(
+            "id, brief_id, version, composed_path, captioned_path, "
+            "duration_actual_s, status, video_briefs(dimensions)"
+        )
+        .eq("id", creative_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+
+
+def _video_ratio(creative: dict[str, Any], item_ratio: str) -> str:
+    """Resolve the declared ratio for a video creative.
+
+    Prefers the brief's ``dimensions`` (the locked rail); falls back to the
+    operator-supplied ``item.ratio``. Both ``9x16`` and ``9:16`` spellings are
+    accepted downstream by the probe evaluator.
+    """
+    brief = creative.get("video_briefs")
+    if isinstance(brief, dict):
+        dims = brief.get("dimensions")
+        if isinstance(dims, str) and dims.strip():
+            return dims
+    return item_ratio
 
 
 def _fetch_copy_variant(copy_variant_id: str) -> dict[str, Any] | None:
@@ -510,17 +554,68 @@ def _resolve_image_bytes(item: QAItem, creative: dict[str, Any]) -> bytes:
     return bytes(data) if data else b""
 
 
+def _video_asset_path(creative: dict[str, Any]) -> str:
+    """The finished video asset's Storage path: captioned, then composed.
+
+    Raises 409 when the creative has reached QA with neither a captioned nor a
+    composed asset (the render did not complete; nothing to probe).
+    """
+    for key in ("captioned_path", "composed_path"):
+        path = creative.get(key)
+        if isinstance(path, str) and path.strip():
+            return path
+    raise HTTPException(
+        status_code=409,
+        detail="video creative has no captioned_path/composed_path to QA",
+    )
+
+
+async def _probe_video_creative(creative: dict[str, Any]) -> video_probe.VideoProbe:
+    """Download the finished MP4 and probe it with ffprobe.
+
+    Mirrors :func:`_resolve_image_bytes`' Storage download, then writes the bytes
+    to a temp file (ffprobe needs a path) and runs the probe. Raises 502 on a
+    download failure, 503 when ffprobe is absent, and 502 when ffprobe fails.
+    """
+    path = _video_asset_path(creative)
+    sb = get_supabase_admin()
+    try:
+        data = sb.storage.from_(BUCKET).download(str(path))
+    except Exception as e:  # noqa: BLE001 — surface a clean 502 to the operator
+        raise HTTPException(
+            status_code=502, detail=f"failed to download video bytes: {e}"
+        ) from e
+    raw = bytes(data) if data else b""
+
+    work_dir = Path(tempfile.mkdtemp(prefix="vox-qa-probe-"))
+    local = work_dir / "asset.mp4"
+    local.write_bytes(raw)
+    try:
+        return await video_probe.probe_video(local)
+    except video_probe.ProbeError as e:
+        # ProbeError is a RuntimeError subclass -- catch it FIRST (a corrupt /
+        # unprobeable asset is a 502, not a missing-ffprobe 503).
+        raise HTTPException(
+            status_code=502, detail=f"failed to probe video: {e}"
+        ) from e
+    except RuntimeError as e:
+        # ffprobe missing on PATH (ships in the worker image) -> 503.
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+
 def _persist_qa_result(
     *,
     pipeline_id: str,
     item: QAItem,
-    report: qa_engine.QAReport,
+    report: qa_engine.QAReport | video_probe.VideoReport,
 ) -> int:
     """Append one qa_result row (one per attempt) and return its attempt number.
 
     ``qa_result`` is ``unique(creative_id, attempt)``; we compute the next
     attempt from the count of existing rows so a re-run after a re-render is a
-    fresh, append-only attempt rather than an overwrite.
+    fresh, append-only attempt rather than an overwrite. Accepts the image
+    :class:`qa_engine.QAReport` or the video :class:`video_probe.VideoReport` --
+    both expose ``status`` + a ``to_dict()`` with ``defects`` / ``checks``.
     """
     sb = get_supabase_admin()
     existing = (
@@ -547,57 +642,100 @@ def _persist_qa_result(
     return attempt
 
 
+def _run_image_qa(item: QAItem, creative: dict[str, Any]) -> qa_engine.QAReport:
+    """Run the Pillow image QA engine for one image creative."""
+    image_bytes = _resolve_image_bytes(item, creative)
+    overlay = None
+    if item.overlay_region:
+        r = item.overlay_region
+        overlay = qa_engine.OverlayRegion(
+            x=int(r.get("x", 0)),
+            y=int(r.get("y", 0)),
+            width=int(r.get("width", 0)),
+            height=int(r.get("height", 0)),
+        )
+    context = qa_engine.QAContext(
+        ratio=item.ratio,
+        vertical=item.vertical,
+        overlay_region=overlay,
+    )
+    candidates = [c.model_dump(exclude_none=True) for c in item.vision_candidates]
+    return qa_engine.evaluate(
+        image_bytes, context=context, vision_candidates=candidates
+    )
+
+
 @router.post("/work/pipeline/tools/qa_run", dependencies=[Depends(verify_secret)])
 async def qa_run(body: QARunInput) -> dict[str, Any]:
     """Adjudicate creative QA for a batch; persist verdict + evidence.
 
-    The operator submits candidate vision findings only. The worker fetches the
-    image bytes, runs its deterministic Pillow backstops, adjudicates the vision
-    candidates via ``qa_engine.evaluate(...)``, appends a ``qa_result`` row, and
-    rolls the verdict onto ``creative_stage_state(creative_qa)``. A ``fail``
-    flags a re-render (``rerender_recommended``); one failed creative never
-    blocks the others.
+    The operator submits candidate findings only. For an IMAGE creative the
+    worker fetches the bytes, runs its deterministic Pillow backstops, and
+    adjudicates the vision candidates via ``qa_engine.evaluate(...)``. For a
+    VIDEO creative (``surface='video'`` or a creative that lives in
+    ``video_creatives``) the worker downloads the finished MP4, probes it with
+    ffprobe (``video_probe.probe_video``), and runs the worker-owned video QA
+    verdict (``video_probe.video_qa_verdict``) -- the same invariant: the worker
+    computes the verdict, the operator never asserts a pass. Either path appends
+    a ``qa_result`` row and rolls the verdict onto
+    ``creative_stage_state(creative_qa)``. A ``fail`` flags a re-render; one
+    failed creative never blocks the others.
     """
     results: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     for item in body.items:
-        creative = _fetch_creative(item.creative_id)
-        if creative is None:
-            errors.append(
-                {"creative_id": item.creative_id, "error": "creative not found"}
+        report: qa_engine.QAReport | video_probe.VideoReport
+        rerender = False
+        defect_count = 0
+        rubric_version = ""
+        probe_facts: dict[str, Any] | None = None
+
+        # Route by surface, then confirm against the actual store: a creative
+        # that lives in video_creatives is QA'd as video even if the operator
+        # mislabelled the surface (the worker never trusts the operator's claim).
+        video_creative = None
+        if item.surface == "video":
+            video_creative = _fetch_video_creative(item.creative_id)
+        else:
+            creative = _fetch_creative(item.creative_id)
+            if creative is None:
+                # Not an image creative -- try the video store before failing.
+                video_creative = _fetch_video_creative(item.creative_id)
+
+        if video_creative is not None:
+            probe = await _probe_video_creative(video_creative)
+            probe_facts = probe.to_dict()
+            ratio = _video_ratio(video_creative, item.ratio)
+            report = video_probe.video_qa_verdict(probe, ratio=ratio)
+            rerender = report.status == "fail"
+            defect_count = sum(
+                1 for c in report.checks if c.status in ("fail", "needs_review")
             )
-            continue
+            rubric_version = report.ruleset_version
+        else:
+            creative = _fetch_creative(item.creative_id)
+            if creative is None:
+                errors.append(
+                    {"creative_id": item.creative_id, "error": "creative not found"}
+                )
+                continue
+            image_report = _run_image_qa(item, creative)
+            report = image_report
+            rerender = image_report.rerender_recommended
+            defect_count = len(image_report.defects)
+            rubric_version = image_report.rubric_version
 
-        image_bytes = _resolve_image_bytes(item, creative)
-
-        overlay = None
-        if item.overlay_region:
-            r = item.overlay_region
-            overlay = qa_engine.OverlayRegion(
-                x=int(r.get("x", 0)),
-                y=int(r.get("y", 0)),
-                width=int(r.get("width", 0)),
-                height=int(r.get("height", 0)),
-            )
-        context = qa_engine.QAContext(
-            ratio=item.ratio,
-            vertical=item.vertical,
-            overlay_region=overlay,
-        )
-        candidates = [c.model_dump(exclude_none=True) for c in item.vision_candidates]
-
-        report = qa_engine.evaluate(
-            image_bytes, context=context, vision_candidates=candidates
-        )
         status = _VERDICT_TO_STAGE_STATE[report.status]
-
-        summary = {
+        summary: dict[str, Any] = {
             "stage": "creative_qa",
+            "surface": "video" if video_creative is not None else "image",
             "verdict": report.status,
-            "rerender_recommended": report.rerender_recommended,
-            "rubric_version": report.rubric_version,
-            "defect_count": len(report.defects),
+            "rerender_recommended": rerender,
+            "rubric_version": rubric_version,
+            "defect_count": defect_count,
         }
+        if probe_facts is not None:
+            summary["probe"] = probe_facts
 
         attempt = _persist_qa_result(
             pipeline_id=body.pipeline_id, item=item, report=report
@@ -613,11 +751,12 @@ async def qa_run(body: QARunInput) -> dict[str, Any]:
         results.append(
             {
                 "creative_id": item.creative_id,
+                "surface": "video" if video_creative is not None else "image",
                 "verdict": report.status,
                 "status": status,
                 "attempt": attempt,
-                "rerender_recommended": report.rerender_recommended,
-                "defect_count": len(report.defects),
+                "rerender_recommended": rerender,
+                "defect_count": defect_count,
             }
         )
 
