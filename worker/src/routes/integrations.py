@@ -133,11 +133,14 @@ def _stage_cleared(pipeline_id: str, stage: str) -> bool:
     )
 
 
-def _count_approved_copy(pipeline_id: str) -> int:
-    """Count ``copy_variants`` rows in ``status='approved'`` for the pipeline."""
+def _count_approved_copy(pipeline_id: str, *, table: str = "copy_variants") -> int:
+    """Count ``{table}`` rows in ``status='approved'`` for the pipeline.
+
+    ``table`` is ``copy_variants`` (image) or ``video_copy_variants`` (video).
+    """
     sb = get_supabase_admin()
     resp = (
-        sb.table("copy_variants")
+        sb.table(table)
         .select("id, status")
         .eq("pipeline_id", pipeline_id)
         .eq("status", "approved")
@@ -153,11 +156,15 @@ def check_launch_preconditions(pipeline_id: str) -> LaunchPreconditions:
     spec-pass ∧ compliance-clear ∧ ≥3 approved copy. This is the gate's source
     of truth — the route refuses to record a launch when ``ok`` is False, so a
     stale dashboard checklist or a since-rearmed compliance unit can never let
-    an unqualified pipeline through.
+    an unqualified pipeline through. Video pipelines keep their approved copy in
+    ``video_copy_variants``, so we count the format's copy table.
     """
+    pipeline = fetch_pipeline(pipeline_id)
+    is_video = bool(pipeline) and pipeline.get("format_choice") == "video"
+    copy_table = "video_copy_variants" if is_video else "copy_variants"
     spec_pass = _stage_cleared(pipeline_id, "spec_validation")
     compliance_clear = _stage_cleared(pipeline_id, "compliance_review")
-    approved = _count_approved_copy(pipeline_id)
+    approved = _count_approved_copy(pipeline_id, table=copy_table)
     copy_ge_3 = approved >= MIN_APPROVED_COPY
     return LaunchPreconditions(
         spec_pass=spec_pass,
@@ -254,13 +261,18 @@ async def record_launch(body: LaunchInput) -> dict[str, Any]:
         entities=body.entities,
     )
 
-    # (4) Stamp the launch_packages gate columns.
+    # (4) Stamp the launch gate columns (video pipelines -> video_launch_packages).
     _stamp_launch_package(
         launch_package_id=body.launch_package_id,
         pipeline_id=body.pipeline_id,
         approved_by=body.approved_by,
         preconditions=preconditions,
         entities=recorded,
+        table=(
+            "video_launch_packages"
+            if pipeline.get("format_choice") == "video"
+            else "launch_packages"
+        ),
     )
 
     emit_pipeline_event(
@@ -345,8 +357,12 @@ def _stamp_launch_package(
     approved_by: str,
     preconditions: LaunchPreconditions,
     entities: list[dict[str, Any]],
+    table: str = "launch_packages",
 ) -> None:
-    """Stamp the ``launch_packages`` gate columns (no-op when no package id).
+    """Stamp the launch gate columns (no-op when no package id).
+
+    ``table`` is ``launch_packages`` (image) or ``video_launch_packages`` (video)
+    -- both carry the gate columns (video_launch_packages gained them in 0032).
 
     Records the approver, the frozen preconditions (so the audit trail shows
     what was true at commit), the campaign meta id, and the recorded entity
@@ -359,7 +375,7 @@ def _stamp_launch_package(
     campaign_id = next(
         (e.get("meta_id") for e in entities if e.get("kind") == "campaign"), None
     )
-    sb.table("launch_packages").update(
+    sb.table(table).update(
         {
             "pipeline_id": pipeline_id,
             "preconditions": preconditions.as_dict(),

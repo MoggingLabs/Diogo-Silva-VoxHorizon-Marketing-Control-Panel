@@ -283,6 +283,61 @@ def test_launch_without_package_id_skips_stamp(
     assert not any(name == "launch_packages" for name, _ in fake_supabase.updates)
 
 
+# ---------------------------------------------------------------------------
+# Video launch routing (VID-12): count video copy + stamp video_launch_packages
+# ---------------------------------------------------------------------------
+
+
+def _seed_video_clearing_state(sb: FakeSupabase) -> None:
+    """Clear all preconditions for a VIDEO pipeline (approved copy in video table)."""
+    sb.seed(
+        "creative_stage_state",
+        [
+            {"pipeline_id": "p-1", "stage": "spec_validation", "status": "passed"},
+            {"pipeline_id": "p-1", "stage": "compliance_review", "status": "passed"},
+        ],
+    )
+    sb.seed(
+        "video_copy_variants",
+        [{"id": f"vcv-{i}", "pipeline_id": "p-1", "status": "approved"} for i in range(3)],
+    )
+
+
+def test_preconditions_count_video_copy_for_video_pipeline(
+    fake_supabase: FakeSupabase,
+) -> None:
+    """A video pipeline's approved-copy gate counts video_copy_variants, not copy_variants."""
+    fake_supabase.set_single("pipelines", _pipeline_row(format_choice="video"))
+    _seed_video_clearing_state(fake_supabase)
+    # An image copy_variants row must NOT count toward a video pipeline's gate.
+    fake_supabase.seed(
+        "copy_variants", [{"id": "cv-x", "pipeline_id": "p-1", "status": "approved"}]
+    )
+    pc = integrations.check_launch_preconditions("p-1")
+    assert pc.approved_copy_count == 3
+    assert pc.copy_ge_3 is True
+    assert pc.ok is True
+
+
+def test_launch_stamps_video_launch_packages_for_video_pipeline(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    """A video pipeline's launch stamps video_launch_packages, not launch_packages."""
+    fake_supabase.set_single(
+        "pipelines", _pipeline_row(format_choice="video", video_brief_id="vb-1")
+    )
+    _seed_video_clearing_state(fake_supabase)
+    resp = client.post(
+        "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
+    )
+    assert resp.status_code == 200, resp.text
+    vupd = [r for t, r in fake_supabase.updates if t == "video_launch_packages"]
+    assert vupd, "expected a video_launch_packages stamp"
+    assert vupd[0]["approved_by"] == "manager@vox"
+    assert vupd[0]["meta_campaign_id"] == "camp-100"
+    assert all(t != "launch_packages" for t, _ in fake_supabase.updates)
+
+
 # ===========================================================================
 # POST /work/pipeline/tools/finalize_drive
 # ===========================================================================
