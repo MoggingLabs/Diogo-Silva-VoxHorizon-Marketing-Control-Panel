@@ -549,10 +549,16 @@ class FinalizeInput(BaseModel):
     results: list[FinalizeResult] = Field(..., min_length=1)
 
 
-def _existing_creative_finalize(sb: Any, creative_id: str) -> dict[str, Any] | None:
-    """Return the finalize columns of a creative row, or None when missing."""
+def _existing_creative_finalize(
+    sb: Any, creative_id: str, *, table: str = "creatives"
+) -> dict[str, Any] | None:
+    """Return the finalize columns of a creative row (image or video), or None.
+
+    ``table`` is ``creatives`` (image) or ``video_creatives`` (video) — both
+    carry the finalize columns (video_creatives gained them in migration 0031).
+    """
     resp = (
-        sb.table("creatives")
+        sb.table(table)
         .select("id, finalize_verified")
         .eq("id", creative_id)
         .maybe_single()
@@ -580,7 +586,13 @@ async def persist_finalize_result(body: FinalizeInput) -> dict[str, Any]:
     skipped: list[str] = []
     finalized_at = _now_iso()
     for result in body.results:
-        existing = _existing_creative_finalize(sb, result.creative_id)
+        # Route video creatives to video_creatives (0031 added the finalize cols).
+        table = (
+            "video_creatives"
+            if _is_video_creative(sb, result.creative_id)
+            else "creatives"
+        )
+        existing = _existing_creative_finalize(sb, result.creative_id, table=table)
         if existing is None:
             raise HTTPException(
                 status_code=404,
@@ -599,7 +611,7 @@ async def persist_finalize_result(body: FinalizeInput) -> dict[str, Any]:
             update["drive_folder_id"] = result.drive_folder_id
         if result.file_path_drive is not None:
             update["file_path_drive"] = result.file_path_drive
-        sb.table("creatives").update(update).eq("id", result.creative_id).execute()
+        sb.table(table).update(update).eq("id", result.creative_id).execute()
         recorded.append(
             {
                 "creative_id": result.creative_id,
@@ -645,6 +657,18 @@ class MonitorResult(BaseModel):
     freq: float | None = None
     verdict: Literal["kill", "watch", "keep"]
     verdict_reason: str | None = None
+    # Video-only engagement funnel (written to campaign_perf_video; ignored for
+    # image pipelines). Optional so an image monitor read is unchanged.
+    hook_rate: float | None = None
+    drop_off_3s: float | None = None
+    view_rate_avg: float | None = None
+    watch_time_p50: float | None = None
+    thruplays: int | None = None
+    video_plays_3s: int | None = None
+    completion_p25: float | None = None
+    completion_p75: float | None = None
+    completion_p100: float | None = None
+    avg_watch_time_s: float | None = None
 
 
 class MonitorInput(BaseModel):
@@ -670,18 +694,24 @@ def _cpl_real(spend: float, ghl_leads: int) -> float | None:
     "/work/pipeline/tools/monitor_result", dependencies=[Depends(verify_secret)]
 )
 async def persist_monitor_result(body: MonitorInput) -> dict[str, Any]:
-    """Persist monitor KPIs as ``campaign_perf_image`` rows (pipeline-linked).
+    """Persist monitor KPIs as ``campaign_perf_{image,video}`` rows (pipeline-linked).
 
     Computes ``cpl_real = spend / ghl_leads`` (GHL is the lead source of truth)
     and writes one row per ad, linked to the pipeline (and the ad entity when
-    supplied). Idempotent on the daily-unique index: a ``(client, campaign,
-    window, day)`` already pulled today is skipped so a re-dispatch does not
-    duplicate the day's read. Returns the per-ad recorded set + the verdict
-    tally.
+    supplied). Video pipelines (``pipelines.format_choice == 'video'``) write
+    ``campaign_perf_video`` with the extra engagement funnel; image (and ``both``)
+    write ``campaign_perf_image``. Idempotent on the daily-unique index: a
+    ``(client, campaign, window, day)`` already pulled today is skipped so a
+    re-dispatch does not duplicate the day's read. Returns the per-ad recorded set
+    + the verdict tally.
     """
     pipeline = _require_pipeline(body.pipeline_id)
     sb = get_supabase_admin()
     client_id = body.client_id or pipeline.get("client_id")
+    # Route by pipeline format. ('both' writes the image table; per-campaign video
+    # routing for a mixed pipeline needs ad->creative linkage, deferred.)
+    is_video = pipeline.get("format_choice") == "video"
+    perf_table = "campaign_perf_video" if is_video else "campaign_perf_image"
 
     recorded: list[dict[str, Any]] = []
     skipped: list[str] = []
@@ -695,6 +725,7 @@ async def persist_monitor_result(body: MonitorInput) -> dict[str, Any]:
             client_id=client_id,
             campaign_id=result.campaign_id,
             window_days=result.window_days,
+            table=perf_table,
         ):
             skipped.append(result.campaign_id)
             continue
@@ -718,7 +749,17 @@ async def persist_monitor_result(body: MonitorInput) -> dict[str, Any]:
         }
         if result.ad_entity_id is not None:
             row["ad_entity_id"] = result.ad_entity_id
-        created = sb.table("campaign_perf_image").insert(row).execute().data
+        if is_video:
+            # Engagement funnel -> campaign_perf_video columns (omit unset).
+            for k in (
+                "hook_rate", "drop_off_3s", "view_rate_avg", "watch_time_p50",
+                "thruplays", "video_plays_3s", "completion_p25",
+                "completion_p75", "completion_p100", "avg_watch_time_s",
+            ):
+                v = getattr(result, k, None)
+                if v is not None:
+                    row[k] = v
+        created = sb.table(perf_table).insert(row).execute().data
         perf_id = (
             created[0]["id"] if isinstance(created, list) and created else None
         )
@@ -748,15 +789,21 @@ async def persist_monitor_result(body: MonitorInput) -> dict[str, Any]:
 
 
 def _already_pulled_today(
-    sb: Any, *, client_id: Any, campaign_id: str, window_days: int
+    sb: Any,
+    *,
+    client_id: Any,
+    campaign_id: str,
+    window_days: int,
+    table: str = "campaign_perf_image",
 ) -> bool:
     """True when a perf row for (client, campaign, window) was pulled today (UTC).
 
-    Mirrors the ``campaign_perf_image_daily_uniq`` index so the route resumes
-    idempotently rather than colliding on the unique constraint.
+    Mirrors the ``{table}_daily_uniq`` index so the route resumes idempotently
+    rather than colliding on the unique constraint. ``table`` is
+    ``campaign_perf_image`` (image) or ``campaign_perf_video`` (video).
     """
     resp = (
-        sb.table("campaign_perf_image")
+        sb.table(table)
         .select("id, pulled_at, window_days, campaign_id, client_id")
         .eq("campaign_id", campaign_id)
         .eq("window_days", window_days)

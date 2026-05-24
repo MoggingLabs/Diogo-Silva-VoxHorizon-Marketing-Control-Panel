@@ -513,6 +513,94 @@ def test_monitor_422_on_bad_verdict(
     assert resp.status_code == 422
 
 
+# ---------------------------------------------------------------------------
+# Video routing (VID-12): finalize -> video_creatives, monitor -> campaign_perf_video
+# ---------------------------------------------------------------------------
+
+
+def test_finalize_routes_video_creative_to_video_table(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A video creative's finalize report writes video_creatives, not creatives."""
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed("video_creatives", [{"id": "vc-1", "finalize_verified": False}])
+    resp = client.post(
+        "/work/pipeline/tools/finalize_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {
+                    "creative_id": "vc-1",
+                    "asset_name": "2026-05-24 | Storm Leak v1 | $99",
+                    "file_path_drive": "drive://acme/storm-leak-v1.mp4",
+                    "verified": True,
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["recorded"][0]["creative_id"] == "vc-1"
+    vupd = [r for t, r in stage_sb.updates if t == "video_creatives"]
+    assert vupd and vupd[0]["finalize_verified"] is True
+    assert vupd[0]["file_path_drive"] == "drive://acme/storm-leak-v1.mp4"
+    assert all(t != "creatives" for t, _ in stage_sb.updates)
+
+
+def test_finalize_video_skips_already_verified(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed("video_creatives", [{"id": "vc-1", "finalize_verified": True}])
+    resp = client.post(
+        "/work/pipeline/tools/finalize_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [{"creative_id": "vc-1", "asset_name": "x", "verified": True}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["skipped"] == ["vc-1"]
+    assert all(t != "video_creatives" for t, _ in stage_sb.updates)
+
+
+def test_monitor_routes_video_pipeline_to_campaign_perf_video(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A video pipeline's monitor read writes campaign_perf_video + the funnel."""
+    stage_sb.set_single(
+        "pipelines", _pipeline_row(format_choice="video", status="monitor")
+    )
+    resp = client.post(
+        "/work/pipeline/tools/monitor_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {
+                    "campaign_id": "camp-1",
+                    "window_days": 7,
+                    "spend": 50.0,
+                    "ghl_leads": 5,
+                    "verdict": "keep",
+                    "hook_rate": 0.32,
+                    "watch_time_p50": 6.5,
+                    "completion_p100": 0.18,
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["recorded"][0]["cpl_real"] == 10.0
+    vins = [r for t, r in stage_sb.inserts if t == "campaign_perf_video"]
+    assert vins, "expected a campaign_perf_video insert"
+    assert vins[0]["hook_rate"] == 0.32
+    assert vins[0]["watch_time_p50"] == 6.5
+    assert vins[0]["completion_p100"] == 0.18
+    assert all(t != "campaign_perf_image" for t, _ in stage_sb.inserts)
+
+
 # ===========================================================================
 # POST /work/pipeline/tools/signal
 # ===========================================================================
