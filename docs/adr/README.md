@@ -47,6 +47,7 @@ purpose, in the open, with a paper trail.
 | [0004](./0004-strangler-fig-rebuild.md)            | Foundation-first strangler-fig rebuild strategy       | Accepted |
 | [0005](./0005-reliability-primitives-on-path.md)   | Reliability primitives wired onto the primary path    | Accepted |
 | [0006](./0006-backups-and-dr.md)                   | Backups and disaster recovery (RPO/RTO)               | Proposed |
+| [0007](./0007-immutable-audit-trail.md)            | Immutable (append-only) audit trail at the DB layer   | Proposed |
 
 ## Related documents
 
