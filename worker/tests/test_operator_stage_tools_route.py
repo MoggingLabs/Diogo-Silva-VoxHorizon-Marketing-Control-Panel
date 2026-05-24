@@ -780,3 +780,217 @@ def test_read_rollup_empty_when_no_stage_state(
     resp = client.get("/work/pipeline/tools/p-1", headers=_auth())
     assert resp.status_code == 200, resp.text
     assert resp.json()["creatives"] == []
+
+
+# ===========================================================================
+# Spec backstop for VIDEO creatives (E3.3 #492)
+# ===========================================================================
+
+
+def _install_spec_probe(monkeypatch: pytest.MonkeyPatch, probe) -> None:  # noqa: ANN001
+    """Patch ``operator_stage_tools.video_probe.probe_video`` to return ``probe``."""
+    from src.routes import operator_stage_tools
+
+    async def _fake_probe(path, *, ffprobe_bin=None):  # noqa: ANN001
+        return probe
+
+    monkeypatch.setattr(operator_stage_tools.video_probe, "probe_video", _fake_probe)
+
+
+def _conformant_reel_probe():
+    from src.services import video_probe as vp
+
+    return vp.parse_probe(
+        {
+            "format": {"format_name": "mov,mp4,m4a", "duration": "18.5"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1080,
+                    "height": 1920,
+                    "avg_frame_rate": "30/1",
+                },
+                {"codec_type": "audio", "codec_name": "aac"},
+            ],
+        }
+    )
+
+
+def _nonconformant_probe():
+    """Wrong ratio (1:1 on a 9:16 reel rail) + wrong codec -> a hard spec fail."""
+    from src.services import video_probe as vp
+
+    return vp.parse_probe(
+        {
+            "format": {"format_name": "webm", "duration": "18.5"},
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "vp9",
+                    "width": 1080,
+                    "height": 1080,
+                },
+                {"codec_type": "audio", "codec_name": "opus"},
+            ],
+        }
+    )
+
+
+def test_spec_backstop_downgrades_operator_pass_on_bad_video(
+    client: TestClient, stage_sb: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E3.3 INVARIANT: an operator 'pass' on a non-conformant video is downgraded.
+
+    The operator submits ``status='pass'`` for a reels placement, but the actual
+    asset is a webm/vp9 1:1 (wrong container, codec, and ratio). The worker
+    recomputes from the probed facts and DOWNGRADES the persisted status to
+    ``fail`` -- the operator can never pass a non-conformant asset.
+    """
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed(
+        "video_creatives",
+        [{"id": "vc-1", "captioned_path": "vb-1/cap.mp4", "composed_path": None}],
+    )
+    stage_sb.set_storage_object("vb-1/cap.mp4", b"\x00fake")
+    _install_spec_probe(monkeypatch, _nonconformant_probe())
+
+    resp = client.post(
+        "/work/pipeline/tools/spec_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {"creative_id": "vc-1", "placement": "reels", "status": "pass"}
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # The gate is held failed, not passed.
+    assert body["rollup"][0]["stage_state"] == "failed"
+    written = body["results"][0]
+    assert written["status"] == "fail"
+    assert written["submitted_status"] == "pass"
+    assert written["backstop_downgraded"] is True
+
+    # The persisted spec_check row carries the worker recompute evidence.
+    spec_rows = [r for t, r in stage_sb.inserts if t == "spec_check"]
+    assert spec_rows and spec_rows[0]["status"] == "fail"
+    assert spec_rows[0]["checks"]["worker_backstop"]["backstop"] == "fail"
+
+
+def test_spec_backstop_keeps_operator_pass_on_good_video(
+    client: TestClient, stage_sb: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A conformant video keeps the operator-submitted pass (backstop only tightens)."""
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed(
+        "video_creatives",
+        [{"id": "vc-1", "captioned_path": "vb-1/cap.mp4", "composed_path": None}],
+    )
+    stage_sb.set_storage_object("vb-1/cap.mp4", b"\x00fake")
+    _install_spec_probe(monkeypatch, _conformant_reel_probe())
+
+    resp = client.post(
+        "/work/pipeline/tools/spec_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {"creative_id": "vc-1", "placement": "reels", "status": "pass"}
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rollup"][0]["stage_state"] == "passed"
+    assert body["results"][0]["status"] == "pass"
+    assert body["results"][0]["backstop_downgraded"] is False
+
+
+def test_spec_backstop_does_not_touch_image_creatives(
+    client: TestClient, stage_sb: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An image creative (absent from video_creatives) keeps the operator status."""
+    stage_sb.set_single("pipelines", _pipeline_row())
+
+    called = {"probe": False}
+
+    async def _should_not_run(path, *, ffprobe_bin=None):  # noqa: ANN001
+        called["probe"] = True
+        raise AssertionError("probe must not run for an image creative")
+
+    from src.routes import operator_stage_tools
+
+    monkeypatch.setattr(operator_stage_tools.video_probe, "probe_video", _should_not_run)
+
+    resp = client.post(
+        "/work/pipeline/tools/spec_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [{"creative_id": "cr-1", "placement": "feed", "status": "pass"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["status"] == "pass"
+    assert called["probe"] is False
+
+
+def test_spec_backstop_unverifiable_video_downgrades_to_fail(
+    client: TestClient, stage_sb: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe failure on a video asset downgrades to fail (never trust unverifiable)."""
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed(
+        "video_creatives",
+        [{"id": "vc-1", "captioned_path": "vb-1/cap.mp4", "composed_path": None}],
+    )
+    stage_sb.set_storage_object("vb-1/cap.mp4", b"\x00fake")
+
+    from src.routes import operator_stage_tools
+    from src.services import video_probe as vp
+
+    async def _raise_probe(path, *, ffprobe_bin=None):  # noqa: ANN001
+        raise vp.ProbeError("corrupt asset")
+
+    monkeypatch.setattr(operator_stage_tools.video_probe, "probe_video", _raise_probe)
+
+    resp = client.post(
+        "/work/pipeline/tools/spec_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {"creative_id": "vc-1", "placement": "reels", "status": "pass"}
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["status"] == "fail"
+
+
+def test_spec_backstop_unknown_placement_keeps_status(
+    client: TestClient, stage_sb: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A placement with no spec entry keeps the operator status (recompute skipped)."""
+    stage_sb.set_single("pipelines", _pipeline_row(format_choice="video"))
+    stage_sb.seed(
+        "video_creatives",
+        [{"id": "vc-1", "captioned_path": "vb-1/cap.mp4", "composed_path": None}],
+    )
+    _install_spec_probe(monkeypatch, _conformant_reel_probe())
+
+    resp = client.post(
+        "/work/pipeline/tools/spec_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "results": [
+                {"creative_id": "vc-1", "placement": "search", "status": "pass"}
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["results"][0]["status"] == "pass"

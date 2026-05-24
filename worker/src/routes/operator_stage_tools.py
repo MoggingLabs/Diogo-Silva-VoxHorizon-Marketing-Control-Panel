@@ -55,7 +55,9 @@ default), so no enum juggling is needed here.
 
 from __future__ import annotations
 
+import tempfile
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Literal
 
 import structlog
@@ -63,7 +65,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..services import video_probe
 from ..services.pipeline_runner import emit_pipeline_event, fetch_pipeline
+from ..services.storage import BUCKET
 from ..supabase_client import get_supabase_admin
 
 
@@ -395,6 +399,98 @@ def _spec_gate_status(placement_statuses: list[str]) -> str:
     return "passed"
 
 
+def _fetch_video_creative_asset(sb: Any, creative_id: str) -> dict[str, Any] | None:
+    """Return the video creative's finished-asset columns, or None for an image.
+
+    A single id lookup against ``video_creatives``; ``None`` means the id is not
+    a video creative (an image creative, which keeps the operator-submitted spec
+    status -- see the docstring on :func:`persist_spec_result`).
+    """
+    resp = (
+        sb.table("video_creatives")
+        .select("id, composed_path, captioned_path")
+        .eq("id", creative_id)
+        .maybe_single()
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+
+
+def _video_asset_storage_path(creative: dict[str, Any]) -> str | None:
+    """The finished video asset path: captioned first, then composed, or None."""
+    for key in ("captioned_path", "composed_path"):
+        path = creative.get(key)
+        if isinstance(path, str) and path.strip():
+            return path
+    return None
+
+
+#: Recompute verdicts that DOWNGRADE the operator status to a hard ``fail``.
+_SPEC_BACKSTOP_FAIL = {"fail"}
+
+
+async def _spec_backstop_video(
+    sb: Any, result: "SpecResult"
+) -> tuple[str, dict[str, Any] | None]:
+    """Worker recompute of one video placement's spec from the actual asset.
+
+    Returns ``(status, backstop_detail)``. The status is the operator-submitted
+    ``result.status`` UNLESS the worker recompute (ffprobe vs the placement spec)
+    fails -- in which case it is downgraded to ``fail`` so the operator can never
+    pass a non-conformant asset (E3.3). When the placement is unknown to the
+    spec table, or the asset is not yet present, the recompute is skipped and the
+    operator status stands (with the reason recorded). A probe failure escalates:
+    an unverifiable asset is downgraded to ``fail`` rather than trusted.
+    """
+    spec = video_probe.get_placement_spec(result.placement)
+    if spec is None:
+        return result.status, {"backstop": "skipped", "reason": "unknown placement"}
+
+    creative = _fetch_video_creative_asset(sb, result.creative_id)
+    if creative is None:
+        # Not a video creative after all -- nothing to recompute here.
+        return result.status, None
+
+    asset_path = _video_asset_storage_path(creative)
+    if asset_path is None:
+        return result.status, {"backstop": "skipped", "reason": "no asset yet"}
+
+    try:
+        data = sb.storage.from_(BUCKET).download(str(asset_path))
+    except Exception as e:  # noqa: BLE001 — unverifiable asset must not auto-pass
+        log.warning("spec_backstop_download_failed", creative_id=result.creative_id, error=str(e))
+        return "fail", {"backstop": "fail", "reason": f"download failed: {e}"}
+
+    work_dir = Path(tempfile.mkdtemp(prefix="vox-spec-probe-"))
+    local = work_dir / "asset.mp4"
+    local.write_bytes(bytes(data) if data else b"")
+    try:
+        probe = await video_probe.probe_video(local)
+    except video_probe.ProbeError as e:
+        # ProbeError is a RuntimeError subclass -- catch it FIRST. An asset that
+        # will not probe is unverifiable, so it must not auto-pass: downgrade.
+        log.warning("spec_backstop_probe_failed", creative_id=result.creative_id, error=str(e))
+        return "fail", {"backstop": "fail", "reason": f"probe failed: {e}"}
+    except RuntimeError as e:
+        # ffprobe missing (ships in the worker image) -> surface as 503.
+        raise HTTPException(status_code=503, detail=str(e)) from e
+
+    report = video_probe.video_spec_verdict(probe, spec)
+    detail = {
+        "backstop": report.status,
+        "ruleset_version": report.ruleset_version,
+        "probe": probe.to_dict(),
+        "checks": report.to_dict()["checks"],
+    }
+    if report.status in _SPEC_BACKSTOP_FAIL:
+        # Downgrade: the asset violates the placement spec. The operator's
+        # submitted status (even a 'pass') can never override a worker fail.
+        return "fail", detail
+    # The recompute did not fail -- keep the operator status (the backstop only
+    # ever tightens, never loosens, the verdict).
+    return result.status, detail
+
+
 @router.post(
     "/work/pipeline/tools/spec_result", dependencies=[Depends(verify_secret)]
 )
@@ -406,6 +502,16 @@ async def persist_spec_result(body: SpecInput) -> dict[str, Any]:
     each creative's ``creative_stage_state(stage='spec_validation')`` to the
     worst placement status (``passed`` only when every placement passes; a
     failing placement holds the gate ``failed`` for the manager to surface).
+
+    WORKER BACKSTOP (E3.3): for a VIDEO creative the worker does NOT trust the
+    operator-submitted status -- it downloads the finished asset, probes it with
+    ffprobe, recomputes the spec verdict against the placement spec
+    (``video_probe.video_spec_verdict``), and DOWNGRADES the persisted status to
+    ``fail`` when the asset violates the spec. The operator can never pass a
+    non-conformant asset. Image creatives keep the operator status: the operator
+    already submits the deterministic Pillow ``checks`` for images, and the QA
+    route (``qa_run``) is the worker-owned image backstop; a duplicate per-spec
+    Pillow recompute here is deferred (see follow-ups).
     Returns the per-creative rollup.
     """
     _require_pipeline(body.pipeline_id)
@@ -414,13 +520,21 @@ async def persist_spec_result(body: SpecInput) -> dict[str, Any]:
     by_creative: dict[str, list[str]] = {}
     written: list[dict[str, Any]] = []
     for result in body.results:
+        # Worker spec backstop: recompute video placements from the real asset
+        # and downgrade a non-conformant 'pass' to 'fail'. Image keeps status.
+        effective_status, backstop_detail = await _spec_backstop_video(sb, result)
+
+        merged_checks = dict(result.checks)
+        if backstop_detail is not None:
+            merged_checks["worker_backstop"] = backstop_detail
+
         row: dict[str, Any] = {
             "pipeline_id": body.pipeline_id,
             "creative_id": result.creative_id,
             "platform": result.platform,
             "placement": result.placement,
-            "status": result.status,
-            "checks": result.checks,
+            "status": effective_status,
+            "checks": merged_checks,
         }
         if result.ratio is not None:
             row["ratio"] = result.ratio
@@ -445,13 +559,15 @@ async def persist_spec_result(body: SpecInput) -> dict[str, Any]:
                 if isinstance(created, list) and created
                 else None
             )
-        by_creative.setdefault(result.creative_id, []).append(result.status)
+        by_creative.setdefault(result.creative_id, []).append(effective_status)
         written.append(
             {
                 "creative_id": result.creative_id,
                 "placement": result.placement,
-                "status": result.status,
+                "status": effective_status,
+                "submitted_status": result.status,
                 "spec_check_id": spec_id,
+                "backstop_downgraded": effective_status != result.status,
             }
         )
 
