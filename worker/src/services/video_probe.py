@@ -45,6 +45,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from . import gate_core
+
 
 Status = Literal["pass", "fail", "needs_review"]
 Severity = Literal["critical", "major", "minor"]
@@ -309,12 +311,12 @@ class VideoReport:
 
 
 def _rollup(checks: list[VideoCheck]) -> Status:
-    """Any ``fail`` -> ``fail``; else any ``needs_review`` -> ``needs_review``."""
-    if any(c.status == "fail" for c in checks):
-        return "fail"
-    if any(c.status == "needs_review" for c in checks):
-        return "needs_review"
-    return "pass"
+    """Any ``fail`` -> ``fail``; else any ``needs_review`` -> ``needs_review``.
+
+    The shared rollup with no severity gate (every fail blocks), mirroring the
+    image QA engine.
+    """
+    return gate_core.rollup(checks, verdict_of=lambda c: c.status)
 
 
 # ===========================================================================
