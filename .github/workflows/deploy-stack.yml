@@ -12,13 +12,23 @@ name: deploy-stack
 #   - this workflow itself changes (so a workflow fix can self-deploy)
 
 on:
+  # === DEPLOY AUTO-TRIGGER GUARD (E0.5 / #436) - DO NOT RE-ENABLE WITHOUT SIGN-OFF ===
   # Auto-deploy on push to main is DISABLED for the duration of the pipeline
   # rebuild so CI-gated merges to main never touch the live VPS stack. Deploys
   # are deliberate during the rebuild: trigger manually via the Actions
-  # "Run workflow" button (workflow_dispatch). Re-enable the push trigger
-  # below at the end of the rebuild (it watched worker/**, web/**, app/**,
+  # "Run workflow" button (workflow_dispatch ONLY).
+  #
+  # This workflow MUST stay workflow_dispatch-only until the rebuild is signed
+  # off. Re-enabling `push:` here means EVERY merge to main ships to the live
+  # VPS - that is the explicit thing we are guarding against. Do not add a
+  # `push:` key below as a "convenience"; it is intentional that it is absent.
+  #
+  # When the rebuild is complete and a maintainer has signed off, re-add the
+  # push trigger that previously watched: worker/**, web/**, app/**,
   # components/**, lib/**, hooks/**, middleware.ts, next.config.ts,
-  # package.json, pnpm-lock.yaml, Caddyfile, docker-compose.yml, and this file).
+  # package.json, pnpm-lock.yaml, Caddyfile, docker-compose.yml, and this file.
+  # (Documented in docs/ci.md under "Deploy auto-trigger guard".)
+  # === END DEPLOY AUTO-TRIGGER GUARD ===
   workflow_dispatch:
 
 # One rollout at a time. Do NOT cancel a deploy mid-flight — that can
