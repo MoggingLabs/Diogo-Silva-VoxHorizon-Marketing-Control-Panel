@@ -27,6 +27,7 @@ from .routes import (
     pipeline_tools,
     ping,
     qa_compliance,
+    video_callback,
 )
 
 
@@ -153,6 +154,17 @@ def create_app() -> FastAPI:
     # snapshot. Meta + Drive stay operator-MCP — these endpoints RECORD and
     # GATE, they never call Meta/Drive. See routes/integrations.py.
     app.include_router(integrations.router, tags=["integrations"])
+
+    # === E5.2 kie video completion-callback receiver (#514) ===
+    # The missing consumer of kie's video render callback. The live broll-search
+    # path submits a render and blocks on a 10-minute poll; a restart mid-poll
+    # abandoned the render (kie still billed it). This receiver verifies the kie
+    # HMAC, looks up the in-flight render in video_render_tasks, downloads +
+    # stores the result, and is idempotent (a duplicate/late callback is a 200
+    # no-op, never a 5xx). The reconciliation sweep in services.scheduler is the
+    # durable safety net for callbacks that never arrive. See
+    # routes/video_callback.py. NOT bearer-authed -- the HMAC signature is auth.
+    app.include_router(video_callback.router, tags=["video-callback"])
 
     # === wave 18 hermes-bridge routes ===
     # Three thin surfaces that proxy to the co-located Hermes/Ekko

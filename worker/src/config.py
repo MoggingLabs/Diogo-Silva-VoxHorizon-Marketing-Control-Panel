@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     submagic_api_key: str | None = None
     meta_ads_api_key: str | None = None
 
+    # kie.ai video completion-callback HMAC secret (E5.2 / #514). kie signs
+    # ``f"{taskId}.{timestamp}"`` with this key and sends the Base64 digest in
+    # ``X-Webhook-Signature`` on the completion POST to /work/video/kie-callback.
+    # The callback receiver verifies it via
+    # ``KieVideoClient.verify_webhook_signature`` before recording the result.
+    # Optional at boot: when unset the callback route 503s (it cannot verify a
+    # signature without the key) and the durable reconciliation sweep is the
+    # safety net that still recovers the render.
+    kie_ai_webhook_secret: str | None = None
+
     # Fake-integration mode (T.4 / #317). When a FAKE_* flag is on, the
     # corresponding external integration is stubbed in-process with a
     # deterministic response and makes ZERO outbound network calls — so the
@@ -97,6 +107,13 @@ class Settings(BaseSettings):
     # GHL daily reconciliation: no-op until the client_integrations table exists.
     scheduler_reconcile_interval_s: float = 86_400.0
     scheduler_reconcile_window_days: int = 1
+    # kie video render reconciliation (E5.2 / #514): a periodic sweep that finds
+    # renders persisted as ``submitted`` (in video_render_tasks) that the
+    # callback never resolved (a restart mid-poll, or a dropped callback), polls
+    # kie for each, and records the result. Bounded per pass like the dispatch
+    # watchdog so a backlog can't fan out an unbounded burst of record-info GETs.
+    scheduler_kie_reconcile_interval_s: float = 120.0
+    scheduler_kie_reconcile_max_per_pass: int = 10
 
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via

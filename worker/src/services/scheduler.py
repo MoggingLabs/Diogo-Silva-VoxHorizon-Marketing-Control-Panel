@@ -369,6 +369,138 @@ async def run_reconciliation_once(settings: Settings) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Job: kie video render reconciliation (E5.2 / #514)
+# ---------------------------------------------------------------------------
+#
+# THE BUG this job backstops: the live broll-search path submits a kie video
+# render and BLOCKS on a 10-minute poll. A restart mid-poll abandoned the render
+# (kie still produced + billed the clip, nothing recorded it), and even with the
+# new callback receiver a dropped/never-delivered callback would still lose it.
+# This sweep is the durable safety net: it finds renders persisted as
+# ``submitted`` in ``video_render_tasks`` (migration 0033), polls kie for each
+# via a single non-blocking probe, and records the result -- exactly what the
+# callback would have done. Idempotent (the callback + the sweep both resolve a
+# task by its unique id; the loser sees a terminal row and no-ops) and BOUNDED
+# per pass (``scheduler_kie_reconcile_max_per_pass``), mirroring the dispatch
+# watchdog's redispatch cap so a backlog can't fan out an unbounded burst.
+
+
+def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
+    """Read up to ``limit`` still-``submitted`` video render task rows (oldest first)."""
+    resp = (
+        sb.table("video_render_tasks")
+        .select("id, task_id, is_veo, creative_id, brief_id, theme, status, attempts")
+        .eq("status", "submitted")
+        .order("submitted_at", desc=False)
+        .limit(limit)
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
+
+
+async def run_kie_reconcile_once(settings: Settings) -> int:
+    """One pass of the kie video render reconciliation. Returns rows resolved.
+
+    Reads the open ``video_render_tasks`` (bounded by
+    ``scheduler_kie_reconcile_max_per_pass``), polls kie once for each via
+    :meth:`services.kie_video.KieVideoClient.poll_status`, and records the
+    outcome: a success downloads + stores the clip and marks the row
+    ``completed``; a terminal kie failure marks it ``failed``; a still-pending
+    render bumps ``attempts`` and is left for the next pass. A per-row failure is
+    logged and skipped so one bad render never aborts the sweep. Idempotent: a
+    row the callback already resolved is no longer ``submitted`` and is skipped.
+    """
+    from datetime import datetime, timezone
+
+    from ..routes import video_callback
+    from ..supabase_client import get_supabase_admin  # lazy: never forces a client
+    from .kie_video import (
+        RENDER_FAILED,
+        RENDER_SUCCESS,
+        KieVideoClient,
+    )
+
+    sb = get_supabase_admin()
+    rows = _open_render_tasks(sb, limit=settings.scheduler_kie_reconcile_max_per_pass)
+    if not rows:
+        log.info("kie_reconcile_no_open_renders")
+        return 0
+
+    client = KieVideoClient()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    resolved = 0
+    for row in rows:
+        task_id = row.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            continue
+        try:
+            status = await client.poll_status(task_id, bool(row.get("is_veo")))
+        except Exception as exc:  # noqa: BLE001 -- one bad render never sinks the pass
+            log.warning("kie_reconcile_poll_failed", task_id=task_id, error=str(exc))
+            _bump_render_attempt(sb, task_id, now_iso)
+            continue
+
+        if status.state == RENDER_SUCCESS:
+            try:
+                stored = await video_callback._store_render_result(
+                    task_id=task_id, theme=row.get("theme"), urls=status.urls
+                )
+            except Exception as exc:  # noqa: BLE001 -- store failure is non-terminal
+                log.warning(
+                    "kie_reconcile_store_failed", task_id=task_id, error=str(exc)
+                )
+                _bump_render_attempt(sb, task_id, now_iso)
+                continue
+            video_callback._mark_completed(
+                task_id,
+                result_url=status.urls[0],
+                clip_id=str(stored.get("clip_id") or "") or None,
+            )
+            resolved += 1
+            log.info(
+                "kie_reconcile_recorded",
+                task_id=task_id,
+                creative_id=row.get("creative_id"),
+                clip_id=stored.get("clip_id"),
+            )
+        elif status.state == RENDER_FAILED:
+            sb.table("video_render_tasks").update(
+                {
+                    "status": "failed",
+                    "error": status.error or "kie reported a render failure",
+                    "completed_at": now_iso,
+                }
+            ).eq("task_id", task_id).execute()
+            resolved += 1
+            log.info("kie_reconcile_marked_failed", task_id=task_id)
+        else:
+            _bump_render_attempt(sb, task_id, now_iso)
+
+    log.info("kie_reconcile_pass_done", open_rows=len(rows), resolved=resolved)
+    return resolved
+
+
+def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
+    """Stamp a still-pending render's last-checked time + bump its attempt count."""
+    try:
+        existing = (
+            sb.table("video_render_tasks")
+            .select("attempts")
+            .eq("task_id", task_id)
+            .maybe_single()
+            .execute()
+        )
+        attempts = 0
+        if existing is not None and isinstance(existing.data, dict):
+            attempts = int(existing.data.get("attempts") or 0)
+        sb.table("video_render_tasks").update(
+            {"attempts": attempts + 1, "updated_at": now_iso}
+        ).eq("task_id", task_id).execute()
+    except Exception as exc:  # noqa: BLE001 -- bookkeeping never aborts the sweep
+        log.warning("kie_reconcile_attempt_bump_failed", task_id=task_id, error=str(exc))
+
+
+# ---------------------------------------------------------------------------
 # Loop supervisor + lifecycle
 # ---------------------------------------------------------------------------
 
@@ -487,6 +619,15 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:ghl_reconcile",
         ),
+        loop.create_task(
+            _interval_loop(
+                "kie_reconcile",
+                settings.scheduler_kie_reconcile_interval_s,
+                lambda: run_kie_reconcile_once(settings),
+                initial_delay_s=20.0,
+            ),
+            name="scheduler:kie_reconcile",
+        ),
     ]
     log.info("scheduler_started", jobs=len(tasks))
     return Scheduler(tasks)
@@ -497,6 +638,7 @@ __all__ = [
     "Scheduler",
     "load_reconciliation_targets",
     "run_dispatch_watchdog_once",
+    "run_kie_reconcile_once",
     "run_observability_once",
     "run_reconciliation_once",
     "start_scheduler",
