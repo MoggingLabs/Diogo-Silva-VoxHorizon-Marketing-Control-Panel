@@ -85,10 +85,72 @@ async def test_reconcile_computes_cpl_and_writes_perf_row(
 
     perf = [row for name, row in fake_supabase.inserts if name == "campaign_perf_image"]
     assert len(perf) == 1
+    # The row uses the ACTUAL campaign_perf_image schema columns (migrations 0001
+    # + 0023): leads_ghl / spend / cpl_real / window_days / campaign_id -- NOT the
+    # phantom leads / spend_usd / real_cpl / window_start the old writer emitted
+    # (which fail against real Postgres; see test_pg_campaign_perf).
     assert perf[0]["pipeline_id"] == "p-1"
     assert perf[0]["ad_entity_id"] == "ae-1"
-    assert perf[0]["leads"] == 4
-    assert perf[0]["real_cpl"] == 50.0
+    assert perf[0]["campaign_id"] == "camp-100"  # attribution ref -> campaign_id
+    assert perf[0]["window_days"] == 7  # SINCE..UNTIL spans 7 days
+    assert perf[0]["leads_ghl"] == 4
+    assert perf[0]["spend"] == 200.0
+    assert perf[0]["cpl_real"] == 50.0
+    # The phantom columns the old writer used must be gone.
+    assert "leads" not in perf[0]
+    assert "spend_usd" not in perf[0]
+    assert "real_cpl" not in perf[0]
+    assert "window_start" not in perf[0]
+
+
+async def test_reconcile_video_writes_to_video_perf_table(
+    fake_supabase: FakeSupabase,
+) -> None:
+    """A video pipeline writes its perf row to campaign_perf_video.
+
+    Image + video keep SEPARATE perf tables; the writer routes by ``format`` so a
+    video reconciliation never lands in (or is dropped from) the image table.
+    """
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _contacts_response(
+            [
+                {"id": f"c-{i}", "dateAdded": IN_WINDOW, "source": "camp-200"}
+                for i in range(3)
+            ]
+        )
+
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-vid", "kind": KIND_META_SPEND, "amount_usd": 150.0}],
+    )
+
+    ghl = _client_with(handler)
+    result = await integrations.reconcile_pipeline(
+        pipeline_id="p-vid",
+        location_id="loc-1",
+        campaign_ref="camp-200",
+        window=(SINCE, UNTIL),
+        ghl_client=ghl,
+        ad_entity_id="ae-2",
+        format="video",
+        client_id="client-9",
+    )
+    await ghl.aclose()
+
+    assert result.real_cpl == 50.0  # 150 / 3
+    assert result.perf_row_written is True
+
+    image_rows = [r for n, r in fake_supabase.inserts if n == "campaign_perf_image"]
+    video_rows = [r for n, r in fake_supabase.inserts if n == "campaign_perf_video"]
+    assert image_rows == []  # nothing in the image table
+    assert len(video_rows) == 1
+    assert video_rows[0]["client_id"] == "client-9"
+    assert video_rows[0]["campaign_id"] == "camp-200"
+    assert video_rows[0]["leads_ghl"] == 3
+    assert video_rows[0]["spend"] == 150.0
+    assert video_rows[0]["cpl_real"] == 50.0
+    assert video_rows[0]["window_days"] == 7
 
 
 async def test_reconcile_records_meta_spend_yields_nonzero_cpl(
@@ -204,7 +266,8 @@ async def test_reconcile_zero_leads_cpl_none(fake_supabase: FakeSupabase) -> Non
     assert result.ghl_leads == 0
     assert result.real_cpl is None  # divide-by-zero guard
     perf = [row for name, row in fake_supabase.inserts if name == "campaign_perf_image"]
-    assert perf[0]["real_cpl"] is None
+    assert perf[0]["cpl_real"] is None  # cpl_real is the real schema column
+    assert perf[0]["leads_ghl"] == 0
 
 
 async def test_reconcile_fake_ghl_mode(

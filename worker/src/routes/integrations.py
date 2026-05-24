@@ -35,7 +35,8 @@ Plus two pure, unit-tested cores wired by cron later (noted, not scheduled):
 
   * :func:`reconcile_pipeline` — daily reconciliation (#366/#367): pull GHL
     leads via :class:`GhlClient`, read Meta spend from ``cost_ledger``, compute
-    real CPL, and write a ``campaign_perf_image`` row.
+    real CPL, and write a ``campaign_perf_image`` / ``campaign_perf_video`` row
+    (routed by the pipeline's format).
   * the watchdog cores live in :mod:`services.observability`.
 """
 
@@ -742,13 +743,21 @@ async def reconcile_pipeline(
     ghl_client: GhlClient,
     ad_entity_id: str | None = None,
     meta_spend_usd: float | None = None,
+    format: str = "image",
+    client_id: str | None = None,
 ) -> ReconciliationResult:
     """Reconcile one pipeline: GHL leads vs Meta spend → real CPL → perf row.
 
     The daily job (#366/#367): count the leads GHL attributes to the campaign in
     the window (GHL is lead truth), determine the pipeline's Meta spend, compute
-    ``real_cpl = spend / leads`` (None on zero leads), and write a
-    ``campaign_perf_image`` row linked to the pipeline (+ ad_entity).
+    ``real_cpl = spend / leads`` (None on zero leads), and write a campaign_perf
+    row linked to the pipeline (+ ad_entity). The perf row lands in the table for
+    the pipeline's ``format``: ``campaign_perf_image`` for image, or
+    ``campaign_perf_video`` for video (image + video keep separate perf tables
+    even post-M1; only the ``creative`` identity base is shared). ``client_id`` is
+    threaded onto the row so the per-client dashboards + the daily-uniqueness
+    index (client, campaign, window, day) work; ``campaign_ref`` is the
+    attribution string and is recorded as the row's ``campaign_id``.
 
     E4.3 (#503) fixes the structural ``real_cpl == 0`` bug. Previously this read
     meta_spend ONLY from ``cost_ledger``, but nothing in prod ever RECORDED a
@@ -797,10 +806,13 @@ async def reconcile_pipeline(
     written = _write_campaign_perf(
         pipeline_id=pipeline_id,
         ad_entity_id=ad_entity_id,
+        client_id=client_id,
+        campaign_id=campaign_ref,
         leads=leads,
         meta_spend=meta_spend,
         cpl=cpl,
         window=window,
+        format=format,
     )
     log.info(
         "reconciliation_done",
@@ -818,33 +830,108 @@ async def reconcile_pipeline(
     )
 
 
-def _write_campaign_perf(
+# Perf tables, keyed by pipeline format. Image + video keep SEPARATE perf tables
+# (campaign_perf_image / campaign_perf_video, migrations 0001 + 0023/0031); only
+# the `creative` identity base is shared post-M1. The video table is a superset
+# of the image table's columns (it adds the engagement funnel), so the common
+# subset this writer fills is identical for both.
+_PERF_TABLE_BY_FORMAT: dict[str, str] = {
+    "image": "campaign_perf_image",
+    "video": "campaign_perf_video",
+}
+
+
+def _window_days(window: tuple[datetime, datetime]) -> int:
+    """Look-back window length in whole days (``window_days`` is NOT NULL int).
+
+    Rounds the span to the nearest day and floors at 1 so a sub-day window still
+    records a valid (>=1) window length rather than 0.
+    """
+    since, until = window
+    days = round((until - since).total_seconds() / 86400)
+    return max(1, int(days))
+
+
+def campaign_perf_table(format: str) -> str:
+    """The perf table for a pipeline ``format`` (image default for unknowns).
+
+    An unknown format falls back to the image table (the default vertical) so a
+    stray value never drops the row silently.
+    """
+    return _PERF_TABLE_BY_FORMAT.get(format, "campaign_perf_image")
+
+
+def build_campaign_perf_row(
     *,
     pipeline_id: str,
     ad_entity_id: str | None,
+    client_id: str | None,
+    campaign_id: str,
     leads: int,
     meta_spend: float,
     cpl: float | None,
     window: tuple[datetime, datetime],
-) -> bool:
-    """Insert a ``campaign_perf_image`` row from the reconciliation figures."""
-    sb = get_supabase_admin()
-    since, until = window
-    row: dict[str, Any] = {
+) -> dict[str, Any]:
+    """Build the campaign_perf row dict with the ACTUAL schema columns.
+
+    Maps the reconciliation figures to the real campaign_perf_image /
+    campaign_perf_video columns (migrations 0001 + 0023/0031): GHL leads ->
+    ``leads_ghl``, Meta spend -> ``spend``, real CPL -> ``cpl_real``, the
+    look-back length -> the NOT NULL ``window_days``, and the attribution ref ->
+    the NOT NULL ``campaign_id``. Shared by the writer and the Postgres
+    integration test so the column set under test never drifts from production.
+    """
+    return {
         "pipeline_id": pipeline_id,
         "ad_entity_id": ad_entity_id,
-        "leads": leads,
-        "spend_usd": meta_spend,
-        "real_cpl": cpl,
-        "window_start": since.isoformat(),
-        "window_end": until.isoformat(),
+        "client_id": client_id,
+        "campaign_id": campaign_id,
+        "window_days": _window_days(window),
+        "leads_ghl": leads,
+        "spend": meta_spend,
+        "cpl_real": cpl,
     }
+
+
+def _write_campaign_perf(
+    *,
+    pipeline_id: str,
+    ad_entity_id: str | None,
+    client_id: str | None,
+    campaign_id: str,
+    leads: int,
+    meta_spend: float,
+    cpl: float | None,
+    window: tuple[datetime, datetime],
+    format: str = "image",
+) -> bool:
+    """Insert a campaign_perf row (image or video table) from reconciliation figures.
+
+    Routes to ``campaign_perf_image`` or ``campaign_perf_video`` by ``format`` --
+    the two verticals keep separate perf tables -- and writes the real schema
+    columns via :func:`build_campaign_perf_row`.
+    """
+    sb = get_supabase_admin()
+    table = campaign_perf_table(format)
+    row = build_campaign_perf_row(
+        pipeline_id=pipeline_id,
+        ad_entity_id=ad_entity_id,
+        client_id=client_id,
+        campaign_id=campaign_id,
+        leads=leads,
+        meta_spend=meta_spend,
+        cpl=cpl,
+        window=window,
+    )
     try:
-        sb.table("campaign_perf_image").insert(row).execute()
+        sb.table(table).insert(row).execute()
         return True
     except Exception as e:  # noqa: BLE001 — reconciliation never aborts on a write
         log.warning(
-            "campaign_perf_write_failed", pipeline_id=pipeline_id, error=str(e)
+            "campaign_perf_write_failed",
+            pipeline_id=pipeline_id,
+            table=table,
+            error=str(e),
         )
         return False
 
