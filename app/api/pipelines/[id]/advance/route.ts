@@ -8,6 +8,11 @@ import {
   canAdvance,
   nextStage,
 } from "@/lib/pipeline/transitions";
+import {
+  copyGateCleared,
+  isCreativeInScope,
+  rollupCleared as rollupClearedCore,
+} from "@/lib/pipeline/rollup";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
 import type { PipelineStatus } from "@/lib/pipeline/types";
 import { MIN_APPROVED_COPY } from "@/lib/review/grid";
@@ -192,22 +197,15 @@ async function advanceFromFinalizeAssets(
 }
 
 /**
- * The terminal-good `stage_state_enum` values that clear a per-creative gate.
- * Mirrors the DB `pipeline_rollup_cleared()` predicate (migration 0018).
- */
-const CLEARED_STAGE_STATES: ReadonlySet<Database["public"]["Enums"]["stage_state_enum"]> = new Set([
-  "passed",
-  "overridden",
-  "skipped",
-]);
-
-/**
  * Compute the per-creative rollup for `(pipeline, stage)` exactly as the DB
- * `pipeline_rollup_cleared()` function does (migration 0018): cleared iff ≥1
- * row exists AND every row is in a terminal-good state
- * (`passed | overridden | skipped`). Reading it here (instead of trusting a
- * client-supplied flag) is the server-side enforcement — the route and the UI
- * gate read the same predicate so they agree by construction.
+ * `pipeline_rollup_cleared()` function does (migration 0039, the single source):
+ * cleared iff ≥1 IN-SCOPE row exists AND every such row is terminal-good
+ * (`passed | overridden | skipped`). A killed (or soft-deleted) creative drops
+ * out of the scope so it can never hold the gate — the E2.3 killed-creative drift
+ * fix that aligns this route with `lib/review/grid.ts` AND the SQL predicate. The
+ * cleared-state set + the in-scope rule + the rollup verdict are read from the
+ * one `lib/pipeline/rollup.ts` module (mirrored by the SQL, parity-tested), never
+ * re-derived here.
  *
  * Returns `{ cleared, total, blocking }` so the 422 body can name what is still
  * holding the gate. A read error is surfaced (caller turns it into a 500).
@@ -221,18 +219,48 @@ async function computeRollup(
 > {
   const { data, error } = await supabase
     .from("creative_stage_state")
-    .select("status")
+    .select("status, creative_id")
     .eq("pipeline_id", pipelineId)
     .eq("stage", stage as Database["public"]["Enums"]["creative_stage_enum"]);
   if (error) {
     return { ok: false, message: error.message };
   }
-  const rows = data ?? [];
-  const total = rows.length;
-  const blocking = rows.filter((r) => !CLEARED_STAGE_STATES.has(r.status)).length;
-  // Mirror pipeline_rollup_cleared(): at least one row AND none blocking.
-  const cleared = total > 0 && blocking === 0;
+  const rows = (data ?? []) as Array<{
+    status: Database["public"]["Enums"]["stage_state_enum"];
+    creative_id?: string | null;
+  }>;
+
+  // Drop killed creatives from the scope (parity with the grid + the SQL). We
+  // only look up the killed set — there is no per-creative status on the gate
+  // row itself, and a row whose creative is killed must not hold the gate.
+  const killed = await killedCreativeIds(supabase, pipelineId);
+  const inScope = rows.filter((r) => !(r.creative_id && killed.has(r.creative_id)));
+
+  const { cleared, total, blocking } = rollupClearedCore(inScope.map((r) => r.status));
   return { ok: true, cleared, total, blocking };
+}
+
+/**
+ * The set of image-creative ids killed for a pipeline — the rows the rollup +
+ * copy gates drop from scope (a killed creative never holds a gate). Only image
+ * creatives can be `killed` (video_creative_status has no such value), so this
+ * reads `creatives`. A read error surfaces an empty set rather than failing the
+ * advance: excluding fewer creatives only ever makes the gate STRICTER, never
+ * looser, so a transient read miss can never let an unqualified pipeline through.
+ */
+async function killedCreativeIds(
+  supabase: SupabaseClient,
+  pipelineId: string,
+): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from("creatives")
+    .select("id")
+    .eq("pipeline_id", pipelineId)
+    .eq("status", "killed");
+  if (error || !data) {
+    return new Set<string>();
+  }
+  return new Set((data as Array<{ id: string }>).map((c) => c.id));
 }
 
 /**
@@ -322,8 +350,8 @@ async function computeCopyGate(
   if (cErr) {
     return { ok: false, message: cErr.message };
   }
-  const inScope = (creatives ?? []).filter(
-    (c) => (c as { status?: string }).status !== "killed",
+  const inScope = (creatives ?? []).filter((c) =>
+    isCreativeInScope(c as { status?: string | null }),
   ) as Array<{ id: string }>;
 
   const { data: variants, error: vErr } = await supabase
@@ -338,11 +366,13 @@ async function computeCopyGate(
   for (const v of (variants ?? []) as Array<{ creative_id: string }>) {
     approvedByCreative.set(v.creative_id, (approvedByCreative.get(v.creative_id) ?? 0) + 1);
   }
-  const short = inScope.filter(
-    (c) => (approvedByCreative.get(c.id) ?? 0) < MIN_APPROVED_COPY,
-  ).length;
-  const cleared = inScope.length > 0 && short === 0;
-  return { ok: true, cleared, total: inScope.length, short };
+  // Single-source copy-gate predicate (≥MIN_APPROVED_COPY approved per in-scope
+  // creative) — the same one the launch checklist + StageCopy UI read.
+  const { cleared, total, short } = copyGateCleared(
+    inScope.map((c) => c.id),
+    approvedByCreative,
+  );
+  return { ok: true, cleared, total, short };
 }
 
 /**

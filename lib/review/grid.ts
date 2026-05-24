@@ -15,7 +15,23 @@
  *     copy/creative).
  *
  * No React, no IO — pure data in / data out (the `node` vitest project).
+ *
+ * The cleared-verdict set + the killed-creative scope rule are NOT defined here:
+ * they live in `lib/pipeline/rollup.ts`, the ONE source the advance route, this
+ * grid, and (mirrored) the SQL `pipeline_rollup_cleared` (0039) all share, so the
+ * UI gate and the server gate agree by construction (M2 / E2.3).
  */
+import {
+  MIN_APPROVED_COPY,
+  copyGateCleared,
+  isCreativeInScope,
+  isStageStateCleared,
+  rollupCleared as rollupClearedCore,
+} from "@/lib/pipeline/rollup";
+
+// Re-export the copy-gate minimum from the single-source rollup module. Many
+// call sites import it from here historically; keep the public name stable.
+export { MIN_APPROVED_COPY };
 
 /** The four per-creative gate stages, in their forced execution order. */
 export type CreativeStage = "creative_qa" | "compliance_review" | "copy" | "spec_validation";
@@ -61,17 +77,22 @@ export type GridCreative = {
   status: CreativeLifecycle;
 };
 
-/** The states that count as "this stage is done for this creative". */
-const CLEARED_STATES: ReadonlySet<SubState> = new Set(["passed", "overridden", "skipped"]);
-
-/** True when a verdict counts as cleared (matches `pipeline_rollup_cleared`). */
+/**
+ * True when a verdict counts as cleared (matches `pipeline_rollup_cleared`).
+ * Delegates to the single-source rollup module (`CLEARED_STAGE_STATES`) so the
+ * grid, the advance route, and the SQL predicate (0039) cannot drift.
+ */
 export function isCleared(status: SubState): boolean {
-  return CLEARED_STATES.has(status);
+  return isStageStateCleared(status);
 }
 
-/** A creative is "in scope" for a stage's rollup unless it was killed. */
+/**
+ * A creative is "in scope" for a stage's rollup unless it was killed (or
+ * soft-deleted). Delegates to the single-source scope rule so the grid agrees
+ * with the advance route + the SQL predicate (0039).
+ */
 export function isInScope(creative: GridCreative): boolean {
-  return creative.status !== "killed";
+  return isCreativeInScope(creative);
 }
 
 /**
@@ -169,11 +190,13 @@ export function rollupForStage(rows: GridRow[], stage: CreativeStage): RollupCou
 
 /**
  * Whether a per-creative stage's rollup is cleared (the gate may open). Matches
- * `pipeline_rollup_cleared`: ≥1 in-scope creative AND none uncleared.
+ * `pipeline_rollup_cleared` (0039): ≥1 in-scope creative AND none uncleared.
+ * Delegates the verdict to the single-source `rollupCleared` core over the
+ * in-scope creatives' cell verdicts so the grid and the server agree.
  */
 export function rollupCleared(rows: GridRow[], stage: CreativeStage): boolean {
-  const { total, cleared } = rollupForStage(rows, stage);
-  return total > 0 && cleared === total;
+  const statuses = rows.filter((r) => isInScope(r.creative)).map((r) => r.cells[stage].status);
+  return rollupClearedCore(statuses).cleared;
 }
 
 // ---------------------------------------------------------------------------
@@ -195,9 +218,6 @@ export type LaunchPrecondition = {
   detail: string;
 };
 
-/** Minimum approved copy variants required per creative before launch. */
-export const MIN_APPROVED_COPY = 3;
-
 /**
  * Compute the launch preconditions checklist from the resolved grid + the copy
  * variants. Launch is gated on ALL of:
@@ -214,17 +234,20 @@ export function launchPreconditions(
   const spec = rollupForStage(rows, "spec_validation");
   const compliance = rollupForStage(rows, "compliance_review");
 
-  // Approved-copy count per in-scope creative.
+  // Approved-copy count per in-scope creative — fed to the single-source copy
+  // gate predicate so the launch checklist agrees with the copy stage gate + the
+  // worker launch re-check.
   const approvedByCreative = new Map<string, number>();
   for (const cv of copyVariants) {
     if (cv.status === "approved") {
       approvedByCreative.set(cv.creative_id, (approvedByCreative.get(cv.creative_id) ?? 0) + 1);
     }
   }
-  const creativesShortOnCopy = inScope.filter(
-    (r) => (approvedByCreative.get(r.creative.id) ?? 0) < MIN_APPROVED_COPY,
+  const copyGate = copyGateCleared(
+    inScope.map((r) => r.creative.id),
+    approvedByCreative,
   );
-  const copyMet = inScope.length > 0 && creativesShortOnCopy.length === 0;
+  const copyMet = copyGate.cleared;
 
   return [
     {
@@ -253,9 +276,9 @@ export function launchPreconditions(
       detail:
         inScope.length === 0
           ? "no creatives in scope"
-          : creativesShortOnCopy.length === 0
+          : copyGate.short === 0
             ? "all creatives have enough approved copy"
-            : `${creativesShortOnCopy.length} creative(s) short on approved copy`,
+            : `${copyGate.short} creative(s) short on approved copy`,
     },
   ];
 }

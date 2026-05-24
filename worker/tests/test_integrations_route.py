@@ -131,6 +131,67 @@ def test_preconditions_fail_when_a_creative_failed(fake_supabase: FakeSupabase) 
     assert pc.ok is False
 
 
+def test_preconditions_drop_killed_creative_from_scope(fake_supabase: FakeSupabase) -> None:
+    """A KILLED creative's gate row must NOT hold the launch gate (E2.3 drift fix).
+
+    spec + compliance each have one passed (in-scope) row and one FAILED row whose
+    creative is killed. The killed creative is dropped from the scope, so both
+    stages clear and (with >=3 approved copy) the preconditions are met.
+    """
+    fake_supabase.seed(
+        "creative_stage_state",
+        [
+            {"pipeline_id": "p-1", "stage": "spec_validation", "status": "passed",
+             "creative_id": "live-1"},
+            {"pipeline_id": "p-1", "stage": "spec_validation", "status": "failed",
+             "creative_id": "killed-1"},
+            {"pipeline_id": "p-1", "stage": "compliance_review", "status": "passed",
+             "creative_id": "live-1"},
+            {"pipeline_id": "p-1", "stage": "compliance_review", "status": "failed",
+             "creative_id": "killed-1"},
+        ],
+    )
+    # killed-1 is killed -> out of scope.
+    fake_supabase.seed(
+        "creatives", [{"id": "killed-1", "pipeline_id": "p-1", "status": "killed"}]
+    )
+    fake_supabase.seed(
+        "copy_variants",
+        [{"id": f"cv-{i}", "pipeline_id": "p-1", "status": "approved"} for i in range(3)],
+    )
+    pc = integrations.check_launch_preconditions("p-1")
+    assert pc.spec_pass is True
+    assert pc.compliance_clear is True
+    assert pc.ok is True
+
+
+def test_preconditions_killed_still_blocks_when_a_live_creative_failed(
+    fake_supabase: FakeSupabase,
+) -> None:
+    """Dropping killed creatives must not mask a still-failed LIVE creative."""
+    fake_supabase.seed(
+        "creative_stage_state",
+        [
+            {"pipeline_id": "p-1", "stage": "spec_validation", "status": "passed",
+             "creative_id": "live-1"},
+            {"pipeline_id": "p-1", "stage": "compliance_review", "status": "failed",
+             "creative_id": "live-1"},
+            {"pipeline_id": "p-1", "stage": "compliance_review", "status": "passed",
+             "creative_id": "killed-1"},
+        ],
+    )
+    fake_supabase.seed(
+        "creatives", [{"id": "killed-1", "pipeline_id": "p-1", "status": "killed"}]
+    )
+    fake_supabase.seed(
+        "copy_variants",
+        [{"id": f"cv-{i}", "pipeline_id": "p-1", "status": "approved"} for i in range(3)],
+    )
+    pc = integrations.check_launch_preconditions("p-1")
+    assert pc.compliance_clear is False
+    assert pc.ok is False
+
+
 def test_preconditions_fail_when_too_few_copy(fake_supabase: FakeSupabase) -> None:
     fake_supabase.seed(
         "creative_stage_state",

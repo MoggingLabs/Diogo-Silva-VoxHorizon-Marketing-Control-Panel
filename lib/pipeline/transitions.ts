@@ -77,14 +77,22 @@ function missingPayloadsForFormat(
  * the move and whether the UI shows a manual "Continue" button.
  *
  *  - `gate`     — manager advances via the generic `/advance` route when the
- *                 stage's predicate (below) is satisfied.
+ *                 stage's predicate (below) is satisfied; the UI shows a manual
+ *                 "Continue" button.
  *  - `auto`     — the workflow advances it (DB trigger / worker on completion);
- *                 no manual button. `generation→creative_qa`,
- *                 `spec_validation→variant_plan`, `finalize_assets→launch_handoff`.
+ *                 no manual button. ONLY `generation→creative_qa` (the 0024
+ *                 trigger) and `finalize_assets→launch_handoff` (closed by the
+ *                 operator finalize tools + the route's finalize gate).
  *  - `decision` — advances via a dedicated decision route that records a human
  *                 choice: `review` (approve/reject), `launch_handoff` (HARD
  *                 launch gate), `monitor` (kill/scale).
  *  - `terminal` — `done` / `cancelled`.
+ *
+ * E2.5 fix: `spec_validation` is a per-creative GATE, not `auto`. It is a member
+ * of {@link PER_CREATIVE_STAGES}, the advance route gates it on the rollup, and
+ * the StageCreativeReview UI shows its Continue button — classifying it `auto`
+ * (no button, "the workflow advances it") was a stall trap, since NOTHING
+ * auto-advances `spec_validation→variant_plan`.
  */
 export type AdvanceMechanism = "gate" | "auto" | "decision" | "terminal";
 
@@ -95,10 +103,10 @@ export function advanceMechanism(status: PipelineStatus): AdvanceMechanism {
     case "creative_qa":
     case "compliance_review":
     case "copy":
+    case "spec_validation":
     case "variant_plan":
       return "gate";
     case "generation":
-    case "spec_validation":
     case "finalize_assets":
       return "auto";
     case "review":
