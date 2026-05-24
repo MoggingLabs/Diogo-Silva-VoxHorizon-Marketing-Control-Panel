@@ -149,6 +149,56 @@ jobs:
             git -C /opt/voxhorizon/repo fetch --quiet origin main
             git -C /opt/voxhorizon/repo reset --hard origin/main
             cd /opt/voxhorizon
+            # === pre-deploy migration gate (E5.5 / #523) ===========================
+            # deploy-stack.yml applies NO migrations: schema is pushed manually via
+            # `supabase db push`, decoupled from this code deploy. So a rolled image
+            # can boot against a DB that is BEHIND the schema the code requires (a
+            # forgotten / failed db push), which then surfaces as a cryptic
+            # `relation/column does not exist` deep in a request AFTER the worker
+            # reported healthy and took traffic.
+            #
+            # We choose a pre-deploy CHECK (not an in-deploy migrate): applying DDL
+            # from the deploy path to a live multi-tenant DB is the riskier option,
+            # and the expand/contract rule (docs/migrations.md) requires DDL be
+            # additive-first and reviewed -- never auto-applied as a deploy side
+            # effect. So the gate is read-only: it FAILS the deploy if the DB is
+            # behind the code's required schema floor, leaving the running stack
+            # untouched. Fix forward by running the owed `supabase db push`, then
+            # re-run this deploy.
+            #
+            # The check probes the SAME sentinel object the in-app guard uses
+            # (worker/src/services/schema_guard.py: SENTINEL_TABLE). The migration
+            # chain is forward-only files with no schema_migrations table, so the
+            # presence of the table the latest required migration creates is the
+            # proof the schema is at/above that floor. Bump REQUIRED_SENTINEL_TABLE
+            # below in lockstep with schema_guard.SENTINEL_TABLE when a new
+            # migration becomes a hard code dependency.
+            #
+            # Needs DATABASE_URL (the service-role/direct Postgres DSN) in the VPS
+            # deploy env. If it is unset we FAIL CLOSED: a deploy that cannot verify
+            # the schema must not silently ship.
+            REQUIRED_MIGRATION="0033_video_render_tasks"
+            REQUIRED_SENTINEL_TABLE="video_render_tasks"
+            if [ -z "${DATABASE_URL:-}" ]; then
+              echo "migration gate: DATABASE_URL not set; cannot verify schema floor."
+              echo "Set the direct Postgres DSN in the deploy env, or run the owed"
+              echo "\`supabase db push\` and confirm before deploying. Failing closed."
+              exit 1
+            fi
+            echo "migration gate: requiring $REQUIRED_MIGRATION (sentinel table $REQUIRED_SENTINEL_TABLE)"
+            if ! docker run --rm -e PGCONNECT_TIMEOUT=10 postgres:16 \
+                psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -tAc \
+                "select to_regclass('public.$REQUIRED_SENTINEL_TABLE') is not null;" \
+                | grep -qx t; then
+              echo "DEPLOY BLOCKED: DB schema is behind code. Required migration"
+              echo "$REQUIRED_MIGRATION is not applied (sentinel table"
+              echo "$REQUIRED_SENTINEL_TABLE is missing). Run \`supabase db push\`"
+              echo "to bring the schema forward, then re-run this deploy."
+              echo "The running stack was NOT touched."
+              exit 1
+            fi
+            echo "migration gate: schema is at/above the required floor; proceeding."
+            # === end pre-deploy migration gate =====================================
             docker compose pull
             docker compose up -d --remove-orphans
             # Wait for each service to report healthy before pruning the
