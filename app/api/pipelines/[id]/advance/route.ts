@@ -192,12 +192,14 @@ async function advanceFromFinalizeAssets(
 }
 
 /**
- * A `creative_stage_state` row, read by name (the 0018 table is on `main` but
- * not yet in `types.gen.ts`, so the generated `Database` type doesn't know it).
+ * The terminal-good `stage_state_enum` values that clear a per-creative gate.
+ * Mirrors the DB `pipeline_rollup_cleared()` predicate (migration 0018).
  */
-type StageStateRow = {
-  status: "pending" | "in_progress" | "passed" | "failed" | "overridden" | "skipped";
-};
+const CLEARED_STAGE_STATES: ReadonlySet<Database["public"]["Enums"]["stage_state_enum"]> = new Set([
+  "passed",
+  "overridden",
+  "skipped",
+]);
 
 /**
  * Compute the per-creative rollup for `(pipeline, stage)` exactly as the DB
@@ -218,18 +220,16 @@ async function computeRollup(
   { ok: true; cleared: boolean; total: number; blocking: number } | { ok: false; message: string }
 > {
   const { data, error } = await supabase
-    .from("creative_stage_state" as never)
+    .from("creative_stage_state")
     .select("status")
-    .eq("pipeline_id" as never, pipelineId as never)
-    .eq("stage" as never, stage as never);
+    .eq("pipeline_id", pipelineId)
+    .eq("stage", stage as Database["public"]["Enums"]["creative_stage_enum"]);
   if (error) {
     return { ok: false, message: error.message };
   }
-  const rows = (data ?? []) as unknown as StageStateRow[];
+  const rows = data ?? [];
   const total = rows.length;
-  const blocking = rows.filter(
-    (r) => r.status !== "passed" && r.status !== "overridden" && r.status !== "skipped",
-  ).length;
+  const blocking = rows.filter((r) => !CLEARED_STAGE_STATES.has(r.status)).length;
   // Mirror pipeline_rollup_cleared(): at least one row AND none blocking.
   const cleared = total > 0 && blocking === 0;
   return { ok: true, cleared, total, blocking };
@@ -578,11 +578,9 @@ async function advanceFromConfiguration(
   }
 
   if (videoPayload?.success) {
-    const { data: humanId, error: rpcErr } = await supabase.rpc(
-      // RPC name lives outside the generated types; cast through unknown.
-      "gen_video_brief_id_human" as never,
-      { p_client_slug: client.slug } as never,
-    );
+    const { data: humanId, error: rpcErr } = await supabase.rpc("gen_video_brief_id_human", {
+      p_client_slug: client.slug,
+    });
     if (rpcErr || typeof humanId !== "string") {
       // Compensating: delete the image brief we just inserted (if any) so
       // we don't leave a dangling `posted` row.
