@@ -197,6 +197,20 @@ def create_app() -> FastAPI:
         hermes_approval_mode.router, tags=["hermes-approval-mode"]
     )
 
+    # === startup applied-migrations handshake (E5.5 / #523) ===
+    # deploy-stack.yml applies NO migrations (schema is pushed manually via
+    # `supabase db push`, decoupled from the code deploy), so a rolled image can
+    # boot against a DB that is BEHIND the schema the code expects. This probes a
+    # sentinel object the latest required migration creates and LOUDLY logs
+    # `schema_guard_behind` on a proven mismatch (a forgotten / failed db push).
+    # Best-effort like the seed below: it NEVER crashes startup -- an
+    # unconfigured / unreachable Supabase (local boot, tests) is a quiet skip, so
+    # health + local b-roll still serve. The deploy-path gate in deploy-stack.yml
+    # is the hard stop; this is the in-app safety net + operator signal.
+    from .services.schema_guard import check_schema_at_startup
+
+    check_schema_at_startup()
+
     # === seed the compliance_rule lookup (#394) ===
     # The compliance engine adjudicates from the in-memory ruleset
     # (services.compliance_rules), but the compliance_rule TABLE is a
