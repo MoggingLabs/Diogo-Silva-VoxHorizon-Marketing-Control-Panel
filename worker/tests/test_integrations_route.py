@@ -516,3 +516,150 @@ def test_metrics_happy(
 def test_metrics_401(client: TestClient, fake_supabase: FakeSupabase) -> None:
     resp = client.get("/work/metrics")
     assert resp.status_code == 401
+
+
+# ===========================================================================
+# Transactional outbox enqueue (E5.1 / #510)
+# ===========================================================================
+#
+# The Meta launch + Drive finalize recorders enqueue an integration_outbox row
+# IN THE SAME HANDLER as the state change, so the durable side effect is
+# exactly-once + retryable. We assert the row is written on the happy path,
+# carries the right (integration, op) + a deterministic idempotency_key, and is
+# NOT written when the state change itself is rejected (gate-blocked / md5
+# mismatch) -- a side effect must never outlive a refused state change.
+
+
+def _outbox_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
+    return [row for name, row in sb.inserts if name == "integration_outbox"]
+
+
+def test_launch_enqueues_meta_outbox_row_in_handler(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    fake_supabase.set_single("pipelines", _pipeline_row())
+    _seed_clearing_state(fake_supabase)
+
+    resp = client.post(
+        "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
+    )
+    assert resp.status_code == 200, resp.text
+    ob = _outbox_inserts(fake_supabase)
+    assert len(ob) == 1
+    row = ob[0]
+    assert row["integration"] == "meta"
+    assert row["op"] == "record_launch"
+    assert row["status"] == "pending"
+    assert row["pipeline_id"] == "p-1"
+    assert row["idempotency_key"].startswith("meta:record_launch:p-1:")
+    # The durable request payload carries the recorded entity graph.
+    assert row["request"]["pipeline_id"] == "p-1"
+    assert len(row["request"]["entities"]) == 3
+
+
+def test_launch_gate_block_enqueues_nothing(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    fake_supabase.set_single("pipelines", _pipeline_row())
+    # No clearing state -> gate 422s before any write, INCLUDING the outbox.
+    resp = client.post(
+        "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
+    )
+    assert resp.status_code == 422
+    assert _outbox_inserts(fake_supabase) == []
+
+
+def test_launch_enqueue_is_idempotent_on_rerecord(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    """Re-recording the same launch enqueues the side effect exactly once."""
+    fake_supabase.set_single("pipelines", _pipeline_row())
+    _seed_clearing_state(fake_supabase)
+
+    first = client.post(
+        "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
+    )
+    assert first.status_code == 200
+    # The enqueued row now lives in the store; the second call's probe finds it.
+    second = client.post(
+        "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
+    )
+    assert second.status_code == 200, second.text
+    # Exactly one outbox row despite two recorder runs (same idempotency_key).
+    assert len(_outbox_inserts(fake_supabase)) == 1
+
+
+def test_finalize_drive_enqueues_drive_outbox_row(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    fake_supabase.set_single("pipelines", _pipeline_row())
+    resp = client.post(
+        "/work/pipeline/tools/finalize_drive", headers=auth_headers, json=_drive_body()
+    )
+    assert resp.status_code == 200, resp.text
+    ob = _outbox_inserts(fake_supabase)
+    assert len(ob) == 1
+    row = ob[0]
+    assert row["integration"] == "drive"
+    assert row["op"] == "finalize_verified"
+    assert row["status"] == "pending"
+    assert row["idempotency_key"].startswith("drive:finalize_verified:p-1:")
+    assert len(row["request"]["assets"]) == 1
+
+
+def test_finalize_drive_md5_mismatch_enqueues_nothing(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    fake_supabase.set_single("pipelines", _pipeline_row())
+    body = _drive_body(
+        assets=[
+            {
+                "creative_id": "cr-1",
+                "drive_url": "https://drive/cr-1",
+                "expected_md5": "aaaa",
+                "drive_md5": "bbbb",
+            }
+        ]
+    )
+    resp = client.post(
+        "/work/pipeline/tools/finalize_drive", headers=auth_headers, json=body
+    )
+    assert resp.status_code == 422
+    # A refused finalize must not leave a durable side effect behind.
+    assert _outbox_inserts(fake_supabase) == []
+
+
+def test_ghl_webhook_dedupes_on_insert_conflict(
+    client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
+) -> None:
+    """A PK conflict on the inbox insert is treated as already-ingested (deduped).
+
+    The probe-then-insert has a race window; the inbox PK (provider, event_id) is
+    the real backstop. We force the insert to raise (a unique violation) and
+    assert the route still returns deduped=true, not a 500.
+    """
+    from src.routes import integrations as integrations_mod
+
+    real_table = fake_supabase.table
+
+    def _conflicting_insert(name: str):  # noqa: ANN202
+        q = real_table(name)
+        if name == "integration_event_inbox":
+            orig_execute = q.execute
+
+            def _boom():  # noqa: ANN202
+                # Reads (select/maybe_single) pass through; the insert raises.
+                if q._insert_data is not None:
+                    raise RuntimeError("duplicate key value violates unique constraint")
+                return orig_execute()
+
+            q.execute = _boom  # type: ignore[method-assign]
+        return q
+
+    integrations_mod.get_supabase_admin = lambda: type(  # type: ignore[assignment]
+        "SB", (), {"table": staticmethod(_conflicting_insert)}
+    )()
+
+    resp = client.post("/work/ghl/webhook", headers=auth_headers, json=_webhook_body())
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deduped"] is True

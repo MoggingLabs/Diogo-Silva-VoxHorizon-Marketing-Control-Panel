@@ -115,6 +115,21 @@ class Settings(BaseSettings):
     scheduler_kie_reconcile_interval_s: float = 120.0
     scheduler_kie_reconcile_max_per_pass: int = 10
 
+    # Transactional-outbox relay (E5.1 / #510): the drainer that claims due
+    # ``integration_outbox`` rows, performs the external side effect, and records
+    # the outcome (see services.outbox_relay). It runs every
+    # ``scheduler_outbox_interval_s`` and is BOUNDED to
+    # ``scheduler_outbox_max_per_pass`` rows per pass -- mirroring the dispatch
+    # watchdog + kie reconcile caps -- so a backlog can't fan out an unbounded
+    # burst of external calls. A failed side effect backs off exponentially
+    # (``base`` doubling, capped at ``cap``) on next_attempt_at and is dead-
+    # lettered (status='dead') after ``scheduler_outbox_max_attempts`` tries.
+    scheduler_outbox_interval_s: float = 30.0
+    scheduler_outbox_max_per_pass: int = 20
+    scheduler_outbox_max_attempts: int = 8
+    scheduler_outbox_backoff_base_s: float = 30.0
+    scheduler_outbox_backoff_cap_s: float = 3_600.0
+
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via
     # chat.postMessage. The bot token is sourced at deploy time from

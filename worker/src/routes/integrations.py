@@ -82,6 +82,75 @@ _AD_ENTITY_KINDS: frozenset[str] = frozenset(AD_ENTITY_KINDS)
 
 
 # ===========================================================================
+# Transactional outbox enqueue (E5.1)
+# ===========================================================================
+#
+# The external-write recorder routes below enqueue an ``integration_outbox`` row
+# alongside the state change they record, so the durable side effect the operator
+# cannot itself guarantee (a Meta activation follow-through, a Drive index/notify)
+# is applied EXACTLY ONCE and is retryable across a crash. The relay drainer
+# (:mod:`services.outbox_relay`) claims + performs + records each row.
+#
+# supabase-py is not transactional (see :mod:`services.atomic_inserts` for the
+# same accepted constraint), so "same transaction" here is the worker's practical
+# equivalent: the outbox INSERT is the LAST write in the handler, after the state
+# change has landed. The ``idempotency_key`` UNIQUE constraint (migration 0023)
+# is the exactly-once backstop -- a re-run of the same recorder (the operator
+# retries the call) finds the row already enqueued and does not double-enqueue,
+# so the side effect fires once even though the recorder ran twice.
+
+
+def enqueue_outbox(
+    *,
+    integration: str,
+    op: str,
+    idempotency_key: str,
+    request: dict[str, Any],
+    pipeline_id: str | None = None,
+) -> bool:
+    """Enqueue one ``integration_outbox`` row, idempotent on ``idempotency_key``.
+
+    Returns True when a new row was enqueued, False when an identical key already
+    exists (a recorder re-run) -- so the side effect is enqueued exactly once
+    regardless of how many times the recorder is replayed. A duplicate-key INSERT
+    that races past the probe is caught + treated as already-enqueued, so two
+    concurrent recorders never both create the side effect.
+    """
+    sb = get_supabase_admin()
+    existing = (
+        sb.table("integration_outbox")
+        .select("id")
+        .eq("idempotency_key", idempotency_key)
+        .maybe_single()
+        .execute()
+    )
+    if existing is not None and isinstance(existing.data, dict):
+        log.info("outbox_enqueue_deduped", idempotency_key=idempotency_key, op=op)
+        return False
+    try:
+        sb.table("integration_outbox").insert(
+            {
+                "pipeline_id": pipeline_id,
+                "integration": integration,
+                "op": op,
+                "idempotency_key": idempotency_key,
+                "request": request,
+                "status": "pending",
+            }
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 -- a unique-key race == already enqueued
+        log.info(
+            "outbox_enqueue_conflict",
+            idempotency_key=idempotency_key,
+            op=op,
+            error=str(exc),
+        )
+        return False
+    log.info("outbox_enqueued", idempotency_key=idempotency_key, integration=integration, op=op)
+    return True
+
+
+# ===========================================================================
 # Launch precondition re-check (server-side, the HARD gate)
 # ===========================================================================
 
@@ -279,6 +348,27 @@ async def record_launch(body: LaunchInput) -> dict[str, Any]:
         ),
     )
 
+    # (5) Enqueue the durable Meta launch follow-through in the SAME handler as
+    # the state change (the recorder above). Keyed on the pipeline + recorded
+    # entity graph so a re-recorded launch (operator retry) does not double-
+    # enqueue. The relay performs the exactly-once side effect + retries it.
+    enqueue_outbox(
+        integration="meta",
+        op="record_launch",
+        idempotency_key=_launch_idempotency_key(body.pipeline_id, recorded),
+        pipeline_id=body.pipeline_id,
+        request={
+            "pipeline_id": body.pipeline_id,
+            "approved_by": body.approved_by,
+            "launch_package_id": body.launch_package_id,
+            "client_id": body.client_id or pipeline.get("client_id"),
+            "entities": [
+                {"id": e.get("id"), "kind": e.get("kind"), "meta_id": e.get("meta_id")}
+                for e in recorded
+            ],
+        },
+    )
+
     emit_pipeline_event(
         pipeline_id=body.pipeline_id,
         kind="launch_recorded",
@@ -473,6 +563,21 @@ async def finalize_drive(body: FinalizeDriveInput) -> dict[str, Any]:
             }
         )
 
+    # Enqueue the durable Drive finalize follow-through in the same handler as the
+    # creative stamps above. Keyed on the pipeline + the verified asset set so a
+    # re-finalize (operator retry) does not double-enqueue; the relay performs the
+    # exactly-once side effect + retries it.
+    enqueue_outbox(
+        integration="drive",
+        op="finalize_verified",
+        idempotency_key=_finalize_idempotency_key(body.pipeline_id, recorded),
+        pipeline_id=body.pipeline_id,
+        request={
+            "pipeline_id": body.pipeline_id,
+            "assets": recorded,
+        },
+    )
+
     emit_pipeline_event(
         pipeline_id=body.pipeline_id,
         kind="drive_finalized",
@@ -542,13 +647,31 @@ async def ghl_webhook(body: dict[str, Any]) -> dict[str, Any]:
             "dedupe_key": event.dedupe_key,
         }
 
-    sb.table("integration_event_inbox").insert(
-        {
-            "provider": "ghl",
-            "event_id": event.dedupe_key,
-            "payload": event.raw,
+    # Consistent dedupe: the probe above wins the common case, but two concurrent
+    # identical deliveries (GHL retries fan in) can both pass it. The inbox PK
+    # ``(provider, event_id)`` (migration 0023) is the real backstop -- a racing
+    # second insert hits the unique constraint, which we treat as "already
+    # ingested" (deduped) rather than 500ing, so the event is still counted once.
+    try:
+        sb.table("integration_event_inbox").insert(
+            {
+                "provider": "ghl",
+                "event_id": event.dedupe_key,
+                "payload": event.raw,
+            }
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 -- PK conflict == already ingested
+        log.info(
+            "ghl_webhook_deduped_on_conflict",
+            dedupe_key=event.dedupe_key,
+            error=str(exc),
+        )
+        return {
+            "ok": True,
+            "deduped": True,
+            "is_lead": event.is_lead,
+            "dedupe_key": event.dedupe_key,
         }
-    ).execute()
     log.info(
         "ghl_webhook_ingested",
         dedupe_key=event.dedupe_key,
@@ -697,3 +820,30 @@ async def metrics() -> dict[str, Any]:
 def _now_iso() -> str:
     """Current UTC time as an ISO-8601 string (Supabase timestamptz friendly)."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _launch_idempotency_key(pipeline_id: str, entities: list[dict[str, Any]]) -> str:
+    """Deterministic outbox key for a recorded Meta launch.
+
+    Folds the pipeline + the sorted recorded ``(kind, meta_id)`` graph into a
+    short stable digest so re-recording the same launch (operator retry) yields
+    the same key -- the outbox UNIQUE(idempotency_key) then collapses it to a
+    single enqueued side effect.
+    """
+    graph = sorted(
+        f"{e.get('kind')}:{e.get('meta_id')}" for e in entities if e.get("meta_id")
+    )
+    digest = hashlib.sha256("|".join(graph).encode("utf-8")).hexdigest()[:16]
+    return f"meta:record_launch:{pipeline_id}:{digest}"
+
+
+def _finalize_idempotency_key(pipeline_id: str, assets: list[dict[str, Any]]) -> str:
+    """Deterministic outbox key for a finalized Drive asset set.
+
+    Folds the pipeline + the sorted finalized ``creative_id`` set into a stable
+    digest so re-finalizing the same assets yields the same key (dedupe via the
+    outbox UNIQUE constraint).
+    """
+    ids = sorted(str(a.get("creative_id")) for a in assets if a.get("creative_id"))
+    digest = hashlib.sha256("|".join(ids).encode("utf-8")).hexdigest()[:16]
+    return f"drive:finalize_verified:{pipeline_id}:{digest}"
