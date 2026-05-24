@@ -1593,7 +1593,6 @@ async def _run_video_substage(
     """
     creative_id = str(creative["id"])
     brief_id = str(creative.get("brief_id") or "")
-    brief = creative.get("video_briefs") or {}
 
     if substage == "script":
         # The script may already exist from ideation. If so, re-confirm
@@ -1642,11 +1641,17 @@ def _video_substage_cost(substage: str) -> dict[str, Any] | None:
     flight — these get summed into ``pipelines.cost_actual``. Real
     per-tenant pricing replaces these in PF-F.
     """
+    # New stack (VID-5): kie ElevenLabs TTS for voiceover; kie video generation
+    # is the real spend and now lands in broll_search (clips are generated, not
+    # just scraped); compose + caption run on the in-image ffmpeg/Whisper at $0.
+    # broll_search's figure is a representative per-ad gen cost (the worker also
+    # enforces a hard per-ad budget cap before submit); real per-render pricing
+    # replaces these in PF-F.
     table: dict[str, dict[str, Any]] = {
-        "voiceover": {"api": "elevenlabs", "units": 1, "subtotal": 0.05},
-        "broll_search": {"api": "yt-dlp", "units": 1, "subtotal": 0.00},
-        "compose": {"api": "hyperframes", "units": 1, "subtotal": 0.10},
-        "caption": {"api": "submagic", "units": 1, "subtotal": 0.20},
+        "voiceover": {"api": "kie-tts", "units": 1, "subtotal": 0.02},
+        "broll_search": {"api": "kie-video", "units": 1, "subtotal": 1.20},
+        "compose": {"api": "ffmpeg-local", "units": 1, "subtotal": 0.00},
+        "caption": {"api": "whisper-local", "units": 1, "subtotal": 0.00},
     }
     return table.get(substage)
 
