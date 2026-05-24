@@ -325,3 +325,149 @@ def test_check_budget_no_cap_is_gauge_only(fake_supabase: FakeSupabase) -> None:
     assert status.cap_usd is None
     assert status.remaining_usd is None
     assert status.total_usd == 9999.0
+
+
+# ---------------------------------------------------------------------------
+# resolve_pipeline_cap (E4.4 #506): per-pipeline override -> config default.
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_pipeline_cap_uses_config_default(fake_supabase: FakeSupabase) -> None:
+    # No per-pipeline override row -> the config default (50.0 in the test env).
+    fake_supabase.set_single("pipelines", None)
+    assert cost_ledger.resolve_pipeline_cap("p-1") == 50.0
+
+
+def test_resolve_pipeline_cap_override_wins(fake_supabase: FakeSupabase) -> None:
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 7.5})
+    assert cost_ledger.resolve_pipeline_cap("p-1") == 7.5
+
+
+def test_resolve_pipeline_cap_ignores_nonpositive_override(
+    fake_supabase: FakeSupabase,
+) -> None:
+    # A NULL / zero override falls back to the config default (never "no cap").
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 0})
+    assert cost_ledger.resolve_pipeline_cap("p-1") == 50.0
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": None})
+    assert cost_ledger.resolve_pipeline_cap("p-1") == 50.0
+
+
+def test_resolve_pipeline_cap_zero_default_disables(
+    fake_supabase: FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_supabase.set_single("pipelines", None)
+    monkeypatch.setenv("PIPELINE_BUDGET_CAP_USD", "0")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    assert cost_ledger.resolve_pipeline_cap("p-1") is None
+
+
+def test_resolve_pipeline_cap_read_failure_degrades_to_default(
+    monkeypatch: pytest.MonkeyPatch, fake_supabase: FakeSupabase
+) -> None:
+    class _Boom:
+        def table(self, _name: str):  # noqa: ANN001
+            raise RuntimeError("pipelines read down")
+
+    monkeypatch.setattr(cost_ledger, "get_supabase_admin", lambda: _Boom())
+    # A transient read failure must never silently remove the cap.
+    assert cost_ledger.resolve_pipeline_cap("p-1") == 50.0
+
+
+# ---------------------------------------------------------------------------
+# reserve_budget (E4.4 #506): the ENFORCED hard cap (refuses, not just gauges).
+# ---------------------------------------------------------------------------
+
+
+def test_reserve_budget_under_cap_passes(fake_supabase: FakeSupabase) -> None:
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 5.0}],
+    )
+    res = cost_ledger.reserve_budget("p-1", 2.0, cap_usd=10.0)
+    assert res.spent_usd == 5.0
+    assert res.estimate_usd == 2.0
+    assert res.cap_usd == 10.0
+    assert res.remaining_usd == 3.0
+
+
+def test_reserve_budget_over_cap_raises(fake_supabase: FakeSupabase) -> None:
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 9.0}],
+    )
+    with pytest.raises(cost_ledger.BudgetExceeded) as e:
+        cost_ledger.reserve_budget("p-1", 2.0, cap_usd=10.0)
+    assert e.value.spent_usd == 9.0
+    assert e.value.estimate_usd == 2.0
+    assert e.value.cap_usd == 10.0
+    # The 402 detail the route surfaces carries the figures.
+    assert "budget cap exceeded" in str(e.value)
+
+
+def test_reserve_budget_exactly_on_cap_is_allowed(fake_supabase: FakeSupabase) -> None:
+    """Landing exactly ON the cap passes; one cent over refuses."""
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 8.0}],
+    )
+    res = cost_ledger.reserve_budget("p-1", 2.0, cap_usd=10.0)
+    assert res.remaining_usd == 0.0
+    with pytest.raises(cost_ledger.BudgetExceeded):
+        cost_ledger.reserve_budget("p-1", 2.01, cap_usd=10.0)
+
+
+def test_reserve_budget_cumulative_spend_trips_cap(fake_supabase: FakeSupabase) -> None:
+    """The key E4.4 case: many small spends individually fine, cumulatively over.
+
+    Each estimate ($2) is far below the $10 cap, but the running ledger total
+    climbs across iterations until the next reservation would overrun.
+    """
+    cap = 10.0
+    # Simulate four prior $2 generations already recorded (cumulative $8).
+    fake_supabase.seed(
+        "cost_ledger",
+        [
+            {"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 2.0}
+            for _ in range(4)
+        ],
+    )
+    # A 5th $2 reservation lands exactly on the cap -> allowed.
+    cost_ledger.reserve_budget("p-1", 2.0, cap_usd=cap)
+    # Record it, then the 6th $2 reservation overruns -> refused.
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 2.0}],
+    )
+    with pytest.raises(cost_ledger.BudgetExceeded):
+        cost_ledger.reserve_budget("p-1", 2.0, cap_usd=cap)
+
+
+def test_reserve_budget_no_cap_is_passthrough(fake_supabase: FakeSupabase) -> None:
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 9999.0}],
+    )
+    res = cost_ledger.reserve_budget("p-1", 1.0, cap_usd=None)
+    assert res.cap_usd is None
+    assert res.remaining_usd is None
+    assert res.spent_usd == 9999.0
+
+
+def test_reserve_budget_resolves_cap_when_unset(fake_supabase: FakeSupabase) -> None:
+    """Omitting cap_usd resolves it via resolve_pipeline_cap (override here)."""
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 6.0})
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": KIND_VIDEO_GEN, "amount_usd": 5.0}],
+    )
+    with pytest.raises(cost_ledger.BudgetExceeded) as e:
+        cost_ledger.reserve_budget("p-1", 2.0)
+    assert e.value.cap_usd == 6.0
+
+
+def test_reserve_budget_rejects_negative_estimate(fake_supabase: FakeSupabase) -> None:
+    with pytest.raises(ValueError, match="estimate_usd must be >= 0"):
+        cost_ledger.reserve_budget("p-1", -1.0, cap_usd=10.0)

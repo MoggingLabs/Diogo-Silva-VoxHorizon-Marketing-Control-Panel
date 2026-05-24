@@ -17,10 +17,15 @@ the per-stage backend differs from the original ``381eb4a^`` implementation:
     compose      local ffmpeg (services.ffmpeg_compose) (was Hyperframes)
     caption      Whisper -> ASS -> ffmpeg burn-in (services.captions) (was Submagic)
 
-Spend (D1): the only paid stage is broll-search's kie generation. It estimates the
-cost up front and aborts (HTTP 402) if it would exceed the brief's per-ad budget,
-the hard worker-side cap; the operator threshold gate is enforced separately at the
-``video_render`` tool. Every stage ends with one ``record_video_stage`` write.
+Spend (D1 + E4.4): the only paid stage is broll-search's kie generation. Two
+server-side gates run BEFORE any submit. (1) The per-ad estimate gate aborts
+(HTTP 402) if generating one clip per segment would exceed the brief's per-ad
+budget. (2) The per-pipeline HARD CAP (``cost_ledger.reserve_budget``, #506)
+sums the pipeline's ACTUAL ledger and aborts (HTTP 402) if the already-spent
+total plus this stage's estimate would exceed the pipeline cap -- bounding
+cumulative spend across retries, iterations, and many ads, regardless of approval
+mode. The operator threshold gate is enforced separately at the ``video_render``
+tool. Every stage ends with one ``record_video_stage`` write.
 """
 
 from __future__ import annotations
@@ -518,8 +523,8 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
     script = _script_of(creative, brief)
     segments = sorted(script["segments"], key=lambda s: int(s["idx"]))
 
-    # D1 hard cap: refuse before spending if generating one clip per segment
-    # would blow the per-ad budget.
+    # D1 per-ad gate: refuse before spending if generating one clip per segment
+    # would blow the per-ad budget (bounds a SINGLE ad's generation).
     est = _estimate_generation_cost(len(segments))
     budget = _per_ad_budget(brief)
     if est > budget:
@@ -532,6 +537,20 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
                 f"or raise payload.budget_usd"
             ),
         )
+
+    # E4.4 (#506) per-pipeline HARD CAP: refuse before spending if this stage's
+    # estimate plus the pipeline's already-recorded ACTUAL spend would exceed the
+    # pipeline cap. This bounds CUMULATIVE spend across retries, iterations, and
+    # many ads -- which the per-ad gate alone cannot -- and holds regardless of
+    # approval mode because it reads the real ledger the auto-approve path also
+    # writes to. Skipped only for a creative with no resolvable pipeline_id (the
+    # cap is pipeline-scoped); the per-ad gate above still applies there.
+    pipeline_id = _pipeline_id_of(creative)
+    if pipeline_id:
+        try:
+            cost_ledger.reserve_budget(pipeline_id, est)
+        except cost_ledger.BudgetExceeded as exc:
+            raise HTTPException(status_code=402, detail=str(exc)) from exc
 
     store = get_broll_store()
     video_client = KieVideoClient()

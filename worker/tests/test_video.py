@@ -219,6 +219,165 @@ async def search_broll_call() -> Any:
 
 
 # ---------------------------------------------------------------------------
+# Per-pipeline hard budget cap (E4.4 #506): the broll-search route refuses
+# (HTTP 402) before any kie submit when the pipeline's already-spent ACTUAL
+# ledger total plus this stage's estimate would exceed the cap. Bounds
+# CUMULATIVE spend across retries/iterations/many ads, regardless of approval
+# mode. These mock the kie/store boundaries so a PASS would actually submit.
+# ---------------------------------------------------------------------------
+
+
+def _wire_broll_boundaries(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
+    """Patch the kie video client + store so a passing gate actually 'submits'.
+
+    Returns a counter dict whose ``submits`` is bumped on each generate_video
+    call, so a test can prove the paid call did NOT happen when the cap refuses.
+    """
+    counters = {"submits": 0}
+
+    class _Vid:
+        async def generate_video(_self, prompt: str, **kw: Any) -> Any:
+            counters["submits"] += 1
+            return SimpleNamespace(video_url="https://kie/gen.mp4")
+
+        async def download_video(_self, url: str) -> bytes:
+            return b"VIDEO"
+
+    class _Store:
+        async def put(_self, source_url: str, local_file: Path, **kw: Any) -> StoredClip:
+            return StoredClip(
+                clip_id="gen-c", source_url=source_url, duration_s=None,
+                dimensions=None, store_backend="local", local_path=str(local_file),
+            )
+
+    async def fake_scrape(query: str, *, count: int = 5) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(vid, "KieVideoClient", _Vid)
+    monkeypatch.setattr(vid, "get_broll_store", lambda: _Store())
+    monkeypatch.setattr(vid, "scrape_yt_shorts", fake_scrape)
+    return counters
+
+
+def test_search_broll_pipeline_cap_refuses_before_submit(
+    monkeypatch: pytest.MonkeyPatch, boundaries: dict[str, Any], fake_supabase: Any
+) -> None:
+    """Cumulative spend already near the cap -> the next stage is refused (402).
+
+    The per-ad estimate ($0.80 for 2 clips) is WELL under the generous per-ad
+    budget, so only the per-pipeline cap can catch this. We pre-seed the ledger
+    so the pipeline has already spent $9.90 of a $10 cap; the +$0.80 estimate
+    would overrun, so the route must 402 and never call generate_video.
+    """
+    monkeypatch.setattr(vid.cost_ledger, "get_supabase_admin", lambda: fake_supabase)
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 10.0})
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": "video_gen", "amount_usd": 9.90}],
+    )
+    counters = _wire_broll_boundaries(monkeypatch)
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "pipeline_id": "p-1",
+            "script_outline": _script(2),
+            "video_briefs": {},  # default (generous) per-ad budget
+        },
+    )
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+    assert e.value.status_code == 402
+    assert "budget cap exceeded" in e.value.detail
+    # The paid vendor call never happened -- refused BEFORE submit.
+    assert counters["submits"] == 0
+
+
+def test_search_broll_pipeline_cap_under_budget_proceeds(
+    monkeypatch: pytest.MonkeyPatch, boundaries: dict[str, Any], fake_supabase: Any
+) -> None:
+    """Cumulative spend comfortably under the cap -> the stage proceeds + submits."""
+    monkeypatch.setattr(vid.cost_ledger, "get_supabase_admin", lambda: fake_supabase)
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 10.0})
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": "video_gen", "amount_usd": 1.0}],
+    )
+    counters = _wire_broll_boundaries(monkeypatch)
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "pipeline_id": "p-1",
+            "script_outline": _script(2),
+            "video_briefs": {},
+        },
+    )
+    out = asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+    assert out["ok"] is True
+    # Two segments each generated one clip -> two paid submits happened.
+    assert counters["submits"] == 2
+
+
+def test_search_broll_pipeline_cap_enforced_regardless_of_approval(
+    monkeypatch: pytest.MonkeyPatch, boundaries: dict[str, Any], fake_supabase: Any
+) -> None:
+    """The cap reads the ACTUAL ledger, so no approval mode can bypass it.
+
+    There is no approval-mode branch in the spend gate: the reservation runs
+    unconditionally before submit and refuses on the real recorded spend. We
+    prove the SAME over-cap ledger refuses no matter the creative/brief approval
+    fields -- an auto-approve window writes the same cost lines it reads here.
+    """
+    monkeypatch.setattr(vid.cost_ledger, "get_supabase_admin", lambda: fake_supabase)
+    fake_supabase.set_single("pipelines", {"id": "p-1", "budget_cap_usd": 10.0})
+    fake_supabase.seed(
+        "cost_ledger",
+        [{"pipeline_id": "p-1", "kind": "video_gen", "amount_usd": 10.0}],
+    )
+    counters = _wire_broll_boundaries(monkeypatch)
+    for approval in ("auto_approve", "manual", None):
+        _set_creative(
+            monkeypatch,
+            {
+                "id": "cr-1",
+                "brief_id": "b-1",
+                "pipeline_id": "p-1",
+                "script_outline": _script(2),
+                "approval_mode": approval,
+                "video_briefs": {"approval_mode": approval},
+            },
+        )
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+        assert e.value.status_code == 402
+    assert counters["submits"] == 0
+
+
+def test_search_broll_no_pipeline_id_skips_cap_uses_per_ad_only(
+    monkeypatch: pytest.MonkeyPatch, boundaries: dict[str, Any], fake_supabase: Any
+) -> None:
+    """A creative with no resolvable pipeline_id skips the cap (per-ad still applies)."""
+    monkeypatch.setattr(vid.cost_ledger, "get_supabase_admin", lambda: fake_supabase)
+    counters = _wire_broll_boundaries(monkeypatch)
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            # no pipeline_id, no video_briefs.pipeline_id
+            "script_outline": _script(2),
+            "video_briefs": {},
+        },
+    )
+    out = asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+    assert out["ok"] is True
+    assert counters["submits"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Validation 409s
 # ---------------------------------------------------------------------------
 

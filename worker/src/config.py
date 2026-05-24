@@ -83,6 +83,23 @@ class Settings(BaseSettings):
     fake_drive: bool = False
     fake_render: bool = False
 
+    # === Per-pipeline hard budget cap (E4.4 / #506) ===
+    # The worker enforces a SERVER-SIDE hard cap on a pipeline's CUMULATIVE
+    # actual spend (summed from the cost_ledger) before every paid vendor call.
+    # The per-ad pre-flight estimate (routes.video) only bounds a SINGLE ad's
+    # generation; nothing bounded the running total across retries, iterations,
+    # and many ads, so cumulative spend could overrun. This is that ceiling.
+    #
+    # Sourcing precedence (see services.cost_ledger.resolve_pipeline_cap):
+    #   1. ``pipelines.budget_cap_usd`` — a per-pipeline override (migration 0042)
+    #   2. this default — the agency-wide ceiling when a pipeline sets none
+    #
+    # Default derived to comfortably hold a multi-ad pipeline's generation +
+    # iteration spend while still refusing a runaway. The cap is enforced against
+    # the ACTUAL ledger, so an AUTO_APPROVE window (which records the same cost
+    # lines) can never push cumulative spend past it.
+    pipeline_budget_cap_usd: float = 50.0
+
     # B-roll storage
     broll_store_backend: BrollBackend = "local"
     broll_local_root: str = "~/voxhorizon-worker/storage/broll-pool"
