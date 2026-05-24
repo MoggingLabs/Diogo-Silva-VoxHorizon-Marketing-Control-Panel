@@ -6,26 +6,34 @@
  * classifies each stage so the UI/route can decide how it advances (manual
  * gate vs auto vs hard gate) without re-deriving it from the transition table.
  */
+import { PIPELINE_STAGE_REGISTRY, stageDef } from "@/lib/pipeline/stages";
 import type { PipelineStatus } from "@/lib/pipeline/types";
 
 export type PipelinePhase = "define" | "create" | "vet" | "pack" | "live" | "closed";
+
+/** Ordered phase keys + their display labels. The membership of each phase is
+ * DERIVED from the stage registry's `phase` field below, so a stage's phase
+ * lives in exactly one place (`./stages`, the E2.1 single source of truth). */
+const PHASE_LABELS: ReadonlyArray<{ key: PipelinePhase; label: string }> = [
+  { key: "define", label: "Define" },
+  { key: "create", label: "Create" },
+  { key: "vet", label: "Vet" },
+  { key: "pack", label: "Pack" },
+  { key: "live", label: "Live" },
+  { key: "closed", label: "Done" },
+] as const;
 
 export const PIPELINE_PHASES: ReadonlyArray<{
   key: PipelinePhase;
   label: string;
   stages: ReadonlyArray<PipelineStatus>;
-}> = [
-  { key: "define", label: "Define", stages: ["configuration", "ideation", "review"] },
-  { key: "create", label: "Create", stages: ["generation"] },
-  {
-    key: "vet",
-    label: "Vet",
-    stages: ["creative_qa", "compliance_review", "copy", "spec_validation"],
-  },
-  { key: "pack", label: "Pack", stages: ["variant_plan", "finalize_assets"] },
-  { key: "live", label: "Live", stages: ["launch_handoff", "monitor"] },
-  { key: "closed", label: "Done", stages: ["done", "cancelled"] },
-] as const;
+}> = PHASE_LABELS.map(({ key, label }) => ({
+  key,
+  label,
+  stages: PIPELINE_STAGE_REGISTRY.filter((s) => s.phase === key).map(
+    (s) => s.key as PipelineStatus,
+  ),
+}));
 
 const STATUS_TO_PHASE: Record<PipelineStatus, PipelinePhase> = (() => {
   const m = {} as Record<PipelineStatus, PipelinePhase>;
@@ -56,31 +64,17 @@ export type StageClass =
   | "auto"
   | "terminal";
 
+/**
+ * The UI class of a stage. DERIVED from the stage registry (`./stages`, the
+ * E2.1 single source of truth) so it cannot drift from `advanceMechanism`, the
+ * worker `PipelineStage` Literal, or the DB enum.
+ *
+ * Note (E2.5): `spec_validation` is `per_creative`, NOT `auto` -- it sits in
+ * PER_CREATIVE_STAGES, the advance route gates it on the rollup, and
+ * StageCreativeReview shows its Continue button. Classifying it `auto` was a
+ * stall trap: nothing auto-advances spec_validation->variant_plan. That
+ * classification now lives in the registry.
+ */
 export function stageClass(status: PipelineStatus): StageClass {
-  switch (status) {
-    case "configuration":
-    case "review":
-    case "variant_plan":
-    case "monitor":
-      return "human_gate";
-    case "ideation":
-    case "generation":
-      return "agent_work";
-    case "creative_qa":
-    case "copy":
-    case "spec_validation":
-      // spec_validation is a per-creative gate (it sits in PER_CREATIVE_STAGES,
-      // the advance route gates it on the rollup, and StageCreativeReview shows
-      // its Continue button). Classifying it `auto` was a stall trap (E2.5): no
-      // trigger or worker auto-advances spec_validation→variant_plan.
-      return "per_creative";
-    case "compliance_review":
-    case "launch_handoff":
-      return "hard_gate";
-    case "finalize_assets":
-      return "auto";
-    case "done":
-    case "cancelled":
-      return "terminal";
-  }
+  return stageDef(status).stageClass;
 }

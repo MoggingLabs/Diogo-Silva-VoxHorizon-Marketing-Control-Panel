@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import { PIPELINE_PHASES, phaseForStatus, stageClass } from "./phases";
-import { PIPELINE_STAGES, type PipelineStatus } from "./types";
+import { ALL_STAGE_KEYS } from "./stages";
+import { type PipelineStatus } from "./types";
 
-const ALL_STATUSES: PipelineStatus[] = [...PIPELINE_STAGES.map((s) => s.key), "cancelled"];
+// Source the full status set from the stage registry (E2.1 single source of
+// truth) -- it already includes the terminal `cancelled` escape, in DAG order.
+const ALL_STATUSES: PipelineStatus[] = ALL_STAGE_KEYS as PipelineStatus[];
 
 describe("PIPELINE_PHASES", () => {
   it("covers every status exactly once across the phases", () => {

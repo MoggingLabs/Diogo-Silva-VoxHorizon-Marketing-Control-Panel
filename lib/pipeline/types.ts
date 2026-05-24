@@ -16,6 +16,7 @@
  * cannot drift.
  */
 
+import { HAPPY_PATH_STAGES } from "@/lib/pipeline/stages";
 import type { Database } from "@/lib/supabase/types.gen";
 
 export type PipelineStatus = Database["public"]["Enums"]["pipeline_status_enum"];
@@ -55,22 +56,15 @@ export type PipelineEvent = {
  * `cancelled` status is a terminal escape outside the linear flow and is
  * surfaced separately in the detail page chrome. (P4's PhaseStepper clusters
  * these 12 into 5 phases for display; this flat list stays the source of order.)
+ *
+ * DERIVED from the stage registry (`./stages`) -- the single source of truth
+ * (E2.1). `HAPPY_PATH_STAGES` is every registry entry except the `cancelled`
+ * escape, already in DAG order. The `key` is cast to `PipelineStatus`: if a
+ * stage key in the registry ever stops matching the DB `pipeline_status_enum`,
+ * the exhaustive label/badge maps below stop type checking -- the drift signal.
  */
-export const PIPELINE_STAGES: ReadonlyArray<{ key: PipelineStatus; label: string }> = [
-  { key: "configuration", label: "Configuration" },
-  { key: "ideation", label: "Ideation" },
-  { key: "review", label: "Review" },
-  { key: "generation", label: "Generation" },
-  { key: "creative_qa", label: "Creative QA" },
-  { key: "compliance_review", label: "Compliance" },
-  { key: "copy", label: "Copy" },
-  { key: "spec_validation", label: "Spec Validation" },
-  { key: "variant_plan", label: "Variant Plan" },
-  { key: "finalize_assets", label: "Finalize" },
-  { key: "launch_handoff", label: "Launch" },
-  { key: "monitor", label: "Monitor" },
-  { key: "done", label: "Done" },
-] as const;
+export const PIPELINE_STAGES: ReadonlyArray<{ key: PipelineStatus; label: string }> =
+  HAPPY_PATH_STAGES.map((s) => ({ key: s.key as PipelineStatus, label: s.label }));
 
 /**
  * Status badge styling, shared between the index list and the detail header.
