@@ -179,14 +179,19 @@ deleted, so it is superseded by the following three-part model:
    dashboard for an audited approval before submitting; below the threshold it
    proceeds.
 
-Because the approval plugin gates *statically by tool name*, the threshold
-conditionality cannot live in `policy.operator.yaml` alone. It lives in the
-operator/worker flow: the `video_render` path estimates cost, and routes
-over-threshold renders through the approval mechanism (the same long-poll the
-launch gate uses) while sub-threshold renders run inline. The standing HARD gate
-(Meta launch) is unchanged. Threshold + per-ad budget are per-pipeline/brief
-settings. This is implemented in VID-5 (worker cap) and VID-7 (operator
-threshold-gate routing + policy wiring).
+Implementation (verified against the plugin): `policy.evaluate(tool_name, args,
+ctx)` gates by tool name but ALREADY inspects `args` for one tool class (the
+`ALWAYS_ASK_PATTERNS` destructive-command check). There is no conditional/threshold
+approval and no on-demand "request approval" API today. So the over-threshold gate
+is implemented by EXTENDING `policy.evaluate` with an args-aware branch for
+`video_render`: it reads the render's cost-estimate inputs (model, clip count,
+resolution) from `args` and returns `ask_operator(risk_class="spend")` when the
+estimate exceeds the per-ad threshold, else `allow`. This requires the
+`video_render` tool to carry those cost inputs in its arguments. The hard per-ad
+budget cap is a separate, worker-side abort before the kie submit. The standing
+HARD gate (Meta launch) is unchanged. Implemented across VID-5 (worker cap) and
+VID-7 (the `policy.evaluate` extension + `policy.operator.yaml` allowlist for
+`video_brief` / `broll_select`).
 
 ### D2. B-roll source + selection mode  ·  CONFIRMED (both) + one nuance
 Decision taken: **both** generated (`kie_video`) and stock (`yt-dlp`) clips; the
