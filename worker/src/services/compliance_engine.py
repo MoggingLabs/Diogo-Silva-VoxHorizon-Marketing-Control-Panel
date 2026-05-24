@@ -45,6 +45,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from . import gate_core
+
 
 Surface = Literal["image", "copy", "targeting", "video"]
 Severity = Literal["info", "warn", "block"]
@@ -308,7 +310,8 @@ def _adjudicate_candidates(
 ) -> tuple[Verdict, str] | None:
     """Adjudicate a rule's operator-supplied candidates into a verdict.
 
-    The escalation invariant (NEVER auto-pass on uncertainty):
+    Delegates the confidence-floor escalation invariant (NEVER auto-pass on
+    uncertainty) to :func:`gate_core.adjudicate_confidence`:
 
       * ``violation`` with ``confidence >= min_confidence``  -> ``fail``
       * ``violation`` with ``confidence <  min_confidence``  -> ``needs_review``
@@ -320,55 +323,11 @@ def _adjudicate_candidates(
     for this rule (the LLM dimension simply didn't run / had nothing to say —
     a ``both`` rule still has its deterministic side).
     """
-    if not candidates:
-        return None
-
-    floor = _min_confidence(rule)
-    verdict: Verdict = "pass"
-    evidence = ""
-
-    for cand in candidates:
-        label = str(cand.get("label", "")).lower()
-        confidence = _coerce_confidence(cand.get("confidence"))
-        span = str(cand.get("evidence_span") or "").strip()
-
-        if label == "violation":
-            if confidence >= floor:
-                # A confident violation is the strongest outcome — take it.
-                return "fail", _candidate_evidence(span, confidence, "violation")
-            # Under the floor: escalate, but a later confident violation can
-            # still override to fail.
-            if verdict != "fail":
-                verdict = "needs_review"
-                evidence = _candidate_evidence(span, confidence, "low-confidence violation")
-        elif label == "uncertain":
-            if verdict != "fail":
-                verdict = "needs_review"
-                evidence = _candidate_evidence(span, confidence, "uncertain")
-        elif label == "clear":
-            # 'clear' never downgrades an escalation; only stands if alone.
-            if verdict == "pass" and not evidence:
-                evidence = _candidate_evidence(span, confidence, "clear")
-        else:
-            # Unknown / malformed label is treated conservatively as uncertain.
-            if verdict != "fail":
-                verdict = "needs_review"
-                evidence = _candidate_evidence(span, confidence, f"unknown label '{label}'")
-
-    return verdict, evidence
-
-
-def _coerce_confidence(value: Any) -> float:
-    """Best-effort float in ``[0, 1]``; malformed -> ``0.0`` (conservative)."""
-    try:
-        conf = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    if conf < 0.0:
-        return 0.0
-    if conf > 1.0:
-        return 1.0
-    return conf
+    return gate_core.adjudicate_confidence(
+        candidates,
+        floor=_min_confidence(rule),
+        evidence_of=_candidate_evidence,
+    )
 
 
 def _candidate_evidence(span: str, confidence: float, kind: str) -> str:
@@ -554,10 +513,6 @@ def _run_deterministic(
     return False, ""
 
 
-# Verdict severity ordering for "worst outcome wins".
-_VERDICT_RANK: dict[Verdict, int] = {"pass": 0, "needs_review": 1, "fail": 2}
-
-
 def _combine_dimensions(
     engine: str,
     det_verdict: Verdict | None,
@@ -570,7 +525,8 @@ def _combine_dimensions(
     (``None``) and the verdict rests on the deterministic side — but a ``both``
     rule whose deterministic side passes while the LLM side never ran does NOT
     escalate (the deterministic backstop is authoritative when the operator
-    supplied no candidate).
+    supplied no candidate). A pure-``llm`` rule with no candidate at all has no
+    options and escalates rather than auto-passing.
     """
     options: list[tuple[Verdict, str]] = []
     if det_verdict is not None:
@@ -578,14 +534,13 @@ def _combine_dimensions(
     if llm_result is not None:
         options.append(llm_result)
 
-    if not options:
-        # Pure-``llm`` rule with no candidate -> nothing classified yet. We do
-        # NOT auto-pass an unscreened llm-only rule: escalate.
-        return "needs_review", "llm rule with no candidate supplied"
-
-    # Pick the worst (highest-ranked) verdict; keep its evidence.
-    best = max(options, key=lambda opt: _VERDICT_RANK[opt[0]])
-    return best
+    # Pick the worst (highest-ranked) verdict; keep its evidence. With no
+    # options (pure-``llm`` rule, no candidate) we do NOT auto-pass an
+    # unscreened llm-only rule: escalate.
+    return gate_core.worst_outcome(
+        options,
+        default=("needs_review", "llm rule with no candidate supplied"),
+    )
 
 
 def _rollup(findings: list[Finding]) -> Verdict:
@@ -596,13 +551,11 @@ def _rollup(findings: list[Finding]) -> Verdict:
     * else ``pass``.
 
     Non-block (``warn`` / ``info``) failures are advisory: they appear as
-    findings but do not by themselves hard-block the gate.
+    findings but do not by themselves hard-block the gate. The block-only fail
+    gate is the compliance-specific ``fail_when`` passed to the shared rollup.
     """
-    has_block_fail = any(
-        f.verdict == "fail" and f.severity == "block" for f in findings
+    return gate_core.rollup(
+        findings,
+        verdict_of=lambda f: f.verdict,
+        fail_when=lambda f: f.severity == "block",
     )
-    if has_block_fail:
-        return "fail"
-    if any(f.verdict == "needs_review" for f in findings):
-        return "needs_review"
-    return "pass"

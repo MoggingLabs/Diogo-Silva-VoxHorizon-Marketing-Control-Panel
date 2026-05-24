@@ -39,6 +39,8 @@ from typing import Any, Literal
 
 from PIL import Image, UnidentifiedImageError
 
+from . import gate_core
+
 
 # ===========================================================================
 # Types
@@ -624,7 +626,7 @@ def _coerce_candidate_score(candidate: dict[str, Any]) -> float | None:
         # Clamp into range rather than reject — operators may send 0..100.
         if score > 1.0:
             score = score / 100.0
-        return max(0.0, min(1.0, score))
+        return gate_core.clamp_unit(score)
 
     label = candidate.get("label")
     if isinstance(label, str):
@@ -642,8 +644,10 @@ def _adjudicate_vision(
 ) -> CheckResult:
     """Score one vision rubric item against its (optional) candidate.
 
-    The worker is the adjudicator: it never lets an operator write a pass.
-    Decision table (``t`` = ``pass_threshold``):
+    The worker is the adjudicator: it never lets an operator write a pass. The
+    score band is applied by :func:`gate_core.adjudicate_score`; this function
+    resolves the candidate to a score and dresses the verdict with the QA detail
+    strings. Decision table (``t`` = ``pass_threshold``):
 
       * no candidate                       → needs_review (nothing observed)
       * label/score → ``None`` (uncertain) → needs_review
@@ -663,6 +667,10 @@ def _adjudicate_vision(
     note = str(candidate.get("note") or "").strip()
     score = _coerce_candidate_score(candidate)
 
+    verdict = gate_core.adjudicate_score(
+        score, threshold=threshold, hard_fail_floor=_VISION_HARD_FAIL_FLOOR
+    )
+
     if score is None:
         detail = "Vision candidate is uncertain; escalating to review."
         if note:
@@ -670,14 +678,14 @@ def _adjudicate_vision(
         return _result(item, "needs_review", detail)
 
     detail_suffix = f" — {note}" if note else ""
-    if score >= threshold:
+    if verdict == "pass":
         return _result(
             item,
             "pass",
             f"Vision score {score:.2f} >= threshold {threshold:.2f}.{detail_suffix}",
             score=score,
         )
-    if score <= _VISION_HARD_FAIL_FLOOR:
+    if verdict == "fail":
         return _result(
             item,
             "fail",
@@ -730,13 +738,10 @@ def _rollup_status(checks: list[CheckResult]) -> Status:
 
     Any ``fail`` ⇒ ``fail`` (routes to re-render). Otherwise any
     ``needs_review`` ⇒ ``needs_review`` (manager queue). Only an all-``pass``
-    set ⇒ ``pass``. Never auto-pass on an uncertain result.
+    set ⇒ ``pass``. Never auto-pass on an uncertain result. This is the shared
+    rollup with no severity gate (every fail blocks).
     """
-    if any(c.status == "fail" for c in checks):
-        return "fail"
-    if any(c.status == "needs_review" for c in checks):
-        return "needs_review"
-    return "pass"
+    return gate_core.rollup(checks, verdict_of=lambda c: c.status)
 
 
 def evaluate(
