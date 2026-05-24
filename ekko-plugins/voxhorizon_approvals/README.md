@@ -210,6 +210,29 @@ print((time.perf_counter() - t) / 10000 * 1e6, 'us/call')
   triggers fail-closed `{"action": "block", ...}`. The audit log notes
   `"plugin error: ..."` so misconfigurations are traceable.
 
+## AUTO_APPROVE hardening (E6.5)
+
+The operator can flip the plugin into `AUTO_APPROVE` (see `mode.py`), which
+allows approval-needing tools without a round-trip. Two guardrails keep that
+convenience from becoming an unbounded-spend / unrestricted-launch window:
+
+- **Spend / launch are never auto-approved.** Tools tagged `spend` or
+  `external-write` (this includes the operator overlay's Meta launch / activate
+  tools, which the overlay tags `spend`) always fall through to the normal ASK /
+  in-code gate even while `AUTO_APPROVE` is on. See
+  `AUTO_APPROVE_NEVER_RISK_CLASSES` in `__init__.py`. Only `filesystem` /
+  `unknown`-class tools are auto-approved. The refusal is audited
+  (`decision: "ask"`).
+- **The window is capped at 1 hour.** `mode.py` enforces
+  `MAX_AUTO_APPROVE_TTL_S` (3600s): `effective_mode` clamps the honored deadline
+  to the earlier of the stored `expires_at` and `set_at + cap`, so a relaxed
+  worker route or DB row can never grant more than an hour. Migration
+  `0044_approval_mode_ttl_cap.sql` adds the matching `CHECK` at the DB layer.
+
+Both are defense-in-depth: the cap is enforced at read time in the plugin AND at
+write time in the DB, and the spend / launch exemption holds regardless of the
+stored mode.
+
 ## Related issues
 
 - HI-13 — this plugin.

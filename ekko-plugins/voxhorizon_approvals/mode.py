@@ -4,7 +4,7 @@ The dashboard's Settings tab can flip the plugin's behavior between
 three modes (see ``db/migrations/0009_approval_mode.sql``):
 
   * ``ASK``          — long-poll the dashboard for an operator decision
-  * ``AUTO_APPROVE`` — allow without asking, TTL-bounded (1h .. 24h)
+  * ``AUTO_APPROVE`` — allow without asking, TTL-bounded and capped (E6.5)
   * ``HALT``         — block every approval-needing tool
 
 The plugin's ``pre_tool_call`` hook calls :func:`fetch_mode` at the TOP
@@ -12,6 +12,17 @@ of every call BEFORE allowlist / cache lookups. To keep the hot path
 under <1ms we cache the result for :data:`MODE_CACHE_TTL_S` (5s) in
 a module-level dict; the dashboard's mode flip is at-most-5s-delayed
 which the spec accepts.
+
+AUTO_APPROVE TTL cap (E6.5)
+---------------------------
+A long AUTO_APPROVE window is an unbounded auto-allow surface, so the
+plugin enforces its OWN hard ceiling on the granted window length
+(:data:`MAX_AUTO_APPROVE_TTL_S`, 1h) independently of whatever the
+worker / DB stored. ``effective_mode`` clamps the deadline to the
+earlier of the stored ``expires_at`` and ``set_at + cap``; once past
+that clamped deadline the mode degrades to ``ASK``. This is a backstop:
+even if the worker route or DB constraint were relaxed to allow a
+24h TTL, the gate will not honor more than the cap.
 
 Fail-mode
 ---------
@@ -30,7 +41,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -39,6 +50,15 @@ import httpx
 #: the dashboard's flip propagates "quickly", large enough that the
 #: plugin's hot path doesn't slam the worker on every tool call.
 MODE_CACHE_TTL_S: float = 5.0
+
+#: Hard ceiling (seconds) on the AUTO_APPROVE granted window, enforced
+#: by the plugin regardless of the stored TTL (E6.5). 1 hour. An
+#: AUTO_APPROVE row whose window (``set_at`` -> ``expires_at``) is wider
+#: than this is clamped: the gate stops honoring AUTO_APPROVE once
+#: ``set_at + MAX_AUTO_APPROVE_TTL_S`` has passed, even if the stored
+#: ``expires_at`` is still in the future. Defense-in-depth backstop for a
+#: relaxed worker route / DB constraint.
+MAX_AUTO_APPROVE_TTL_S: int = 3600
 
 #: Default HTTP timeout for the mode probe. Aggressive — if the worker
 #: takes more than 300ms to answer we'd rather degrade to ASK than
@@ -80,7 +100,11 @@ class ModeState:
         """Return the mode the plugin should act on right now.
 
         Implements the "expired AUTO_APPROVE drops back to ASK" rule
-        from the spec without a worker round-trip.
+        from the spec without a worker round-trip, AND the E6.5 hard TTL
+        cap: the AUTO_APPROVE window is honored for at most
+        :data:`MAX_AUTO_APPROVE_TTL_S`, no matter how far out the stored
+        ``expires_at`` is. The effective deadline is the EARLIER of the
+        stored ``expires_at`` and ``set_at + cap``.
         """
         if self.mode != "AUTO_APPROVE":
             return self.mode
@@ -92,14 +116,32 @@ class ModeState:
             # The worker returns ISO-8601 UTC. ``fromisoformat`` accepts
             # the ``+00:00`` suffix Supabase returns; we don't strip Z
             # because the worker never emits it.
-            deadline = datetime.fromisoformat(self.expires_at)
+            deadline = _parse_aware(self.expires_at)
         except ValueError:
             return "ASK"
-        # Ensure both sides are timezone-aware so the comparison is
-        # well-defined.
-        if deadline.tzinfo is None:
-            deadline = deadline.replace(tzinfo=timezone.utc)
-        if deadline <= datetime.now(timezone.utc):
+
+        # E6.5 cap: never honor more than MAX_AUTO_APPROVE_TTL_S of the
+        # granted window. Prefer measuring from ``set_at`` (the true
+        # window start); if ``set_at`` is missing / unparseable, fall
+        # back to a conservative "now + cap" ceiling so a window can
+        # never extend more than the cap beyond the current moment.
+        now = datetime.now(timezone.utc)
+        cap_deadline: datetime
+        if self.set_at:
+            try:
+                cap_deadline = _parse_aware(self.set_at) + timedelta(
+                    seconds=MAX_AUTO_APPROVE_TTL_S
+                )
+            except ValueError:
+                cap_deadline = now + timedelta(seconds=MAX_AUTO_APPROVE_TTL_S)
+        else:
+            cap_deadline = now + timedelta(seconds=MAX_AUTO_APPROVE_TTL_S)
+
+        # The effective deadline is the earlier of the stored expiry and
+        # the capped one. Whichever fires first ends the AUTO_APPROVE
+        # window.
+        effective_deadline = min(deadline, cap_deadline)
+        if effective_deadline <= now:
             return "ASK"
         return "AUTO_APPROVE"
 
@@ -135,6 +177,19 @@ def _resolve_target() -> tuple[str, str] | None:
 def _now() -> float:
     """Indirection so tests can monkey-patch the clock."""
     return time.monotonic()
+
+
+def _parse_aware(value: str) -> datetime:
+    """Parse an ISO-8601 timestamp into a timezone-aware UTC datetime.
+
+    Raises ``ValueError`` on an unparseable string (propagated by
+    ``datetime.fromisoformat``). A naive timestamp is assumed UTC so the
+    downstream comparison is always well-defined.
+    """
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
 
 
 def clear_cache() -> None:
@@ -260,6 +315,7 @@ __all__ = [
     "DEFAULT_FETCH_TIMEOUT_S",
     "ENV_APPROVAL_TOKEN",
     "ENV_WORKER_URL",
+    "MAX_AUTO_APPROVE_TTL_S",
     "MODE_CACHE_TTL_S",
     "MODE_PATH",
     "ModeState",

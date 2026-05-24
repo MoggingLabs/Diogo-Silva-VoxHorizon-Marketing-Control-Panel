@@ -66,6 +66,24 @@ POLICY_PATH_ENV = "VOXHORIZON_APPROVAL_POLICY_PATH"
 #: A decision function with the same signature as :func:`policy.evaluate`.
 EvaluateFn = Callable[[str, dict], Decision]
 
+#: Risk classes that AUTO_APPROVE must NEVER cover (E6.5). AUTO_APPROVE is a
+#: convenience for the low-stakes round-trips; it must not become an
+#: unbounded-spend / unrestricted-launch window. Tools tagged with one of
+#: these classes ALWAYS fall through to the normal ASK / in-code gate even
+#: while the operator mode is AUTO_APPROVE:
+#:
+#:   * ``spend``          — paid APIs (kie, ElevenLabs, Submagic) AND the
+#:                          operator overlay's gated launch tools, which the
+#:                          overlay tags ``spend`` (Meta activate / launch
+#:                          create live ad entities = irreversible real spend).
+#:   * ``external-write`` — mutating a third party (Slack, Drive, email).
+#:
+#: ``filesystem`` / ``unknown`` are intentionally NOT here: AUTO_APPROVE may
+#: still cover them (they are local / reversible and the operator opted in).
+AUTO_APPROVE_NEVER_RISK_CLASSES: frozenset[str] = frozenset(
+    {"spend", "external-write"}
+)
+
 
 def _resolve_evaluate() -> EvaluateFn:
     """Pick the decision function for this deployment.
@@ -176,6 +194,30 @@ def register(ctx: Any) -> None:
                 mode_state: ModeState = fetch_mode()
                 effective_mode = mode_state.effective_mode
             except Exception:  # noqa: BLE001 — fail-to-ASK for any error
+                effective_mode = "ASK"
+
+            # E6.5: AUTO_APPROVE must NEVER cover spend-class or
+            # external-write/launch-class tools. Those always fall through
+            # to the normal ASK / in-code gate (the long-poll below) even
+            # under AUTO_APPROVE, so the convenience mode can't open an
+            # unbounded-spend / unrestricted-launch window. We audit the
+            # refusal-to-auto-approve so the trail shows WHY a tool still
+            # asked while AUTO_APPROVE was on.
+            if (
+                effective_mode == "AUTO_APPROVE"
+                and decision.risk_class in AUTO_APPROVE_NEVER_RISK_CLASSES
+            ):
+                _audit(
+                    tool_name,
+                    args,
+                    "ask",
+                    reason=(
+                        f"auto_mode:AUTO_APPROVE does not cover "
+                        f"{decision.risk_class}-class tool; falling through "
+                        f"to operator approval"
+                    ),
+                    t0=t0,
+                )
                 effective_mode = "ASK"
 
             if effective_mode == "AUTO_APPROVE":
@@ -316,6 +358,7 @@ def _audit(
 
 
 __all__ = [
+    "AUTO_APPROVE_NEVER_RISK_CLASSES",
     "ApprovalClient",
     "ApprovalVerdict",
     "Decision",

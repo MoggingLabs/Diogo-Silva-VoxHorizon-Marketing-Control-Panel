@@ -23,6 +23,7 @@ import pytest
 
 from voxhorizon_approvals import mode as mode_module
 from voxhorizon_approvals.mode import (
+    MAX_AUTO_APPROVE_TTL_S,
     MODE_CACHE_TTL_S,
     ModeState,
     clear_cache,
@@ -470,11 +471,111 @@ def test_effective_mode_handles_naive_expiry() -> None:
     deadline = (
         datetime.now(timezone.utc) + timedelta(hours=1)
     ).replace(tzinfo=None).isoformat()
+    set_at = datetime.now(timezone.utc).isoformat()
     s = ModeState(
         mode="AUTO_APPROVE",
         expires_at=deadline,
         set_by=None,
+        set_at=set_at,
+        note=None,
+    )
+    assert s.effective_mode == "AUTO_APPROVE"
+
+
+# ---------------------------------------------------------------------------
+# E6.5 — AUTO_APPROVE TTL cap (MAX_AUTO_APPROVE_TTL_S)
+# ---------------------------------------------------------------------------
+
+
+def test_max_auto_approve_ttl_is_at_most_one_hour() -> None:
+    """The plugin's hard cap on the AUTO_APPROVE window is <= 1 hour."""
+    assert MAX_AUTO_APPROVE_TTL_S <= 3600
+
+
+def test_effective_mode_clamps_overlong_ttl_to_ask() -> None:
+    """A 24h AUTO_APPROVE window (over the cap) is NOT honored past the cap.
+
+    set_at was 90 minutes ago; expires_at is 22.5h in the future (a stored
+    24h window). Because set_at + cap (1h) is already in the past, the
+    effective deadline is clamped and the mode drops to ASK — even though
+    the stored expires_at is still far in the future.
+    """
+    now = datetime.now(timezone.utc)
+    set_at = (now - timedelta(minutes=90)).isoformat()
+    expires_at = (now + timedelta(hours=22, minutes=30)).isoformat()
+    s = ModeState(
+        mode="AUTO_APPROVE",
+        expires_at=expires_at,
+        set_by="dashboard",
+        set_at=set_at,
+        note=None,
+    )
+    assert s.effective_mode == "ASK"
+
+
+def test_effective_mode_honors_window_within_cap() -> None:
+    """A window set 10 minutes ago with a (capped) 1h limit is still live."""
+    now = datetime.now(timezone.utc)
+    set_at = (now - timedelta(minutes=10)).isoformat()
+    # Even a stored 24h expiry is fine while set_at + cap is in the future.
+    expires_at = (now + timedelta(hours=24)).isoformat()
+    s = ModeState(
+        mode="AUTO_APPROVE",
+        expires_at=expires_at,
+        set_by="dashboard",
+        set_at=set_at,
+        note=None,
+    )
+    # set_at + 1h cap is ~50 min out → still AUTO_APPROVE.
+    assert s.effective_mode == "AUTO_APPROVE"
+
+
+def test_effective_mode_short_ttl_still_honored_before_expiry() -> None:
+    """A legitimate short window (under the cap) is honored until expiry."""
+    now = datetime.now(timezone.utc)
+    set_at = (now - timedelta(minutes=5)).isoformat()
+    expires_at = (now + timedelta(minutes=25)).isoformat()
+    s = ModeState(
+        mode="AUTO_APPROVE",
+        expires_at=expires_at,
+        set_by="dashboard",
+        set_at=set_at,
+        note=None,
+    )
+    assert s.effective_mode == "AUTO_APPROVE"
+
+
+def test_effective_mode_caps_from_now_when_set_at_missing() -> None:
+    """With set_at absent, an overlong expiry is clamped to now + cap.
+
+    A stored 24h expiry but no set_at: the conservative fallback caps the
+    window to now + 1h. Since the expiry is far beyond that, the mode is
+    still AUTO_APPROVE *now* (within the cap-from-now) — the cap bites only
+    after an hour. We assert the nearer-term behavior: it is honored now.
+    """
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(hours=24)).isoformat()
+    s = ModeState(
+        mode="AUTO_APPROVE",
+        expires_at=expires_at,
+        set_by="dashboard",
         set_at="",
         note=None,
     )
+    assert s.effective_mode == "AUTO_APPROVE"
+
+
+def test_effective_mode_caps_from_now_when_set_at_unparseable() -> None:
+    """An unparseable set_at falls back to the conservative now + cap ceiling
+    rather than trusting the (overlong) stored expiry indefinitely."""
+    now = datetime.now(timezone.utc)
+    expires_at = (now + timedelta(hours=24)).isoformat()
+    s = ModeState(
+        mode="AUTO_APPROVE",
+        expires_at=expires_at,
+        set_by="dashboard",
+        set_at="not-a-timestamp",
+        note=None,
+    )
+    # Honored now (within now + cap); the cap would bite after an hour.
     assert s.effective_mode == "AUTO_APPROVE"
