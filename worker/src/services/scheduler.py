@@ -33,8 +33,10 @@ defaults; see the ``scheduler_*`` fields there for the documented env vars.
 from __future__ import annotations
 
 import asyncio
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 import structlog
 
@@ -230,6 +232,302 @@ async def run_dispatch_watchdog_once(settings: Settings) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Ops alert delivery (E5.6 / #526)
+# ---------------------------------------------------------------------------
+#
+# The watchdog ticks already CLASSIFY problems (stuck dispatches, a growing /
+# over-threshold outbox dead-letter pile, an open breaker, cost over its cap)
+# and log them; the gap E5.6 closes is DELIVERY -- paging a human. When a tick
+# detects a problem it posts a Slack alert to a SEPARATE ops channel
+# (``SLACK_OPS_CHANNEL_ID``) via the existing Slack sender
+# (:func:`services.approval_notifications.post_slack_message`). Two properties
+# keep it production-safe:
+#
+#   * Best-effort: the whole path is wrapped so it NEVER raises and never blocks
+#     the supervised loop -- a Slack outage degrades to a logged warning.
+#   * De-duped / throttled: a persistent bad state pages on TRANSITION into bad
+#     (the first tick that sees it), then is suppressed for
+#     ``ops_alert_throttle_s`` so we don't spam the channel every tick. The
+#     throttle re-arms when the condition clears (a return to healthy), so a
+#     flap pages again only after it actually recovered + re-broke.
+
+
+@dataclass(frozen=True)
+class AlertCondition:
+    """One operational problem a watchdog tick detected.
+
+    ``kind`` is a stable throttle key (one entry per distinct problem class);
+    ``severity`` is ``"critical"`` or ``"warning"``; ``summary`` is the one-line
+    headline; ``detail`` is the human-readable body posted to Slack.
+    """
+
+    kind: str
+    severity: str
+    summary: str
+    detail: str
+
+
+def evaluate_alert_conditions(
+    settings: Settings,
+    *,
+    stuck_dispatches: list[observability.StuckItem],
+    metrics: Mapping[str, Any],
+) -> list[AlertCondition]:
+    """Classify the current watchdog/metrics findings into firing alerts (pure).
+
+    Inputs are already-fetched findings (the stuck-dispatch watchdog output + a
+    :func:`services.observability.metrics_snapshot`), so this is deterministic
+    and unit-tested with no I/O. Each SLO breach maps to one
+    :class:`AlertCondition` with a stable ``kind`` (its throttle key):
+
+      * ``stuck_dispatch``  -- one or more dispatches wedged past
+        ``ops_alert_stuck_dispatch_age_s``.
+      * ``outbox_dead_letter`` -- the dead-letter pile (status dead+failed) is
+        at/above ``ops_alert_outbox_dead_letter_threshold``.
+      * ``outbox_backlog`` -- the live outbox depth (pending+inflight) is
+        at/above ``ops_alert_outbox_depth_threshold``.
+      * ``breaker_open`` -- any circuit breaker in the metrics snapshot is open.
+      * ``cost_over_cap`` -- cost exceeded its configured cap (only when a cap
+        is set; the snapshot reports ``over_cap``).
+    """
+    conditions: list[AlertCondition] = []
+
+    # 1. Stuck operator dispatches (the watchdog already aged them).
+    breaching = [s for s in stuck_dispatches if s.age_s >= settings.ops_alert_stuck_dispatch_age_s]
+    if breaching:
+        worst = breaching[0]  # watchdog sorts oldest-first
+        refs = ", ".join(s.ref for s in breaching[:5])
+        conditions.append(
+            AlertCondition(
+                kind="stuck_dispatch",
+                severity="critical",
+                summary=f"{len(breaching)} operator dispatch(es) wedged",
+                detail=(
+                    f"{len(breaching)} dispatch(es) past the "
+                    f"{settings.ops_alert_stuck_dispatch_age_s:.0f}s SLO "
+                    f"(worst idle {worst.age_s:.0f}s, pipeline "
+                    f"{worst.pipeline_id or 'unknown'}). Refs: {refs}"
+                ),
+            )
+        )
+
+    outbox = metrics.get("outbox") if isinstance(metrics, Mapping) else None
+    outbox = outbox if isinstance(outbox, Mapping) else {}
+
+    # 2. Outbox dead-letter pile (durable external-write failures).
+    dead = int(outbox.get("dead", 0) or 0) + int(outbox.get("failed", 0) or 0)
+    if dead >= settings.ops_alert_outbox_dead_letter_threshold:
+        conditions.append(
+            AlertCondition(
+                kind="outbox_dead_letter",
+                severity="critical",
+                summary=f"{dead} outbox dead-letter row(s)",
+                detail=(
+                    f"The integration outbox has {dead} dead/failed row(s) "
+                    f"(SLO threshold {settings.ops_alert_outbox_dead_letter_threshold}). "
+                    "External side effects (Meta activation / Drive finalize) are "
+                    "not being delivered -- inspect integration_outbox."
+                ),
+            )
+        )
+
+    # 3. Outbox backlog depth (the relay is falling behind).
+    depth = int(outbox.get("depth", 0) or 0)
+    if depth >= settings.ops_alert_outbox_depth_threshold:
+        conditions.append(
+            AlertCondition(
+                kind="outbox_backlog",
+                severity="warning",
+                summary=f"outbox depth {depth}",
+                detail=(
+                    f"The integration outbox depth is {depth} "
+                    f"(SLO threshold {settings.ops_alert_outbox_depth_threshold}). "
+                    "The relay is draining slower than work arrives."
+                ),
+            )
+        )
+
+    # 4. Open circuit breaker(s). The metrics snapshot carries a per-host map;
+    # an "open" state means a downstream connector is shedding load. (The
+    # snapshot's breaker map is empty until the cron-held connector singleton
+    # feeds it -- see docs/observability.md; this fires the moment it does.)
+    breakers = metrics.get("breakers") if isinstance(metrics, Mapping) else None
+    if isinstance(breakers, Mapping):
+        open_hosts = [h for h, state in breakers.items() if str(state).lower() == "open"]
+        if open_hosts:
+            conditions.append(
+                AlertCondition(
+                    kind="breaker_open",
+                    severity="critical",
+                    summary=f"{len(open_hosts)} circuit breaker(s) open",
+                    detail=(
+                        "Circuit breaker open for: "
+                        + ", ".join(sorted(open_hosts))
+                        + ". A downstream connector is failing."
+                    ),
+                )
+            )
+
+    # 5. Cost over cap (only meaningful when a cap is configured + fed).
+    cost = metrics.get("cost") if isinstance(metrics, Mapping) else None
+    if isinstance(cost, Mapping) and cost.get("over_cap"):
+        conditions.append(
+            AlertCondition(
+                kind="cost_over_cap",
+                severity="critical",
+                summary="cost over cap",
+                detail=(
+                    f"Spend ${cost.get('total_usd')} exceeded the cap "
+                    f"${cost.get('cap_usd')}."
+                ),
+            )
+        )
+
+    return conditions
+
+
+# Every alert kind :func:`evaluate_alert_conditions` can emit -- the throttle
+# walks this set each tick to re-arm kinds that stopped firing.
+_ALL_ALERT_KINDS: frozenset[str] = frozenset(
+    {
+        "stuck_dispatch",
+        "outbox_dead_letter",
+        "outbox_backlog",
+        "breaker_open",
+        "cost_over_cap",
+    }
+)
+
+
+class _AlertThrottle:
+    """Per-kind transition + rate-limit gate for ops alerts.
+
+    Holds the monotonic timestamp each alert kind last fired. :meth:`should_send`
+    returns True only when a kind is firing AND either it was healthy on the
+    previous tick (a transition into bad) OR the throttle window has lapsed since
+    it last paged -- so a persistent bad state pages on transition, not every
+    tick. :meth:`mark_healthy` clears a kind so its next breach re-arms an
+    immediate page (a recover-then-rebreak flaps a fresh alert).
+    """
+
+    def __init__(self, throttle_s: float) -> None:
+        self._throttle_s = throttle_s
+        self._last_sent: dict[str, float] = {}
+
+    def should_send(self, kind: str, *, now: float | None = None) -> bool:
+        clock = time.monotonic() if now is None else now
+        last = self._last_sent.get(kind)
+        if last is not None and (clock - last) < self._throttle_s:
+            return False
+        self._last_sent[kind] = clock
+        return True
+
+    def mark_healthy(self, kind: str) -> None:
+        self._last_sent.pop(kind, None)
+
+
+# Process-wide throttle. Built lazily on first use from the live settings so the
+# window is configurable; the scheduler is a singleton per process so one shared
+# instance is correct (every observability tick consults the same gate).
+_alert_throttle: _AlertThrottle | None = None
+
+
+def _get_alert_throttle(settings: Settings) -> _AlertThrottle:
+    global _alert_throttle
+    if _alert_throttle is None:
+        _alert_throttle = _AlertThrottle(settings.ops_alert_throttle_s)
+    return _alert_throttle
+
+
+def reset_alert_throttle() -> None:
+    """Drop the process-wide alert throttle (test hook + clean re-arm)."""
+    global _alert_throttle
+    _alert_throttle = None
+
+
+def _build_ops_alert_blocks(conditions: list[AlertCondition]) -> list[dict[str, Any]]:
+    """Compose the Slack Block Kit body for a batch of firing alert conditions."""
+    has_critical = any(c.severity == "critical" for c in conditions)
+    icon = "\U0001f6a8" if has_critical else "⚠️"  # 🚨 / ⚠️
+    header = f"{icon} VoxHorizon ops alert ({len(conditions)})"
+    blocks: list[dict[str, Any]] = [
+        {"type": "header", "text": {"type": "plain_text", "text": header[:150], "emoji": True}}
+    ]
+    for cond in conditions:
+        blocks.append(
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*[{cond.severity}] {cond.summary}*\n{cond.detail}",
+                },
+            }
+        )
+    return blocks
+
+
+async def deliver_ops_alerts(
+    settings: Settings, conditions: list[AlertCondition]
+) -> int:
+    """Deliver firing ops-alert conditions to the Slack ops channel (best-effort).
+
+    Applies the per-kind throttle (only paging on transition into bad / after the
+    window lapses), then posts ONE batched Slack message for the kinds that pass
+    the gate. Kinds NOT currently firing are marked healthy so their next breach
+    re-arms an immediate page. Returns the number of conditions actually paged.
+
+    Never raises: a missing ops channel, a Slack outage, or any unexpected error
+    degrades to a logged warning so the supervised loop is never disturbed.
+    """
+    throttle = _get_alert_throttle(settings)
+
+    # Re-arm any kind that is no longer firing (transition back to healthy).
+    firing_kinds = {c.kind for c in conditions}
+    for kind in _ALL_ALERT_KINDS:
+        if kind not in firing_kinds:
+            throttle.mark_healthy(kind)
+
+    if not conditions:
+        return 0
+
+    to_send = [c for c in conditions if throttle.should_send(c.kind)]
+    if not to_send:
+        log.info("ops_alert_throttled", kinds=sorted(firing_kinds))
+        return 0
+
+    token = settings.slack_bot_token
+    channel = settings.slack_ops_channel_id
+    if not token or not channel:
+        log.warning(
+            "ops_alert_skipped_no_channel",
+            has_token=bool(token),
+            has_channel=bool(channel),
+            kinds=[c.kind for c in to_send],
+        )
+        return 0
+
+    summary = "; ".join(f"[{c.severity}] {c.summary}" for c in to_send)
+    text = f"VoxHorizon ops alert: {summary}"
+    try:
+        from .approval_notifications import post_slack_message
+
+        ok = await post_slack_message(
+            token=token,
+            channel=channel,
+            text=text,
+            blocks=_build_ops_alert_blocks(to_send),
+            context={"alert_kinds": [c.kind for c in to_send]},
+        )
+    except Exception as exc:  # noqa: BLE001 -- alert delivery never sinks the loop
+        log.warning("ops_alert_delivery_failed", error=str(exc))
+        return 0
+
+    if ok:
+        log.info("ops_alert_sent", kinds=[c.kind for c in to_send])
+    return len(to_send)
+
+
+# ---------------------------------------------------------------------------
 # Job: observability watchdogs (alerting)
 # ---------------------------------------------------------------------------
 
@@ -256,12 +554,15 @@ async def run_observability_once(settings: Settings) -> dict[str, int]:
     """One pass of the observability watchdogs. Returns the stuck counts.
 
     Classifies stuck operator dispatches + stuck outbox rows via the pure cores
-    in :mod:`services.observability` and logs a structured alert line per stuck
-    item (greppable by ``pipeline_id``). Slack fan-out is intentionally NOT wired
-    here yet -- the observability module's docstring defers it to the
-    :mod:`services.notifications` Slack helper; emitting structured logs now means
-    log-based alerting works immediately and the Slack call is a one-line add
-    later (call it inside the loops below).
+    in :mod:`services.observability`, logs a structured alert line per stuck item
+    (greppable by ``pipeline_id``), AND -- E5.6 -- DELIVERS a Slack ops alert when
+    a problem is detected. The findings (stuck dispatches + a metrics snapshot
+    carrying the outbox dead-letter pile / depth / breaker map / cost-vs-cap) are
+    folded into :func:`evaluate_alert_conditions`; any firing condition is paged
+    to the ops channel via :func:`deliver_ops_alerts` (throttled, best-effort).
+    The alert step is wrapped so it never raises -- a single bad tick (or a Slack
+    outage) never disturbs the supervised loop, and the structured logs always
+    emit regardless (log-based alerting keeps working).
     """
     from ..supabase_client import get_supabase_admin
 
@@ -293,6 +594,19 @@ async def run_observability_once(settings: Settings) -> dict[str, int]:
             pipeline_id=item.pipeline_id,
             age_s=round(item.age_s, 1),
         )
+
+    # E5.6: turn the findings into ops alerts + DELIVER them (best-effort). The
+    # metrics snapshot supplies the outbox dead-letter/depth, breaker map, and
+    # cost-vs-cap; stuck dispatches come from the watchdog above. The whole step
+    # is wrapped so an alerting failure never disturbs the loop.
+    try:
+        snapshot = observability.metrics_snapshot(sb)
+        conditions = evaluate_alert_conditions(
+            settings, stuck_dispatches=stuck_disp, metrics=snapshot
+        )
+        await deliver_ops_alerts(settings, conditions)
+    except Exception as exc:  # noqa: BLE001 -- alert delivery never sinks the tick
+        log.warning("ops_alert_tick_failed", error=str(exc))
 
     log.info(
         "observability_pass_done",
@@ -671,9 +985,13 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
 
 
 __all__ = [
+    "AlertCondition",
     "ReconcileTarget",
     "Scheduler",
+    "deliver_ops_alerts",
+    "evaluate_alert_conditions",
     "load_reconciliation_targets",
+    "reset_alert_throttle",
     "run_dispatch_watchdog_once",
     "run_kie_reconcile_once",
     "run_observability_once",
