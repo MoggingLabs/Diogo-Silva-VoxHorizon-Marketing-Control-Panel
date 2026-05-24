@@ -1,5 +1,14 @@
 # Setup
 
+> **Status / current stack (2026-05-24).** This from-zero recipe is stale. It
+> describes an older Mac / Tailscale / Vercel / Claude-Code bootstrap. The live
+> system runs on a single Hostinger VPS: Next.js 15 + Supabase + a Python
+> FastAPI worker + a Hermes operator agent, fronted by Caddy. Treat the steps
+> below as historical until this guide is rewritten for the VPS. For the
+> current architecture and the rebuild in progress, see
+> [`PIPELINE-REBUILD-ARCHITECTURE.md`](./PIPELINE-REBUILD-ARCHITECTURE.md) and
+> the decision records in [`docs/adr`](./docs/adr).
+
 From-zero recipe for bootstrapping the VoxHorizon Marketing Control Panel on a fresh Mac. Follow top to bottom — every step is idempotent unless noted.
 
 Target machine: Diogo's Mac (Apple Silicon, macOS Sonoma+). The Linux path is identical except for `brew` substitutions.

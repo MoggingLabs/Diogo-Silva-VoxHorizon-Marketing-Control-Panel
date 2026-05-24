@@ -93,12 +93,19 @@ markers = [
 # generated dirs never count toward coverage.
 [tool.coverage.run]
 source = ["src"]
-omit = ["tests/*", "*/__pycache__/*", ".venv*/*"]
+# `src/generated/*` is machine-emitted enum data (no branches); it is exercised
+# at import but excluded so codegen output never moves the coverage gate.
+omit = ["tests/*", "*/__pycache__/*", ".venv*/*", "src/generated/*"]
 
 [tool.coverage.report]
 show_missing = true
 skip_empty = true
 fail_under = 90
+
+[tool.ruff]
+# Generated enum data carries intentionally long literal lines; the codegen
+# script (worker/scripts) owns its formatting and is checked on its own.
+extend-exclude = ["src/generated"]
 
 [tool.uv]
 package = true

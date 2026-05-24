@@ -51,6 +51,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..generated.db_enums import AD_ENTITY_KINDS
 from ..services import cost_ledger, observability
 from ..services.ghl import GhlClient, GhlError, parse_webhook_event, real_cpl
 from ..services.pipeline_runner import emit_pipeline_event, fetch_pipeline
@@ -67,14 +68,17 @@ router = APIRouter()
 # precondition, Layer 5). Mirrors the dashboard checklist so the two agree.
 MIN_APPROVED_COPY = 3
 
-# Good (cleared) creative_stage_state statuses (migration 0017 stage_state_enum).
-# A per-creative stage is cleared when every row is in one of these.
+# Good (cleared) creative_stage_state statuses (stage_state_enum). A per-creative
+# stage is cleared when every row is in one of these. The membership set is a
+# curated subset of the generated ``STAGE_STATES`` (the terminal-good states), so
+# adding/removing a stage_state value surfaces here at review time.
 _CLEARED_STAGE_STATUSES: frozenset[str] = frozenset(
     {"passed", "overridden", "skipped"}
 )
 
-# ad_entity kinds the launch recorder accepts (migration 0022 ad_entity_kind_enum).
-_AD_ENTITY_KINDS: frozenset[str] = frozenset({"campaign", "adset", "ad", "creative"})
+# ad_entity kinds the launch recorder accepts, from the generated
+# ``ad_entity_kind_enum`` mirror.
+_AD_ENTITY_KINDS: frozenset[str] = frozenset(AD_ENTITY_KINDS)
 
 
 # ===========================================================================

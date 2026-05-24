@@ -124,6 +124,30 @@ class KieVideoResult:
     all_urls: list[str] = field(default_factory=list)
 
 
+# Single-poll outcomes for the callback receiver + reconciliation sweep, which
+# both need a NON-blocking "where is this render right now?" probe (the
+# :meth:`KieVideoClient.generate_video` poll loop blocks until terminal, which is
+# exactly the behaviour E5.2 removes from the recovery path).
+RENDER_PENDING = "pending"
+RENDER_SUCCESS = "success"
+RENDER_FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class RenderStatus:
+    """One non-blocking poll of a kie video task (see :meth:`poll_status`).
+
+    ``state`` is one of ``pending`` / ``success`` / ``failed``. ``urls`` carries
+    the result clip URLs on success (empty otherwise); ``error`` carries the kie
+    failure message on a terminal failure (``None`` otherwise).
+    """
+
+    task_id: str
+    state: str
+    urls: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
 def fake_video_result(
     prompt: str, model: str, aspect_ratio: str, resolution: str
 ) -> KieVideoResult:
@@ -318,6 +342,91 @@ class KieVideoClient:
         ).decode("ascii")
         return hmac.compare_digest(expected, signature)
 
+    async def poll_status(self, task_id: str, is_veo: bool) -> RenderStatus:
+        """Probe a render's status ONCE (non-blocking) and classify it (E5.2).
+
+        Unlike :meth:`generate_video`'s poll loop, this issues a single
+        record-info GET and returns where the render is right now -- the probe the
+        callback receiver and the reconciliation sweep need (they must never block
+        a request thread / a scheduler tick on a 10-minute loop). Same status
+        parsing as the blocking poll (shared :meth:`_classify_record_info`), so
+        the two never drift. Raises :class:`KieVideoError` only on a transport /
+        HTTP error; a terminal kie failure is returned as ``state='failed'``.
+        """
+        if self.fake:
+            # FAKE_RENDER: a submitted fake task is deterministically "done".
+            return RenderStatus(
+                task_id=task_id,
+                state=RENDER_SUCCESS,
+                urls=[f"https://fake.kie.local/{task_id}.mp4"],
+            )
+        async with self._open_client() as client:
+            url = (
+                f"{VEO_RECORD_INFO_URL}?taskId={task_id}"
+                if is_veo
+                else f"{JOBS_RECORD_INFO_URL}?taskId={task_id}"
+            )
+            try:
+                resp = await client.get(url)
+            except httpx.HTTPError as e:
+                raise KieVideoError(
+                    f"Kie.ai video record-info network error: {e}"
+                ) from e
+            parsed = _safe_json(resp)
+            if resp.status_code >= 400 or not isinstance(parsed, dict):
+                raise KieVideoError(
+                    f"Kie.ai video record-info responded {resp.status_code}",
+                    payload=parsed if isinstance(parsed, dict) else None,
+                    status_code=resp.status_code,
+                )
+            return self._classify_record_info(task_id, parsed, is_veo)
+
+    @staticmethod
+    def _classify_record_info(
+        task_id: str, parsed: dict[str, Any], is_veo: bool
+    ) -> RenderStatus:
+        """Classify one record-info body into a :class:`RenderStatus`.
+
+        The single source of truth for "is this render pending / done / failed?"
+        across BOTH the blocking poll and the single-shot probe, so the two
+        surfaces always agree. Mirrors the status fields the blocking
+        :meth:`_poll` reads (Veo ``successFlag`` int vs unified ``state`` string)
+        and the URL extraction for each.
+        """
+        data = parsed.get("data") or {}
+        if is_veo:
+            flag = data.get("successFlag")
+            if flag == 1:
+                block = data.get("response") or {}
+                urls = block.get("resultUrls") or block.get("originUrls") or []
+                return RenderStatus(
+                    task_id=task_id,
+                    state=RENDER_SUCCESS,
+                    urls=[str(u) for u in urls if isinstance(u, str)],
+                )
+            if flag in (2, 3):
+                return RenderStatus(
+                    task_id=task_id,
+                    state=RENDER_FAILED,
+                    error=str(data.get("errorMessage") or "unknown error"),
+                )
+            return RenderStatus(task_id=task_id, state=RENDER_PENDING)
+
+        state = data.get("state")
+        if state == "success":
+            return RenderStatus(
+                task_id=task_id,
+                state=RENDER_SUCCESS,
+                urls=KieVideoClient._extract_unified_urls(data, parsed, task_id),
+            )
+        if state == "fail":
+            return RenderStatus(
+                task_id=task_id,
+                state=RENDER_FAILED,
+                error=str(data.get("failMsg") or data.get("failCode") or "unknown"),
+            )
+        return RenderStatus(task_id=task_id, state=RENDER_PENDING)
+
     # ------------------------------------------------------------------
     # Low-level helpers (split for tests)
     # ------------------------------------------------------------------
@@ -432,7 +541,15 @@ class KieVideoClient:
                 payload=parsed,
                 status_code=resp.status_code,
             )
-        return task_id, _is_veo(model)
+        is_veo = _is_veo(model)
+        # E5.2 / #514: durably record the submitted (BILLED) render so a restart
+        # mid-poll, or a dropped callback, can never lose it -- the callback
+        # receiver + the reconciliation sweep resolve the render through this row
+        # (video_render_tasks). Best-effort: a persistence failure must never
+        # abort the submit (the worker boots without Supabase configured), it
+        # just forfeits the safety net for this one render.
+        persist_submitted_render(task_id=task_id, is_veo=is_veo, prompt=prompt)
+        return task_id, is_veo
 
     async def _poll(
         self, client: httpx.AsyncClient, task_id: str, is_veo: bool
@@ -520,3 +637,61 @@ def _safe_json(resp: httpx.Response) -> Any:
         return resp.json()
     except (ValueError, json.JSONDecodeError):
         return None
+
+
+# Name of the durable record table for in-flight kie video renders (migration
+# 0033). Kept here next to the submit path that writes it; the callback receiver
+# + the reconciliation sweep read it.
+RENDER_TASKS_TABLE = "video_render_tasks"
+
+
+def persist_submitted_render(
+    *,
+    task_id: str,
+    is_veo: bool,
+    prompt: str | None = None,
+    creative_id: str | None = None,
+    brief_id: str | None = None,
+    segment_idx: int | None = None,
+    theme: str | None = None,
+) -> bool:
+    """Durably record a just-submitted (BILLED) kie video render (E5.2 / #514).
+
+    Best-effort + idempotent: writes a ``video_render_tasks`` row keyed on the
+    unique ``task_id`` so the callback receiver and the reconciliation sweep can
+    resolve the render later (a restart mid-poll, or a dropped callback, no
+    longer loses it). NEVER raises -- the worker boots without Supabase
+    configured, and a render's submit must not fail just because the safety-net
+    write did. A duplicate task_id (re-submit) is a logged no-op. Returns True
+    when a row was written, False otherwise.
+    """
+    try:
+        from ..supabase_client import get_supabase_admin
+
+        sb = get_supabase_admin()
+        existing = (
+            sb.table(RENDER_TASKS_TABLE)
+            .select("task_id")
+            .eq("task_id", task_id)
+            .maybe_single()
+            .execute()
+        )
+        if existing is not None and isinstance(existing.data, dict):
+            return False
+        sb.table(RENDER_TASKS_TABLE).insert(
+            {
+                "task_id": task_id,
+                "is_veo": is_veo,
+                "prompt": prompt,
+                "creative_id": creative_id,
+                "brief_id": brief_id,
+                "segment_idx": segment_idx,
+                "theme": theme,
+                "status": "submitted",
+            }
+        ).execute()
+        log.info("kie_render_persisted", task_id=task_id, is_veo=is_veo)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- safety-net write never aborts a submit
+        log.warning("kie_render_persist_failed", task_id=task_id, error=str(exc))
+        return False

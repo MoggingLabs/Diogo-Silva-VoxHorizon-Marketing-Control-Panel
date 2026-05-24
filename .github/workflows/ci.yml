@@ -1,8 +1,30 @@
 name: ci
 
 # Pre-merge gate. Runs on every PR into main, plus on push to main as a
-# post-merge final guard. Deploy is owned by `deploy-stack.yml` — this file
+# post-merge final guard. Deploy is owned by `deploy-stack.yml` - this file
 # never deploys anything.
+#
+# Gate split (E0.5 / #436): the workflow is divided into a CHEAP gate and an
+# EXPENSIVE gate so a failure (or a GitHub Actions billing lapse) in the heavy
+# tier never blocks the cheap one.
+#
+#   CHEAP gate  - always runs, finishes in a minute or two, needs no services:
+#     web-checks   (typecheck + lint + unit + coverage)
+#     workflow-lint (actionlint over .github/workflows)
+#     sql-lint      (sqlfluff over db/migrations)
+#
+#   EXPENSIVE gate - path-filtered (only runs when its sources change) and
+#   brings up Docker services / full builds:
+#     web-build           (production Next build)
+#     worker              (pytest unit + coverage)
+#     worker-integration  (Postgres + migrations + pytest -m integration)
+#     migration-apply     (apply 0001..N to a clean Postgres, fail on error)
+#     e2e                 (both verticals: image + video + both + launch-video)
+#
+# The `changes` job computes which source areas a PR touched; heavy jobs gate
+# on its outputs. The cheap jobs do NOT depend on `changes` and never skip, so
+# a billing lapse that kills the heavy tier still leaves the cheap signal green.
+# See docs/ci.md for the manual-merge fallback when Actions billing is blocked.
 on:
   push:
     branches: [main]
@@ -16,14 +38,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ===========================================================================
+  # CHANGE DETECTION (E0.5 / #436)
+  # Bounds the expensive gate. Each heavy job runs only when its source area
+  # changed. Cheap jobs ignore this and always run. On push to main (no PR
+  # diff base) every filter resolves true so the post-merge guard is complete.
+  # ===========================================================================
+  changes:
+    name: Detect changed paths
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.filter.outputs.web }}
+      worker: ${{ steps.filter.outputs.worker }}
+      db: ${{ steps.filter.outputs.db }}
+      e2e: ${{ steps.filter.outputs.e2e }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          # On push events paths-filter compares against the previous commit;
+          # on PRs it compares against the base ref automatically.
+          filters: |
+            web:
+              - 'app/**'
+              - 'components/**'
+              - 'lib/**'
+              - 'hooks/**'
+              - 'styles/**'
+              - 'middleware.ts'
+              - 'next.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'tsconfig.json'
+              - 'tailwind.config.ts'
+              - 'postcss.config.mjs'
+              - 'eslint.config.mjs'
+              - 'vitest.config.ts'
+            worker:
+              - 'worker/**'
+            db:
+              - 'db/migrations/**'
+            e2e:
+              - 'app/**'
+              - 'components/**'
+              - 'lib/**'
+              - 'hooks/**'
+              - 'middleware.ts'
+              - 'next.config.ts'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'worker/**'
+              - 'db/migrations/**'
+              - 'tests/e2e/**'
+              - 'playwright.config.ts'
+
+  # ===========================================================================
+  # CHEAP GATE
+  # ===========================================================================
+
   # ---------------------------------------------------------------------------
-  # Next.js app: typecheck, lint, unit tests, and a full production build to
-  # catch any runtime/build-time misconfiguration. No secrets required at this
-  # stage — the build runs without Supabase env vars, and any code that needs
-  # them at build time should pull lazily.
+  # Next.js app cheap checks: typecheck, lint, unit tests + coverage gate.
+  # No production build here (that is the expensive `web-build` job) so a build
+  # regression or a billing lapse in the heavy tier cannot block this signal.
+  # No secrets required.
   # ---------------------------------------------------------------------------
-  next:
-    name: Next (typecheck + lint + unit + build)
+  web-checks:
+    name: Web (typecheck + lint + unit)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +133,83 @@ jobs:
       - name: Unit tests + coverage gate (>=90%)
         run: pnpm test:coverage
 
+  # ---------------------------------------------------------------------------
+  # Workflow YAML lint - catches typos / misconfigured actions before merge.
+  # Cheap, runs in seconds. Always on (CI workflows can change without a code
+  # change).
+  # ---------------------------------------------------------------------------
+  workflow-lint:
+    name: Workflow lint (actionlint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1.7.7
+
+  # ---------------------------------------------------------------------------
+  # SQL lint (E0.5 / #436): sqlfluff over the forward-only migration chain.
+  # Postgres dialect, lint-only (never rewrites files in CI).
+  #
+  # ADVISORY (continue-on-error). The existing migrations predate any sqlfluff
+  # config, so the default rule set reports many cosmetic style findings, and
+  # sqlfluff's postgres parser does not fully understand a couple of valid,
+  # already-deployed constructs (for example the `ALTER FUNCTION ... SET
+  # search_path = ..., pg_temp` hardening in 0029), which it flags as a parse
+  # error. Making this a hard gate over existing valid SQL would keep the cheap
+  # gate permanently red. Adding a repo-root `.sqlfluff` config + baseline is
+  # the proper fix, but that is outside this PR's allowed scope (.github/** and
+  # docs/** only); it is tracked as a follow-up (see docs/ci.md). The
+  # AUTHORITATIVE SQL correctness gate is `migration-apply`, which runs the real
+  # SQL against a real Postgres and fails on real errors.
+  # ---------------------------------------------------------------------------
+  sql-lint:
+    name: SQL lint (sqlfluff, advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Lint db/migrations (postgres dialect, advisory)
+        run: uvx sqlfluff lint db/migrations --dialect postgres
+
+  # ===========================================================================
+  # EXPENSIVE GATE (path-filtered via the `changes` job)
+  # ===========================================================================
+
+  # ---------------------------------------------------------------------------
+  # Production Next build - catches runtime/build-time misconfiguration. Split
+  # out of the cheap checks so a build break (or billing lapse) does not block
+  # typecheck/lint/unit. Runs only when web sources change. No secrets: code
+  # that needs Supabase env at build time must pull lazily.
+  # ---------------------------------------------------------------------------
+  web-build:
+    name: Web (production build)
+    needs: changes
+    if: ${{ needs.changes.outputs.web == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
       - name: Build
         run: pnpm build
         env:
@@ -59,9 +218,12 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # Python worker: install via uv (matches local toolchain) and run pytest.
+  # Path-filtered to worker/**.
   # ---------------------------------------------------------------------------
   worker:
     name: Worker (pytest)
+    needs: changes
+    if: ${{ needs.changes.outputs.worker == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -83,23 +245,179 @@ jobs:
         run: uv run pytest
 
   # ---------------------------------------------------------------------------
-  # End-to-end: drive the full 12-stage pipeline to `done` with NO stall (T.5 /
-  # T.6, #318 / #319). Brings up the LOCAL Supabase stack (Docker is available
-  # on GitHub runners), applies the full forward-only migration chain
-  # (db/migrations/0001..0025 — the repo has no supabase/migrations dir, so we
-  # apply them explicitly via psql), starts the Python worker with ALL FAKE_*
-  # flags on (zero external calls, deterministic), starts the Next app, and runs
-  # the no-stall workflow spec (chromium). Local-only secrets: the printed
-  # service_role key + a dummy worker bearer. NEVER a cloud project / real key.
+  # Worker INTEGRATION tier (E0.5 / #436, contract with #421).
+  #
+  # Brings up a real Postgres, applies the full forward-only migration chain in
+  # order (same psql apply pattern as the e2e job), exports DATABASE_URL, and
+  # runs `uv run pytest -m integration`. The `integration` marker is the
+  # contract with the integration-test tier being built in parallel under epic
+  # #421: those tests carry `@pytest.mark.integration` and talk to this
+  # Postgres via DATABASE_URL.
+  #
+  # COORDINATION NOTE: until #421 lands marked tests, `-m integration` collects
+  # zero tests. pytest exits 5 ("no tests collected") in that case, which we
+  # treat as success so the wiring is in place without going red prematurely.
+  # We also neutralise the repo-wide coverage addopts (`-o addopts=` + --no-cov)
+  # because the >=90% gate is meaningless for the (initially empty) integration
+  # selection - the unit `worker` job owns the coverage gate.
+  # ---------------------------------------------------------------------------
+  worker-integration:
+    name: Worker (integration / Postgres)
+    needs: changes
+    if: ${{ needs.changes.outputs.worker == 'true' || needs.changes.outputs.db == 'true' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the steps run.
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install worker deps
+        working-directory: worker
+        run: uv sync --frozen --extra dev
+
+      - name: Apply migrations (db/migrations 0001..N, in order)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # Glob expands in lexical order, which matches the 4-digit prefix
+          # ordering (0001, 0002, ...). Fail on the first error.
+          for f in db/migrations/[0-9][0-9][0-9][0-9]_*.sql; do
+            echo "==> applying $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+
+      - name: Run integration tests (pytest -m integration)
+        working-directory: worker
+        run: |
+          set -euo pipefail
+          # Neutralise the repo-wide coverage addopts and run only the
+          # `integration`-marked tier against the Postgres service above.
+          # Exit code 5 = "no tests collected" (the #421 tier is not merged
+          # yet); treat it as success so the contract is wired without a
+          # premature red. Any real failure (1) still fails the job.
+          set +e
+          uv run pytest -m integration -o addopts="" --no-cov -p no:cacheprovider
+          code=$?
+          set -e
+          if [ "$code" = "0" ] || [ "$code" = "5" ]; then
+            if [ "$code" = "5" ]; then
+              echo "No integration-marked tests collected yet (epic #421 pending) - passing."
+            fi
+            exit 0
+          fi
+          exit "$code"
+
+  # ---------------------------------------------------------------------------
+  # Migration-apply correctness (E0.5 / #436): apply the full chain 0001..N to
+  # a pristine Postgres and fail on the first error. This is a focused check
+  # that the forward-only chain is self-consistent on an empty database,
+  # independent of the integration tests. Path-filtered to db/migrations/**.
+  # ---------------------------------------------------------------------------
+  migration-apply:
+    name: Migration apply (clean Postgres)
+    needs: changes
+    if: ${{ needs.changes.outputs.db == 'true' }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply migrations 0001..N (fail on first error)
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          count=0
+          for f in db/migrations/[0-9][0-9][0-9][0-9]_*.sql; do
+            echo "==> applying $f"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
+            count=$((count + 1))
+          done
+          echo "applied $count migration(s) cleanly"
+
+  # ---------------------------------------------------------------------------
+  # End-to-end: drive the full pipeline across BOTH verticals (E0.2 / #426).
+  #
+  # Brings up the LOCAL Supabase stack (Docker is available on GitHub runners),
+  # applies the full forward-only migration chain (db/migrations/0001..N - the
+  # repo has no supabase/migrations dir, so we apply them explicitly via psql),
+  # starts the Python worker with ALL FAKE_* flags on (zero external calls,
+  # deterministic), starts the Next app, and runs the e2e specs (chromium).
+  #
+  # The matrix runs each spec as its own job so a failure isolates to one
+  # vertical and they parallelise:
+  #   - pipeline-workflow.spec.ts  (image, 12-stage no-stall - T.5/#318)
+  #   - pipeline-video.spec.ts     (video track            - PF-G-3/#204)
+  #   - pipeline-both.spec.ts      (both tracks            - PF-G-3/#204)
+  #   - launch-video.spec.ts       (video launch package   - V3-8/#114)
+  #
+  # Local-only secrets: the printed service_role key + a dummy worker bearer.
+  # NEVER a cloud project / real key. Path-filtered to web + worker + db + e2e.
   # ---------------------------------------------------------------------------
   e2e:
-    name: E2E (12-stage no-stall workflow)
+    name: E2E (${{ matrix.spec }})
+    needs: changes
+    if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
+    # Image is a required gate. Video + both verticals ALLOW-FAIL until M1 (#448)
+    # lands the neutral creative identity: they surface the foundation FK break
+    # (informative) but must not block merges yet. Flip allow_failure to false for
+    # them once M1 is in (the DB-level FK net in the integration job stays a hard
+    # gate regardless).
+    continue-on-error: ${{ matrix.allow_failure }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - spec: pipeline-workflow.spec.ts
+            allow_failure: false
+          - spec: pipeline-video.spec.ts
+            allow_failure: true
+          - spec: pipeline-both.spec.ts
+            allow_failure: true
+          - spec: launch-video.spec.ts
+            allow_failure: true
     env:
       # Local Supabase stack endpoints (supabase start defaults).
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
       LOCAL_DB_URL: postgresql://postgres:postgres@127.0.0.1:54322/postgres
-      # Dummy local worker bearer — NEVER a real key. The Python worker reads it
+      # Dummy local worker bearer - NEVER a real key. The Python worker reads it
       # (verify_secret) and the e2e driver presents it; deliberately NOT exported
       # to the Next app (see note on the build/start steps).
       WORKER_SHARED_SECRET: e2e-local-worker-secret
@@ -152,7 +470,7 @@ jobs:
           echo "::add-mask::$KEY"
           echo "service_role_key=$KEY" >> "$GITHUB_OUTPUT"
 
-      - name: Apply migrations (db/migrations 0001..0025)
+      - name: Apply migrations (db/migrations 0001..N)
         env:
           PGPASSWORD: postgres
         run: |
@@ -170,7 +488,7 @@ jobs:
           SUPABASE_URL: ${{ env.NEXT_PUBLIC_SUPABASE_URL }}
           SUPABASE_SECRET_KEY: ${{ steps.sb.outputs.service_role_key }}
           WORKER_SHARED_SECRET: ${{ env.WORKER_SHARED_SECRET }}
-          # All FAKE_* on → zero external calls (Meta/GHL/Drive/render). The
+          # All FAKE_* on -> zero external calls (Meta/GHL/Drive/render). The
           # compliance + QA verdicts are NEVER faked (real worker engines).
           FAKE_RENDER: "true"
           FAKE_META: "true"
@@ -195,7 +513,7 @@ jobs:
       # advance / review-decision routes fire-and-forget at the worker's
       # ideation/generation producers when WORKER_URL is set; in this e2e the
       # test drives generation deterministically (seeded finals + closure
-      # events), so we keep the Next→worker push OFF (the routes no-op without
+      # events), so we keep the Next->worker push OFF (the routes no-op without
       # WORKER_URL) to avoid the real producer racing the seeded state. The e2e
       # test calls the worker tool endpoints directly instead.
       - name: Build Next app
@@ -221,7 +539,7 @@ jobs:
       - name: Install Playwright chromium
         run: pnpm test:e2e:install
 
-      - name: Run no-stall workflow e2e (chromium)
+      - name: Run e2e spec (${{ matrix.spec }}, chromium)
         env:
           # The e2e harness reads Supabase + worker config from the env. Setting
           # PLAYWRIGHT_BASE_URL makes playwright.config.ts skip the auto-spawned
@@ -230,7 +548,7 @@ jobs:
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:3000
           WORKER_URL: http://127.0.0.1:8000
           CI: "true"
-        run: pnpm exec playwright test pipeline-workflow.spec.ts --project=chromium
+        run: pnpm exec playwright test "${{ matrix.spec }}" --project=chromium
 
       - name: Dump server logs on failure
         if: failure()
@@ -244,16 +562,3 @@ jobs:
           [ -n "${WORKER_PID:-}" ] && kill "${WORKER_PID}" 2>/dev/null || true
           [ -n "${NEXT_PID:-}" ] && kill "${NEXT_PID}" 2>/dev/null || true
           supabase stop || true
-
-  # ---------------------------------------------------------------------------
-  # Workflow YAML lint — catches typos / misconfigured actions before merge.
-  # Cheap, runs in seconds.
-  # ---------------------------------------------------------------------------
-  workflow-lint:
-    name: Workflow lint (actionlint)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run actionlint
-        uses: rhysd/actionlint@v1.7.7

@@ -900,26 +900,92 @@ def _require_creative_ids(items: list[dict[str, Any]], name: str) -> None:
             )
 
 
+#: Per-item QA keys the worker's ``QAItem`` model reads alongside the
+#: ``vision_candidates`` (``check_id``/``score``/``label``/``note`` candidate
+#: fields plus extras pass through to ``VisionCandidate``, which is
+#: ``extra="allow"``).
+_QA_ITEM_PASSTHROUGH_KEYS: frozenset[str] = frozenset(
+    {"surface", "vertical", "ratio", "image_b64", "overlay_region"}
+)
+#: Per-item compliance keys the worker's ``ComplianceItem`` model reads
+#: alongside the ``llm_candidates`` (``rule_id``/``label`` required, plus
+#: ``confidence``/``evidence_span``/``version``/... passing through to
+#: ``LLMCandidate``, which is ``extra="allow"``).
+_COMPLIANCE_ITEM_PASSTHROUGH_KEYS: frozenset[str] = frozenset(
+    {"copy_variant_id", "surface", "vertical"}
+)
+
+
 def pipeline_operator_qa_result(
     *, pipeline_id: str, results: list[dict[str, Any]]
 ) -> dict[str, Any]:
-    """Submit per-creative QA verdicts for the worker to ADJUDICATE + write.
+    """Submit per-creative QA vision CANDIDATES for the worker to ADJUDICATE.
 
-    POSTs ``{pipeline_id, results:[{creative_id, verdict, scores, defects,
-    remediation}, ...]}`` to ``/work/pipeline/tools/qa_run`` (the qa_compliance
-    route module). ONE array call for the whole batch — never per creative. The
-    worker runs its own deterministic resolution/legibility backstops, writes
-    ``qa_result`` + rolls ``creative_stage_state(creative_qa)``. The operator
-    persists the specialist's verdict; it does not decide the rollup.
+    POSTs the worker ``QARunInput`` shape — ``{pipeline_id, items:[{creative_id,
+    ratio, vision_candidates:[{check_id, score, label, note, ...}],
+    surface?, vertical?, image_b64?, overlay_region?}, ...]}`` — to
+    ``/work/pipeline/tools/qa_run`` (the qa_compliance route module). ONE array
+    call for the whole batch, never per creative.
+
+    The operator (its qa specialist) submits CANDIDATES only: per-check vision
+    observations, NOT a verdict the worker trusts. The worker fetches the image
+    bytes, runs its own deterministic Pillow backstops
+    (resolution/legibility/...), adjudicates the vision candidates via
+    ``qa_engine.evaluate``, writes ``qa_result``, and rolls
+    ``creative_stage_state(creative_qa)``. The verdict is always the worker's;
+    a confident operator ``pass`` candidate can never clear a deterministic
+    fail. The specialist's ``verdict`` / ``scores`` / ``defects`` /
+    ``remediation`` keys (the old shape) are dropped here — they are NOT part of
+    the candidate contract and the worker would 422 on them; the per-check
+    observations belong in ``vision_candidates`` and the verdict is the worker's
+    to write.
+
+    Each result item is normalized to the worker ``QAItem`` shape: the per-check
+    observations are mapped into ``vision_candidates`` (when not already supplied
+    in that key) and the QA passthrough keys (``ratio``/``image_b64``/...) are
+    forwarded. ``ratio`` defaults to ``"1x1"`` (the worker default) when absent.
     """
     pid = _require_pipeline_id(pipeline_id)
-    items = _require_list(results, "results")
-    _require_creative_ids(items, "results")
+    raw = _require_list(results, "results")
+    _require_creative_ids(raw, "results")
+    items = [_to_qa_item(item) for item in raw]
     return _request(
         "POST",
         f"{_TOOLS_PREFIX}/qa_run",
-        json_body={"pipeline_id": pid, "results": items},
+        json_body={"pipeline_id": pid, "items": items},
     )
+
+
+def _to_qa_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Map one operator QA result onto the worker ``QAItem`` shape.
+
+    The worker's QA gate is CANDIDATE-only: it reads ``vision_candidates`` and
+    writes the verdict itself. We forward ``creative_id`` + the QA passthrough
+    keys and carry the per-check observations in ``vision_candidates`` (honoring
+    an already-shaped ``vision_candidates`` if the specialist supplied one).
+    """
+    out: dict[str, Any] = {"creative_id": str(item["creative_id"]).strip()}
+    for key in _QA_ITEM_PASSTHROUGH_KEYS:
+        if item.get(key) is not None:
+            out[key] = item[key]
+    out.setdefault("ratio", "1x1")
+    candidates = item.get("vision_candidates")
+    if isinstance(candidates, list):
+        out["vision_candidates"] = [
+            _to_vision_candidate(c) for c in candidates if isinstance(c, dict)
+        ]
+    else:
+        out["vision_candidates"] = []
+    return out
+
+
+def _to_vision_candidate(cand: dict[str, Any]) -> dict[str, Any]:
+    """Keep the worker ``VisionCandidate`` fields (+ extras), drop nulls.
+
+    ``check_id`` is required by the worker model; the rest are optional
+    observations. Extra keys pass through (the model is ``extra="allow"``).
+    """
+    return {k: v for k, v in cand.items() if v is not None}
 
 
 def pipeline_operator_compliance_result(
@@ -927,23 +993,71 @@ def pipeline_operator_compliance_result(
 ) -> dict[str, Any]:
     """Submit per-creative compliance CANDIDATE findings (the worker adjudicates).
 
-    POSTs ``{pipeline_id, candidates:[{creative_id, findings:[{rule_id, version,
-    label, confidence, evidence_span, ...}]}, ...]}`` to
-    ``/work/pipeline/tools/compliance_run`` (the qa_compliance route module).
+    POSTs the worker ``ComplianceRunInput`` shape — ``{pipeline_id,
+    items:[{creative_id, copy_variant_id?, surface, vertical?,
+    llm_candidates:[{rule_id, label, confidence, evidence_span, version?,
+    ...}]}, ...]}`` — to ``/work/pipeline/tools/compliance_run`` (the
+    qa_compliance route module). ONE array call for the whole batch.
+
     HARD GATE: the operator has NO pass-writing tool — these are CANDIDATES
     only; the **worker** adjudicates deterministic + LLM findings and writes the
     verdict, escalating ``uncertain``/low-confidence to the manager queue rather
     than auto-passing. A ``failed`` unit leaves ``failed`` only via an audited
-    manager override. ONE array call for the whole batch.
+    manager override.
+
+    Each input item is normalized to the worker ``ComplianceItem`` shape: the
+    operator's per-creative ``findings`` (the specialist's candidate findings)
+    are mapped into ``llm_candidates``, and ``copy_variant_id`` / ``surface`` /
+    ``vertical`` are forwarded so the worker can build the engine context. The
+    candidate finding fields (``rule_id``, ``label``, ``confidence``,
+    ``evidence_span``, plus extras like ``version`` / ``required_edit`` /
+    ``citation_url``) ride along to the worker's ``LLMCandidate`` model.
     """
     pid = _require_pipeline_id(pipeline_id)
-    items = _require_list(candidates, "candidates")
-    _require_creative_ids(items, "candidates")
+    raw = _require_list(candidates, "candidates")
+    _require_creative_ids(raw, "candidates")
+    items = [_to_compliance_item(item) for item in raw]
     return _request(
         "POST",
         f"{_TOOLS_PREFIX}/compliance_run",
-        json_body={"pipeline_id": pid, "candidates": items},
+        json_body={"pipeline_id": pid, "items": items},
     )
+
+
+def _to_compliance_item(item: dict[str, Any]) -> dict[str, Any]:
+    """Map one operator compliance candidate onto the worker ``ComplianceItem``.
+
+    The operator's per-creative ``findings`` become the worker's
+    ``llm_candidates`` (the candidate-only payload the engine adjudicates). We
+    forward ``creative_id`` + the compliance passthrough keys and carry the
+    candidate findings under ``llm_candidates`` (honoring an already-shaped
+    ``llm_candidates`` if the specialist supplied one).
+    """
+    out: dict[str, Any] = {"creative_id": str(item["creative_id"]).strip()}
+    for key in _COMPLIANCE_ITEM_PASSTHROUGH_KEYS:
+        if item.get(key) is not None:
+            out[key] = item[key]
+    findings = item.get("llm_candidates")
+    if not isinstance(findings, list):
+        findings = item.get("findings")
+    if isinstance(findings, list):
+        out["llm_candidates"] = [
+            _to_llm_candidate(c) for c in findings if isinstance(c, dict)
+        ]
+    else:
+        out["llm_candidates"] = []
+    return out
+
+
+def _to_llm_candidate(cand: dict[str, Any]) -> dict[str, Any]:
+    """Keep the worker ``LLMCandidate`` fields (+ extras), drop nulls.
+
+    ``rule_id`` + ``label`` are required by the worker model; the rest
+    (``confidence``, ``evidence_span``) are optional, and extra keys
+    (``version``, ``required_edit``, ``citation_url``, ``bbox``) pass through
+    because the model is ``extra="allow"``.
+    """
+    return {k: v for k, v in cand.items() if v is not None}
 
 
 def pipeline_operator_copy(
