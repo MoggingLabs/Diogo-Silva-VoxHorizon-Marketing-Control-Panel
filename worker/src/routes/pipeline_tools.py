@@ -71,6 +71,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..generated.db_enums import PER_CREATIVE_STAGES as _PER_CREATIVE_STAGES
 from ..services.atomic_inserts import record_creative_stage
 from ..services.kie import KieClient, KieError
 from ..services.operator_bridge import OperatorBridgeError, get_operator_bridge
@@ -201,8 +202,8 @@ def _creative_view(row: dict[str, Any]) -> dict[str, Any]:
 
 
 # The four per-creative stages whose gate state the operator reads to find the
-# OUTSTANDING creatives (resume-by-skip-done). Mirrors the creative_stage_enum.
-_PER_CREATIVE_STAGES = ("creative_qa", "compliance_review", "copy", "spec_validation")
+# OUTSTANDING creatives (resume-by-skip-done). Imported from the generated DB
+# enum mirror (``creative_stage_enum``) so it never drifts from the schema.
 
 
 def _fetch_creative_rollup(pipeline_id: str) -> list[dict[str, Any]]:

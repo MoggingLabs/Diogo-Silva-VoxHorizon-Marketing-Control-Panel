@@ -1,31 +1,26 @@
 /**
- * Pipeline lifecycle types — hand-rolled while Agent A's schema/migration
- * lands. Mirrors the row shape that `db/migrations/0006_pipelines.sql` will
- * introduce.
+ * Pipeline lifecycle types.
  *
- * TODO: swap to `types.gen.ts Database['public']['Tables']['pipelines']['Row']`
- * after #171 (the schema + types regen) lands. The local typings here exist
- * only so the UI shell can compile against an agreed contract before the
- * generated types are present.
+ * `PipelineStatus` / `PipelineFormat` are now derived from the generated
+ * `lib/supabase/types.gen.ts` enums (E0.3 single-source-of-truth): the DB enums
+ * are the source, `pnpm regen:types` reflects them into `types.gen.ts`, and
+ * these aliases re-export them under the names the UI uses. If a stage is
+ * added/removed in the DB, the exhaustive label/badge maps below stop type
+ * checking — that is the drift signal.
+ *
+ * `Pipeline` / `PipelineEvent` stay curated view models (not the raw generated
+ * `Row`s): the UI relies on the narrowed jsonb shapes here
+ * (`config_draft` / `picks` / `cost_*` / `approval` / `advanced_at`) rather than
+ * the generated `Json` columns. They mirror `db/migrations/0006_pipelines.sql`
+ * but key their enum fields off the generated types so the status/format unions
+ * cannot drift.
  */
 
-export type PipelineStatus =
-  | "configuration"
-  | "ideation"
-  | "review"
-  | "generation"
-  | "creative_qa"
-  | "compliance_review"
-  | "copy"
-  | "spec_validation"
-  | "variant_plan"
-  | "finalize_assets"
-  | "launch_handoff"
-  | "monitor"
-  | "done"
-  | "cancelled";
+import type { Database } from "@/lib/supabase/types.gen";
 
-export type PipelineFormat = "image" | "video" | "both";
+export type PipelineStatus = Database["public"]["Enums"]["pipeline_status_enum"];
+
+export type PipelineFormat = Database["public"]["Enums"]["pipeline_format_enum"];
 
 export type Pipeline = {
   id: string;

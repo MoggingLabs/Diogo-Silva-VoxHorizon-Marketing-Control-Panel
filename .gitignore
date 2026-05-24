@@ -58,6 +58,9 @@ coverage/
 playwright-report/
 playwright/.cache/
 test-results/
+.coverage
+.coverage.*
+htmlcov/
 
 # Build artifacts
 build/
