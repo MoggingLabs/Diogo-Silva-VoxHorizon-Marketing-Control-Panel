@@ -280,3 +280,51 @@ def test_start_scheduler_includes_kie_reconcile_loop(
     assert "scheduler:kie_reconcile" in names
     # The pre-existing loops are still wired (regression guard).
     assert "scheduler:dispatch_watchdog" in names
+
+
+def test_start_scheduler_includes_outbox_relay_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """start_scheduler wires the transactional-outbox relay loop (E5.1 / #510)."""
+    import asyncio
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "secret")
+    get_settings.cache_clear()
+
+    names: list[str] = []
+
+    async def _run() -> None:
+        sched = scheduler.start_scheduler(get_settings())
+        names.extend(t.get_name() for t in sched._tasks)
+        await sched.stop()
+
+    asyncio.run(_run())
+    get_settings.cache_clear()
+    assert "scheduler:outbox_relay" in names
+
+
+async def test_run_outbox_relay_once_wrapper_returns_resolved_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scheduler wrapper supplies the wired handlers + returns done+dead."""
+    from src.services import outbox_relay
+
+    captured: dict[str, object] = {}
+
+    async def _fake_pass(settings, *, handlers):  # noqa: ANN001, ANN202
+        captured["handlers"] = handlers
+        return outbox_relay.OutboxPassResult(
+            claimed=3, done=2, retried=0, dead_lettered=1, skipped=0
+        )
+
+    monkeypatch.setattr(outbox_relay, "run_outbox_relay_once", _fake_pass)
+
+    resolved = await scheduler.run_outbox_relay_once(get_settings())
+    # "resolved" = done + dead_lettered (terminal-ish outcomes).
+    assert resolved == 3
+    # The wrapper passed the real wired handler set (the two default ops).
+    assert set(captured["handlers"]) == {  # type: ignore[arg-type]
+        ("meta", "record_launch"),
+        ("drive", "finalize_verified"),
+    }

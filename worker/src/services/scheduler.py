@@ -501,6 +501,34 @@ def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Job: transactional-outbox relay (E5.1 / #510)
+# ---------------------------------------------------------------------------
+#
+# Drains the ``integration_outbox`` (the durable external-write queue): claims
+# due rows, performs the registered side effect, records success or backs off /
+# dead-letters on failure. Bounded per pass (``scheduler_outbox_max_per_pass``)
+# like every other cron core. The pure pass lives in :mod:`services.outbox_relay`
+# (injectable handlers, no I/O of its own); this is the thin scheduler seam that
+# supplies the wired handler set.
+
+
+async def run_outbox_relay_once(settings: Settings) -> int:
+    """One pass of the transactional-outbox relay. Returns rows resolved.
+
+    Thin wrapper over :func:`services.outbox_relay.run_outbox_relay_once` that
+    supplies the wired ``(integration, op) -> handler`` map. "Resolved" counts
+    the rows this pass took to a terminal-ish outcome (done + dead-lettered);
+    backed-off + skipped rows are not counted (they recur next pass). Imported
+    lazily so the scheduler module never forces the relay's imports at import
+    time and tests can patch it on either module.
+    """
+    from .outbox_relay import default_handlers, run_outbox_relay_once as _relay_pass
+
+    result = await _relay_pass(settings, handlers=default_handlers())
+    return result.done + result.dead_lettered
+
+
+# ---------------------------------------------------------------------------
 # Loop supervisor + lifecycle
 # ---------------------------------------------------------------------------
 
@@ -628,6 +656,15 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:kie_reconcile",
         ),
+        loop.create_task(
+            _interval_loop(
+                "outbox_relay",
+                settings.scheduler_outbox_interval_s,
+                lambda: run_outbox_relay_once(settings),
+                initial_delay_s=10.0,
+            ),
+            name="scheduler:outbox_relay",
+        ),
     ]
     log.info("scheduler_started", jobs=len(tasks))
     return Scheduler(tasks)
@@ -640,6 +677,7 @@ __all__ = [
     "run_dispatch_watchdog_once",
     "run_kie_reconcile_once",
     "run_observability_once",
+    "run_outbox_relay_once",
     "run_reconciliation_once",
     "start_scheduler",
 ]
