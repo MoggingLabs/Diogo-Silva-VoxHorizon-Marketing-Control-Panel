@@ -1,0 +1,175 @@
+name: backup
+
+# Scheduled off-box backup of the Supabase Postgres database (E5.4 / #520).
+#
+# WHY THIS EXISTS
+#   Supabase managed Postgres is the single source of truth for every client
+#   (ADR-0003). The managed plan has its own automated backups and (on Pro)
+#   Point-in-Time Recovery, but those live in the same vendor account as the
+#   live data. This workflow adds an INDEPENDENT, off-vendor copy: a daily
+#   pg_dump shipped to an S3-compatible object store we control. If the
+#   Supabase project is lost, suspended, or corrupted, the off-box dump is the
+#   floor of our recovery story (RTO <= 1h). See docs/adr/0006-backups-and-dr.md.
+#
+# WHAT IT DOES
+#   - Runs pg_dump against the Supabase direct connection (parameterized by
+#     secret), writes a compressed custom-format archive, and uploads it to the
+#     configured S3-compatible bucket via scripts/backup-db.sh.
+#   - Verifies the uploaded object is non-empty and lists the dump's table of
+#     contents so a malformed/empty dump fails the run loudly.
+#
+# WHAT IT IS NOT
+#   - It does NOT back up the Supabase Storage buckets (creatives, etc.). Those
+#     are covered by a documented manual / follow-up step - see the
+#     "Storage buckets" note at the bottom of this file and the DR runbook.
+#   - It does NOT touch the running VPS stack or apply migrations.
+#
+# GUARD RAIL
+#   If the backup secrets are not configured the workflow is a deliberate
+#   no-op: it prints what is missing and exits 0, so an unconfigured repo does
+#   not show a permanent red X. Wiring is a USER follow-up (see PR body and
+#   docs/runbooks/restore.md).
+
+on:
+  schedule:
+    # 06:12 UTC daily. Off the hour to avoid the cron stampede on the runner
+    # fleet. Daily cadence bounds the off-box RPO at <= 24h; the <= 5 min RPO
+    # target is met by Supabase PITR, not by this dump (see ADR-0006).
+    - cron: "12 6 * * *"
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Why are you running this manually? (audit note)"
+        required: false
+        default: "manual backup"
+
+# Never run two backups at once - a half-written remote object is worse than a
+# slightly stale one. A new run waits for the in-flight one.
+concurrency:
+  group: backup-db
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    name: pg_dump to off-box object store
+    runs-on: ubuntu-latest
+    # A dump of a small marketing dataset finishes in well under an hour; the
+    # cap stops a hung connection from burning a full 6h runner slot.
+    timeout-minutes: 60
+    env:
+      # Source database. Use the Supabase DIRECT connection string (port 5432),
+      # not the pooler (6543) - pg_dump needs session-level features the
+      # transaction pooler does not provide. Stored as a single DSN secret so
+      # the password never appears on a command line.
+      SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+      # Off-box destination (S3-compatible: AWS S3, Backblaze B2, Cloudflare R2,
+      # MinIO, ...). All five are referenced by NAME only - never inline a value.
+      BACKUP_S3_BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+      BACKUP_S3_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+      BACKUP_S3_REGION: ${{ secrets.BACKUP_S3_REGION }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+      # Optional: number of days to keep remote dumps (lifecycle is better set
+      # on the bucket itself; this is a belt-and-suspenders client-side prune).
+      BACKUP_RETENTION_DAYS: ${{ vars.BACKUP_RETENTION_DAYS }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ----------------------------------------------------------------------
+      # Guard rail: if the required secrets are absent, no-op cleanly. This
+      # keeps the workflow green on a freshly forked / not-yet-wired repo and
+      # documents exactly what the operator still has to set.
+      # ----------------------------------------------------------------------
+      - name: Check backup configuration
+        id: guard
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${SUPABASE_DB_URL}" ] || missing+=("SUPABASE_DB_URL")
+          [ -n "${BACKUP_S3_BUCKET}" ] || missing+=("BACKUP_S3_BUCKET")
+          [ -n "${AWS_ACCESS_KEY_ID}" ] || missing+=("BACKUP_S3_ACCESS_KEY_ID")
+          [ -n "${AWS_SECRET_ACCESS_KEY}" ] || missing+=("BACKUP_S3_SECRET_ACCESS_KEY")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            {
+              echo "## Backup skipped - not configured"
+              echo ""
+              echo "The off-box backup is not wired up yet. Missing repo secrets:"
+              echo ""
+              for s in "${missing[@]}"; do echo "- \`${s}\`"; done
+              echo ""
+              echo "See the PR for E5.4 and docs/runbooks/restore.md for the wiring steps."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "Backup secrets not configured; skipping (no-op). Missing: ${missing[*]}"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+            echo "Backup secrets present; proceeding."
+          fi
+
+      # ----------------------------------------------------------------------
+      # Install a pg_dump whose major version matches the managed server. A
+      # client older than the server refuses to dump; we pull the official PGDG
+      # client so this does not silently drift when GitHub bumps the runner.
+      # PG_MAJOR is overridable via repo Variable if Supabase upgrades.
+      # ----------------------------------------------------------------------
+      - name: Install Postgres client + awscli
+        if: steps.guard.outputs.configured == 'true'
+        env:
+          PG_MAJOR: ${{ vars.SUPABASE_PG_MAJOR || '16' }}
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          # shellcheck disable=SC1091
+          . /etc/os-release
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "postgresql-client-${PG_MAJOR}"
+          pg_dump --version
+          # awscli is preinstalled on ubuntu-latest runners; verify and fall
+          # back to a pip install if a future image drops it.
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get install -y -qq awscli
+          fi
+          aws --version
+
+      - name: Run backup (pg_dump + upload + verify)
+        if: steps.guard.outputs.configured == 'true'
+        run: |
+          set -euo pipefail
+          bash scripts/backup-db.sh
+
+      - name: Summary
+        if: steps.guard.outputs.configured == 'true'
+        run: |
+          {
+            echo "## Backup complete"
+            echo ""
+            echo "Daily off-box pg_dump uploaded and verified."
+            echo "Destination bucket secret: \`BACKUP_S3_BUCKET\` (value not shown)."
+            echo ""
+            echo "Reminder: Supabase Storage buckets are NOT in this dump - see the"
+            echo "Storage section of docs/runbooks/restore.md."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+# -----------------------------------------------------------------------------
+# Storage buckets (manual / documented step)
+# -----------------------------------------------------------------------------
+# This workflow backs up the Postgres database only. The Supabase Storage
+# buckets (e.g. the private `creatives` bucket) hold the rendered assets and are
+# NOT captured by pg_dump. Backing them up off-box requires Storage S3 access
+# keys (a separate credential pair from the database password) and is mirrored
+# with the same `aws s3 sync` mechanics. To avoid shipping a second, rarely
+# exercised credential into CI before the operator has decided where Storage
+# backups should live, Storage mirroring is documented as a manual / follow-up
+# step rather than run here. The exact command is in:
+#     docs/runbooks/restore.md  ->  "Supabase Storage buckets"
+# When the operator is ready to automate it, add a second job here that runs
+# `aws s3 sync s3://<supabase-storage> s3://<backup-bucket>/storage/` using the
+# Storage S3 credentials, gated by the same guard-rail pattern above.

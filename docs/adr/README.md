@@ -46,6 +46,7 @@ purpose, in the open, with a paper trail.
 | [0003](./0003-single-source-of-truth.md)           | Single source of truth per invariant                  | Accepted |
 | [0004](./0004-strangler-fig-rebuild.md)            | Foundation-first strangler-fig rebuild strategy       | Accepted |
 | [0005](./0005-reliability-primitives-on-path.md)   | Reliability primitives wired onto the primary path    | Accepted |
+| [0006](./0006-backups-and-dr.md)                   | Backups and disaster recovery (RPO/RTO)               | Proposed |
 
 ## Related documents
 
