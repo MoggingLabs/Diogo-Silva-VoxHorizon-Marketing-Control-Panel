@@ -28,6 +28,9 @@ CREATIVE_ID = "22222222-2222-4222-8222-222222222222"
 CREATIVE_ID_2 = "33333333-3333-4333-8333-333333333333"
 COPY_VARIANT_ID = "44444444-4444-4444-8444-444444444444"
 CLIENT_ID = "55555555-5555-4555-8555-555555555555"
+# VIDEO_CREATIVE_ID + the QA-flavoured _seed_video_creative live in the
+# "qa_run VIDEO branch" section below (they predate this M3 work). The
+# compliance video tests use _seed_video_compliance_creative (script_outline).
 
 
 # ===========================================================================
@@ -59,6 +62,21 @@ def _seed_creative(fake, creative_id: str = CREATIVE_ID, **overrides) -> None:
     }
     row.update(overrides)
     fake.seed("creatives", [row])
+
+
+def _seed_video_compliance_creative(
+    fake, *, script_outline: dict, creative_id: str = "66666666-6666-4666-8666-666666666666"
+) -> None:
+    """Seed a ``video_creatives`` row carrying a spoken ``script_outline``.
+
+    No matching ``creatives`` row: the compliance route's image fetch misses and
+    falls back to ``_fetch_video_compliance_creative``, resolving the spoken
+    surface the voiceover-claim rules scan.
+    """
+    fake.seed(
+        "video_creatives",
+        [{"id": creative_id, "brief_id": "vbrief-1", "script_outline": script_outline}],
+    )
 
 
 def _seed_pipeline_client(fake, *, with_client: bool = True, constraints=None) -> None:
@@ -226,6 +244,96 @@ async def test_compliance_run_operator_cannot_self_clear(
     assert body["results"][0]["status"] == "failed"
     state_inserts = [r for (t, r) in fake_supabase.inserts if t == "creative_stage_state"]
     assert state_inserts[0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_compliance_run_video_spoken_claim_blocks(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase
+) -> None:
+    """M3: a personal-attribute claim SPOKEN in the voiceover fails the gate.
+
+    The creative lives in ``video_creatives`` and carries no copy/image
+    violation — only the voiceover says it. The video spoken-claim rule fires on
+    ``script_outline`` (hook + segments + outro) and blocks, proving the gate
+    sees the audio surface the image/copy checks never do.
+    """
+    _seed_pipeline_client(fake_supabase, with_client=False)
+    _seed_video_compliance_creative(
+        fake_supabase,
+        script_outline={
+            "hook": "Are you embarrassed by your smile?",
+            "segments": [
+                {"idx": 0, "voiceover_text": "We can fix that fast."},
+            ],
+            "outro": "Book a visit today.",
+            "total_duration_s": 20,
+        },
+    )
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/compliance_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [
+                {
+                    "creative_id": VIDEO_CREATIVE_ID,
+                    "copy_variant_id": None,
+                    "surface": "video",
+                    "llm_candidates": [],
+                }
+            ],
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["rollup"] == "failed"
+    assert body["results"][0]["verdict"] == "fail"
+    assert body["results"][0]["block_count"] >= 1
+
+    findings = [r for (t, r) in fake_supabase.inserts if t == "compliance_finding"]
+    spoken = [f for f in findings if f["rule_id"] == "meta.spoken_personal_attributes"]
+    assert spoken, "the spoken personal-attribute rule must fire + be recorded"
+    assert spoken[0]["verdict"] == "fail"
+    assert spoken[0]["severity"] == "critical"
+    assert spoken[0]["citation_url"].startswith("http")
+
+
+@pytest.mark.asyncio
+async def test_compliance_run_video_clean_voiceover_passes(
+    asgi_client: httpx.AsyncClient, auth_headers, fake_supabase
+) -> None:
+    """A video whose voiceover makes no banned claim passes the gate cleanly."""
+    _seed_pipeline_client(fake_supabase, with_client=False)
+    _seed_video_compliance_creative(
+        fake_supabase,
+        script_outline={
+            "hook": "Ready for a smile you'll love?",
+            "segments": [{"idx": 0, "voiceover_text": "Our team is here to help."}],
+            "outro": "Book a visit today.",
+            "total_duration_s": 20,
+        },
+    )
+
+    res = await asgi_client.post(
+        "/work/pipeline/tools/compliance_run",
+        headers=auth_headers,
+        json={
+            "pipeline_id": PIPELINE_ID,
+            "items": [
+                {
+                    "creative_id": VIDEO_CREATIVE_ID,
+                    "copy_variant_id": None,
+                    "surface": "video",
+                    "llm_candidates": [],
+                }
+            ],
+        },
+    )
+    assert res.status_code == 200
+    body = res.json()
+    assert body["rollup"] == "passed"
+    assert body["results"][0]["verdict"] == "pass"
 
 
 @pytest.mark.asyncio

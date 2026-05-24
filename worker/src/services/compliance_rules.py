@@ -13,7 +13,7 @@ Each rule is a plain :class:`dict` matching the engine's rule contract::
       "version":            str,        # bump when the check / citation changes
       "title":              str,
       "applies_to_vertical": list[str], # ['*'] = all verticals
-      "surface":            str,        # 'image' | 'copy' | 'targeting'
+      "surface":            str,        # 'image' | 'copy' | 'targeting' | 'video'
       "severity":           str,        # 'info' | 'warn' | 'block'
       "engine":             str,        # 'deterministic' | 'llm' | 'both'
       "check_spec":         dict,       # one of: regex_any | field_predicate | llm_classify
@@ -107,6 +107,57 @@ PROPERTY_VERTICALS = (
 
 
 # ---------------------------------------------------------------------------
+# Shared claim patterns
+# ---------------------------------------------------------------------------
+#
+# Referenced by BOTH the copy-surface rules (which scan the written
+# headline/body/description) and the video-surface "spoken" rules (which scan
+# the creative's voiceover script). Defined once so the two surfaces cannot
+# drift: a claim is the same violation whether written or spoken, so it must be
+# detected identically in copy and in audio.
+
+_PERSONAL_ATTRIBUTE_PATTERNS: list[str] = [
+    # Self-perception / personal-attribute framings. Word-boundaried,
+    # case-insensitive (engine compiles with re.IGNORECASE).
+    r"\bare you (embarrassed|ashamed|struggling|suffering|overweight|fat|balding|bald|insecure|self.?conscious)\b",
+    r"\b(embarrassed|ashamed) (by|of|about) your\b",
+    r"\bstruggling with your\b",
+    r"\btired of being\b",
+    r"\bdo you (suffer|struggle) (from|with)\b",
+    r"\bare you (still )?(single|divorced|in debt|broke)\b",
+]
+
+_SUBSTANTIATION_PATTERNS: list[str] = [
+    r"\bclinically proven\b",
+    r"\bscientifically proven\b",
+    r"\bproven results\b",
+    r"\bguaranteed results\b",
+    r"\b100%\s+(?:effective|guaranteed|satisfaction)\b",
+    r"\brisk[-\s]?free\b",
+]
+
+_SUPERLATIVE_PATTERNS: list[str] = [
+    r"\b(?:the\s+)?best\b",
+    r"#\s?1\b",
+    r"\bnumber\s+one\b",
+    r"\bcheapest\b",
+    r"\blowest prices?\b",
+    r"\bunbeatable\b",
+    r"\bworld'?s\s+(?:best|finest|leading)\b",
+]
+
+_FINANCIAL_PATTERNS: list[str] = [
+    r"\$\d+\s*(?:/|per\s+)?\s*(?:mo|month)\b",
+    r"\bno\s+(?:money\s+)?down\b",
+    r"\bno\s+deposit\b",
+    r"\bfinancing\s+available\b",
+    r"\b0%\s+(?:apr|interest|financing)\b",
+    r"\beasy\s+(?:monthly\s+)?payments?\b",
+    r"\bpayday\s+loan\b",
+]
+
+
+# ---------------------------------------------------------------------------
 # The starter rules
 # ---------------------------------------------------------------------------
 
@@ -123,16 +174,7 @@ _STARTER_RULES: list[dict[str, Any]] = [
         "check_spec": {
             "type": "regex_any",
             "fields": ["headline", "body", "description"],
-            # Self-perception / personal-attribute framings. Word-boundaried,
-            # case-insensitive (engine compiles with re.IGNORECASE).
-            "patterns": [
-                r"\bare you (embarrassed|ashamed|struggling|suffering|overweight|fat|balding|bald|insecure|self.?conscious)\b",
-                r"\b(embarrassed|ashamed) (by|of|about) your\b",
-                r"\bstruggling with your\b",
-                r"\btired of being\b",
-                r"\bdo you (suffer|struggle) (from|with)\b",
-                r"\bare you (still )?(single|divorced|in debt|broke)\b",
-            ],
+            "patterns": list(_PERSONAL_ATTRIBUTE_PATTERNS),
         },
         "required_edit": (
             "Reframe to a benefit, not a personal attribute. "
@@ -182,14 +224,7 @@ _STARTER_RULES: list[dict[str, Any]] = [
         "check_spec": {
             "type": "regex_any",
             "fields": ["headline", "body", "description"],
-            "patterns": [
-                r"\bclinically proven\b",
-                r"\bscientifically proven\b",
-                r"\bproven results\b",
-                r"\bguaranteed results\b",
-                r"\b100%\s+(?:effective|guaranteed|satisfaction)\b",
-                r"\brisk[-\s]?free\b",
-            ],
+            "patterns": list(_SUBSTANTIATION_PATTERNS),
         },
         "required_edit": (
             "Claims like 'clinically proven' or 'guaranteed results' require "
@@ -237,15 +272,7 @@ _STARTER_RULES: list[dict[str, Any]] = [
         "check_spec": {
             "type": "regex_any",
             "fields": ["headline", "body", "description"],
-            "patterns": [
-                r"\b(?:the\s+)?best\b",
-                r"#\s?1\b",
-                r"\bnumber\s+one\b",
-                r"\bcheapest\b",
-                r"\blowest prices?\b",
-                r"\bunbeatable\b",
-                r"\bworld'?s\s+(?:best|finest|leading)\b",
-            ],
+            "patterns": list(_SUPERLATIVE_PATTERNS),
         },
         "required_edit": (
             "Unqualified superlatives ('best', '#1', 'cheapest') imply an "
@@ -266,15 +293,7 @@ _STARTER_RULES: list[dict[str, Any]] = [
         "check_spec": {
             "type": "regex_any",
             "fields": ["headline", "body", "description"],
-            "patterns": [
-                r"\$\d+\s*(?:/|per\s+)?\s*(?:mo|month)\b",
-                r"\bno\s+(?:money\s+)?down\b",
-                r"\bno\s+deposit\b",
-                r"\bfinancing\s+available\b",
-                r"\b0%\s+(?:apr|interest|financing)\b",
-                r"\beasy\s+(?:monthly\s+)?payments?\b",
-                r"\bpayday\s+loan\b",
-            ],
+            "patterns": list(_FINANCIAL_PATTERNS),
         },
         "required_edit": (
             "Financing offers must run under Meta's Financial Products & "
@@ -307,6 +326,94 @@ _STARTER_RULES: list[dict[str, Any]] = [
             "a clean image variant for the Google placement."
         ),
         "citation_url": _CITE_GOOGLE_OVERLAY,
+    },
+    # -- Video voiceover: spoken claims ----------------------------------
+    # The audio surface the copy + image checks never see. Same policy
+    # substance as the written-copy rules above, re-applied to the creative's
+    # voiceover script (``creative.voiceover_text``, the concatenated hook +
+    # per-segment voiceover_text + outro). A video can pass every image/copy
+    # check and still *say* "clinically proven, guaranteed, #1" out loud.
+    # The shared ``*_PATTERNS`` constants guarantee a spoken claim is the same
+    # violation as its written counterpart (the two surfaces cannot drift).
+    {
+        "rule_id": "meta.spoken_personal_attributes",
+        "version": "2025.1",
+        "title": "Meta personal-attribute prohibition applies to the spoken voiceover",
+        "applies_to_vertical": ["*"],
+        "surface": "video",
+        "severity": "block",
+        "engine": "both",
+        "check_spec": {
+            "type": "regex_any",
+            "fields": ["voiceover_text"],
+            "patterns": list(_PERSONAL_ATTRIBUTE_PATTERNS),
+        },
+        "required_edit": (
+            "The voiceover asserts or implies a personal attribute. Reframe the "
+            "spoken line to a benefit, not a personal attribute. Meta prohibits "
+            "this in audio exactly as in on-screen text."
+        ),
+        "citation_url": _CITE_META_PERSONAL_ATTRIBUTES,
+    },
+    {
+        "rule_id": "ftc.spoken_substantiation",
+        "version": "2025.1",
+        "title": "Spoken objective claims need substantiation",
+        "applies_to_vertical": ["*"],
+        "surface": "video",
+        "severity": "warn",
+        "engine": "both",
+        "check_spec": {
+            "type": "regex_any",
+            "fields": ["voiceover_text"],
+            "patterns": list(_SUBSTANTIATION_PATTERNS),
+        },
+        "required_edit": (
+            "The voiceover makes a claim (e.g. 'clinically proven', 'guaranteed "
+            "results') that requires competent and reliable substantiation on "
+            "file. Remove the spoken claim or attach the supporting evidence."
+        ),
+        "citation_url": _CITE_FTC_SUBSTANTIATION,
+    },
+    {
+        "rule_id": "ftc.spoken_superlative",
+        "version": "2025.1",
+        "title": "Spoken unqualified superlatives ('best', '#1', 'cheapest')",
+        "applies_to_vertical": ["*"],
+        "surface": "video",
+        "severity": "warn",
+        "engine": "both",
+        "check_spec": {
+            "type": "regex_any",
+            "fields": ["voiceover_text"],
+            "patterns": list(_SUPERLATIVE_PATTERNS),
+        },
+        "required_edit": (
+            "The voiceover uses an unqualified superlative ('best', '#1', "
+            "'cheapest'). Qualify it, cite the basis, or remove it from the "
+            "script."
+        ),
+        "citation_url": _CITE_FTC_SUPERLATIVE,
+    },
+    {
+        "rule_id": "meta.spoken_financial",
+        "version": "2025.1",
+        "title": "Spoken financing offers are a Financial Special Ad Category",
+        "applies_to_vertical": ["*"],
+        "surface": "video",
+        "severity": "block",
+        "engine": "both",
+        "check_spec": {
+            "type": "regex_any",
+            "fields": ["voiceover_text"],
+            "patterns": list(_FINANCIAL_PATTERNS),
+        },
+        "required_edit": (
+            "The voiceover narrates a financing offer (monthly payments, no "
+            "money down, 0% APR). Run the campaign under Meta's Financial "
+            "Products Special Ad Category or remove the spoken financing offer."
+        ),
+        "citation_url": _CITE_META_FINANCIAL_SAC,
     },
 ]
 

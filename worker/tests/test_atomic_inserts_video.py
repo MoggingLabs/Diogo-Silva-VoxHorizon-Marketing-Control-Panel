@@ -155,6 +155,32 @@ def test_unknown_path_keys_are_dropped(
     assert payload["script_path"] == "brief-1/v1/script.json"
 
 
+def test_script_outline_persists_on_creative(
+    mock_sb: tuple[MagicMock, dict[str, MagicMock]],
+) -> None:
+    # 0040: the generated script JSON rides in ``paths`` and lands on the
+    # ``video_creatives.script_outline`` column, so the voiceover stage's
+    # ``_script_of`` primary path and the compliance gate read it back.
+    _, tables = mock_sb
+    script = {
+        "hook": "hi",
+        "segments": [{"idx": 0, "voiceover_text": "x"}],
+        "outro": "bye",
+        "total_duration_s": 10,
+    }
+    asyncio.run(
+        record_video_stage(
+            brief_id="brief-1",
+            stage="script",
+            paths={"script_path": "brief-1/v1/script.json", "script_outline": script},
+            iteration_kind="generate_script",
+        )
+    )
+    payload = _insert_payload(tables["video_creatives"])
+    assert payload["script_outline"] == script
+    assert payload["script_path"] == "brief-1/v1/script.json"
+
+
 # ---------------------------------------------------------------------------
 # Later-stage call: patches an existing row instead of inserting.
 # ---------------------------------------------------------------------------

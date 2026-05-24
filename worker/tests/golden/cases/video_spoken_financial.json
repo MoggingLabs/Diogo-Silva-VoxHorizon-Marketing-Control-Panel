@@ -1,0 +1,22 @@
+{
+  "name": "spoken financing offer trips the Financial Special Ad Category rule",
+  "description": "A video voiceover narrating a financing offer ('just $199 a month, no money down') MUST FAIL meta.spoken_financial (block) — financing must run under Meta's Financial Special Ad Category whether the offer is written or spoken.",
+  "context": {
+    "creative": {
+      "id": "vid-roof-finance",
+      "voiceover_text": "Need a new roof?\nGet yours for just $199/month with no money down.\nCall us today."
+    },
+    "copy": null,
+    "client": {
+      "service_type": "roofing",
+      "offer_constraints": []
+    },
+    "surface": "video"
+  },
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "meta.spoken_financial": "fail"
+    }
+  }
+}

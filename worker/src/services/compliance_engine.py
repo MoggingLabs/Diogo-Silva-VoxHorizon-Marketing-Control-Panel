@@ -46,7 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 
-Surface = Literal["image", "copy", "targeting"]
+Surface = Literal["image", "copy", "targeting", "video"]
 Severity = Literal["info", "warn", "block"]
 Engine = Literal["deterministic", "llm", "both"]
 Verdict = Literal["pass", "fail", "needs_review"]
@@ -193,6 +193,10 @@ def _resolve_field(context: dict[str, Any], fields: dict[str, str], name: str) -
       * ``guarantee_terms_present``       — copy contains a guarantee/warranty term
       * ``guarantee_disclosure_present``  — copy contains the disclosure
       * ``has_overlay_text``             — creative has baked-in overlay text
+      * ``voiceover_text``               — a video creative's spoken script
+        (hook + per-segment voiceover_text + outro), the surface the
+        ``surface='video'`` spoken-claim rules scan. Empty string for an image
+        creative, so those rules simply find nothing to match.
 
     Anything else falls through to ``context.creative`` (so a rule can predicate
     on an arbitrary creative attribute).
@@ -206,6 +210,9 @@ def _resolve_field(context: dict[str, Any], fields: dict[str, str], name: str) -
     if name == "has_overlay_text":
         creative = context.get("creative") or {}
         return bool(creative.get("has_overlay_text"))
+    if name == "voiceover_text":
+        creative = context.get("creative") or {}
+        return str(creative.get("voiceover_text") or "")
     creative = context.get("creative") or {}
     return creative.get(name)
 

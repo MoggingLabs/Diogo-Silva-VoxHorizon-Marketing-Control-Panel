@@ -1,0 +1,19 @@
+{
+  "name": "clean voiceover passes the gate",
+  "description": "A video whose voiceover makes no banned claim PASSES. Benefit-framed hook, no personal attribute, no spoken financing offer, no unqualified superlative, no unsubstantiated claim.",
+  "context": {
+    "creative": {
+      "id": "vid-smile-clean",
+      "voiceover_text": "Ready for a smile you'll love?\nOur team is here to help.\nBook a visit today."
+    },
+    "copy": null,
+    "client": {
+      "service_type": "dental",
+      "offer_constraints": []
+    },
+    "surface": "video"
+  },
+  "expect": {
+    "overall_verdict": "pass"
+  }
+}
