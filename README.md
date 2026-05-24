@@ -1,5 +1,16 @@
 # VoxHorizon Marketing Control Panel
 
+> **Status / current stack (2026-05-24).** The descriptions below this note
+> are stale. The live system runs on a single Hostinger VPS: Next.js 15 +
+> Supabase (Postgres / RLS / Realtime / Storage) + a Python FastAPI worker +
+> a Hermes operator agent, fronted by Caddy. It is **not** the older
+> Mac / Tailscale Funnel / Vercel / Claude-Code setup described further down.
+> The pipeline is a 12-stage, server-gated DAG across image and video
+> verticals. For the current architecture and the rebuild in progress, read
+> [`PIPELINE-REBUILD-ARCHITECTURE.md`](./PIPELINE-REBUILD-ARCHITECTURE.md)
+> and the decision records in [`docs/adr`](./docs/adr). The schema is defined
+> by [`db/migrations`](./db/migrations) (see [`db/SCHEMA.md`](./db/SCHEMA.md)).
+
 Single-operator control panel for VoxHorizon's AI marketing department. Replaces the Slack-driven workflow with a Next.js + Supabase UI, backed by a local Python worker reachable over Tailscale. v1 ships two parallel verticals end to end: an **image-ad pipeline** (brief → generate → review → launch → audit) and a **video voiceover + b-roll pipeline** (brief → script → voiceover → b-roll → compose → caption → review). Diogo is the only operator.
 
 ## Status
