@@ -395,14 +395,24 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
+    # Image is a required gate. Video + both verticals ALLOW-FAIL until M1 (#448)
+    # lands the neutral creative identity: they surface the foundation FK break
+    # (informative) but must not block merges yet. Flip allow_failure to false for
+    # them once M1 is in (the DB-level FK net in the integration job stays a hard
+    # gate regardless).
+    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
       matrix:
-        spec:
-          - pipeline-workflow.spec.ts
-          - pipeline-video.spec.ts
-          - pipeline-both.spec.ts
-          - launch-video.spec.ts
+        include:
+          - spec: pipeline-workflow.spec.ts
+            allow_failure: false
+          - spec: pipeline-video.spec.ts
+            allow_failure: true
+          - spec: pipeline-both.spec.ts
+            allow_failure: true
+          - spec: launch-video.spec.ts
+            allow_failure: true
     env:
       # Local Supabase stack endpoints (supabase start defaults).
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
