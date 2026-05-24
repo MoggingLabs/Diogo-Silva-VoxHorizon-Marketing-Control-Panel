@@ -72,14 +72,15 @@ jobs:
           context: worker
           file: worker/Dockerfile
           push: true
-          # GHCR namespace is pinned to `pveloso01` (lowercase, valid) rather than
-          # `${{ github.repository_owner }}`: the repo now lives under the
-          # MoggingLabs org, but the GHCR packages and the VPS docker-compose.yml
-          # both use the pveloso01 namespace, and `MoggingLabs` (mixed case) is an
-          # invalid Docker tag. Keep this in lockstep with docker-compose.yml.
+          # GHCR namespace is the org owner, lowercased: the repo lives under the
+          # MoggingLabs org, so packages publish to ghcr.io/mogginglabs/* (the
+          # workflow GITHUB_TOKEN has packages:write only for its own org).
+          # `${{ github.repository_owner }}` would be the mixed-case `MoggingLabs`,
+          # an invalid Docker tag, so the owner is hardcoded lowercase here. Keep
+          # in lockstep with docker-compose.yml.
           tags: |
-            ghcr.io/pveloso01/voxhorizon-worker:latest
-            ghcr.io/pveloso01/voxhorizon-worker:${{ github.sha }}
+            ghcr.io/mogginglabs/voxhorizon-worker:latest
+            ghcr.io/mogginglabs/voxhorizon-worker:${{ github.sha }}
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
@@ -118,12 +119,12 @@ jobs:
           context: .
           file: web/Dockerfile
           push: true
-          # GHCR namespace pinned to `pveloso01` (see the worker job above): the
-          # repo is under the MoggingLabs org but packages + compose use pveloso01,
-          # and `MoggingLabs` is an invalid (uppercase) Docker tag.
+          # GHCR namespace is the lowercased org owner (see the worker job above):
+          # packages publish to ghcr.io/mogginglabs/*; `MoggingLabs` would be an
+          # invalid (uppercase) Docker tag.
           tags: |
-            ghcr.io/pveloso01/voxhorizon-web:latest
-            ghcr.io/pveloso01/voxhorizon-web:${{ github.sha }}
+            ghcr.io/mogginglabs/voxhorizon-web:latest
+            ghcr.io/mogginglabs/voxhorizon-web:${{ github.sha }}
           build-args: |
             NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
@@ -140,6 +141,13 @@ jobs:
   deploy:
     needs: [build-and-push-worker, build-and-push-web]
     runs-on: ubuntu-latest
+    # The SSH script does `docker login ghcr.io` with GITHUB_TOKEN to pull the
+    # org packages built above. Org packages are private by default, so the
+    # deploy job's token needs packages:read (in addition to the default
+    # contents:read) to pull them on the VPS.
+    permissions:
+      contents: read
+      packages: read
     steps:
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1
