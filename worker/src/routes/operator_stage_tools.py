@@ -194,15 +194,22 @@ class CopyInput(BaseModel):
 
 
 def _existing_copy_variant_id(
-    sb: Any, *, creative_id: str, platform: str, variant_index: int
+    sb: Any,
+    *,
+    creative_id: str,
+    platform: str,
+    variant_index: int,
+    table: str = "copy_variants",
 ) -> str | None:
-    """Return the id of an existing copy_variants row for the unique key, or None.
+    """Return the id of an existing copy row for the unique key, or None.
 
     ``unique(creative_id, platform, variant_index)`` makes a re-persist an
-    idempotent update rather than a duplicate insert.
+    idempotent update rather than a duplicate insert. ``table`` is
+    ``copy_variants`` (image) or ``video_copy_variants`` (video; gained the
+    matching columns + unique key in 0031).
     """
     resp = (
-        sb.table("copy_variants")
+        sb.table(table)
         .select("id")
         .eq("creative_id", creative_id)
         .eq("platform", platform)
@@ -213,24 +220,6 @@ def _existing_copy_variant_id(
     if resp is not None and isinstance(resp.data, dict):
         return resp.data.get("id")
     return None
-
-
-def _has_video_copy_variants(sb: Any, creative_id: str) -> bool:
-    """True when the video creative already has copy variants.
-
-    ``video_copy_variants`` has no unique key, so the copy route uses
-    resume-by-skip: a re-dispatch skips a creative that already has copy rather
-    than appending duplicates.
-    """
-    resp = (
-        sb.table("video_copy_variants")
-        .select("id")
-        .eq("creative_id", creative_id)
-        .limit(1)
-        .execute()
-    )
-    data = resp.data if resp is not None else None
-    return isinstance(data, list) and len(data) > 0
 
 
 @router.post("/work/pipeline/tools/copy", dependencies=[Depends(verify_secret)])
@@ -260,37 +249,15 @@ async def persist_copy(body: CopyInput) -> dict[str, Any]:
 
     by_creative: dict[str, int] = {}
     upserted: list[dict[str, Any]] = []
-    # Video copy goes to video_copy_variants (a simpler shape, no unique key);
-    # collect per creative and insert with resume-by-skip after the loop.
-    video_rows: dict[str, list[dict[str, Any]]] = {}
 
     for variant in body.variants:
         cid = variant.creative_id
         by_creative[cid] = by_creative.get(cid, 0) + 1
+        is_vid = _is_video(cid)
+        table = "video_copy_variants" if is_vid else "copy_variants"
 
-        if _is_video(cid):
-            video_rows.setdefault(cid, []).append(
-                {
-                    "creative_id": cid,
-                    "headline": variant.headline,
-                    "body": variant.primary_text,
-                    "cta": variant.cta,
-                    "humanized": bool(variant.validation.get("humanized")),
-                    "status": "draft",
-                }
-            )
-            upserted.append(
-                {
-                    "creative_id": cid,
-                    "platform": variant.platform,
-                    "variant_index": variant.variant_index,
-                    "table": "video_copy_variants",
-                }
-            )
-            continue
-
-        # The body field is `primary_text`; the rebuilt table stores Meta's
-        # primary text on `body` (kept for back-compat — see migration 0020).
+        # The body field is `primary_text`; both tables store Meta's primary text
+        # on `body` (copy_variants since 0020, video_copy_variants since 0031).
         row: dict[str, Any] = {
             "pipeline_id": body.pipeline_id,
             "creative_id": cid,
@@ -306,18 +273,21 @@ async def persist_copy(body: CopyInput) -> dict[str, Any]:
         }
         if variant.placement is not None:
             row["placement"] = variant.placement
+        if is_vid:
+            row["humanized"] = bool(variant.validation.get("humanized"))
 
         existing_id = _existing_copy_variant_id(
             sb,
             creative_id=cid,
             platform=variant.platform,
             variant_index=variant.variant_index,
+            table=table,
         )
         if existing_id is not None:
-            sb.table("copy_variants").update(row).eq("id", existing_id).execute()
+            sb.table(table).update(row).eq("id", existing_id).execute()
             copy_id = existing_id
         else:
-            created = sb.table("copy_variants").insert(row).execute().data
+            created = sb.table(table).insert(row).execute().data
             copy_id = (
                 created[0]["id"] if isinstance(created, list) and created else None
             )
@@ -329,12 +299,6 @@ async def persist_copy(body: CopyInput) -> dict[str, Any]:
                 "copy_variant_id": copy_id,
             }
         )
-
-    # Video copy: resume-by-skip per creative (no unique key on the table).
-    for cid, rows in video_rows.items():
-        if _has_video_copy_variants(sb, cid):
-            continue
-        sb.table("video_copy_variants").insert(rows).execute()
 
     rollup: list[dict[str, Any]] = []
     for creative_id, count in by_creative.items():

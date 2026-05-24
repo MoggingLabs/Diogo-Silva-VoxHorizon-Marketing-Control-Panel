@@ -202,24 +202,39 @@ def test_copy_routes_video_creative_to_video_table(
     assert resp.json()["rollup"][0]["stage_state"] == "in_progress"
 
 
-def test_copy_video_resume_by_skip(
+def test_copy_video_upserts_existing(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
-    """A re-dispatch skips a video creative that already has copy (no dup insert)."""
+    """Re-persisting a video creative's copy UPDATES in place (0031 unique key)."""
     stage_sb.set_single("pipelines", _pipeline_row())
     stage_sb.seed("video_creatives", [{"id": "vc-1", "brief_id": "vb-1"}])
-    stage_sb.seed("video_copy_variants", [{"id": "vcv-1", "creative_id": "vc-1"}])
+    # Existing row for the unique key (creative_id, platform, variant_index).
+    stage_sb.seed(
+        "video_copy_variants",
+        [{"id": "vcv-1", "creative_id": "vc-1", "platform": "meta", "variant_index": 1}],
+    )
     resp = client.post(
         "/work/pipeline/tools/copy",
         headers=_auth(),
         json={
             "pipeline_id": "p-1",
-            "variants": [{"creative_id": "vc-1", "headline": "rev", "primary_text": "x"}],
+            "variants": [
+                {
+                    "creative_id": "vc-1",
+                    "platform": "meta",
+                    "variant_index": 1,
+                    "headline": "rev",
+                    "primary_text": "x",
+                }
+            ],
         },
     )
     assert resp.status_code == 200, resp.text
-    # Resume-by-skip: no NEW video_copy_variants insert.
+    assert resp.json()["variants"][0]["copy_variant_id"] == "vcv-1"
+    # Updated the existing row in place; no new insert.
     assert all(t != "video_copy_variants" for t, _ in stage_sb.inserts)
+    vupd = [r for t, r in stage_sb.updates if t == "video_copy_variants"]
+    assert vupd and vupd[0]["headline"] == "rev"
 
 
 # ===========================================================================
