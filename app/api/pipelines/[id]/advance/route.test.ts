@@ -1041,6 +1041,37 @@ describe("POST /api/pipelines/:id/advance", () => {
       expect(res.status).toBe(500);
     });
 
+    it("drops a killed creative from the rollup scope so it cannot hold the gate", async () => {
+      // creative_qa has one passed (in-scope) creative + one FAILED creative that
+      // is killed. The killed creative must NOT hold the gate (E2.3 drift fix), so
+      // the rollup clears and the advance succeeds.
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreativePipeline("creative_qa"), error: null } },
+          update: { single: { data: { id, status: "compliance_review" }, error: null } },
+        },
+        creative_stage_state: {
+          select: {
+            data: [
+              { status: "passed", creative_id: "c1" },
+              { status: "failed", creative_id: "c2" },
+            ],
+            error: null,
+          },
+        },
+        // c2 is killed -> dropped from scope.
+        creatives: { select: { data: [{ id: "c2" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("compliance_review");
+    });
+
     it("treats overridden + skipped as cleared and advances compliance_review", async () => {
       currentSupabase = mockClient({
         pipelines: {

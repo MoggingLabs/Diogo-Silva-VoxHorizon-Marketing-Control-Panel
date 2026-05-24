@@ -187,6 +187,10 @@ describe("no-stall guarantees", () => {
     for (const s of all) expect(advanceMechanism(s)).toBeTruthy();
     expect(advanceMechanism("generation")).toBe("auto");
     expect(advanceMechanism("compliance_review")).toBe("gate");
+    // E2.5: spec_validation is a manual per-creative gate (the advance route
+    // commits it via StageCreativeReview's Continue), NOT an auto stage — nothing
+    // auto-advances spec_validation→variant_plan.
+    expect(advanceMechanism("spec_validation")).toBe("gate");
     expect(advanceMechanism("launch_handoff")).toBe("decision");
     expect(advanceMechanism("done")).toBe("terminal");
   });

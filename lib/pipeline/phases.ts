@@ -68,9 +68,12 @@ export function stageClass(status: PipelineStatus): StageClass {
       return "agent_work";
     case "creative_qa":
     case "copy":
-      return "per_creative";
     case "spec_validation":
-      return "auto";
+      // spec_validation is a per-creative gate (it sits in PER_CREATIVE_STAGES,
+      // the advance route gates it on the rollup, and StageCreativeReview shows
+      // its Continue button). Classifying it `auto` was a stall trap (E2.5): no
+      // trigger or worker auto-advances spec_validation→variant_plan.
+      return "per_creative";
     case "compliance_review":
     case "launch_handoff":
       return "hard_gate";

@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 
 import { CopyComposer, type CopyVariantView } from "@/components/copy/CopyComposer";
 import { StageShell } from "@/components/pipeline/StageShell";
-import { MIN_APPROVED_COPY, type GridCreative } from "@/lib/review/grid";
+import { copyGateCleared, isCreativeInScope, MIN_APPROVED_COPY } from "@/lib/pipeline/rollup";
+import { type GridCreative } from "@/lib/review/grid";
 
 /**
  * Copy stage host (#359, P4.4). Renders a `CopyComposer` per in-scope creative
@@ -26,7 +27,7 @@ export function StageCopy({ pipelineId, creatives, variants, suggestions }: Stag
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const inScope = creatives.filter((c) => c.status !== "killed");
+  const inScope = creatives.filter((c) => isCreativeInScope(c));
   const byCreative = new Map<string, CopyVariantView[]>();
   for (const v of variants) {
     const list = byCreative.get(v.creative_id) ?? [];
@@ -34,13 +35,19 @@ export function StageCopy({ pipelineId, creatives, variants, suggestions }: Stag
     byCreative.set(v.creative_id, list);
   }
 
-  const allHaveEnough =
-    inScope.length > 0 &&
-    inScope.every(
-      (c) =>
-        (byCreative.get(c.id) ?? []).filter((v) => v.status === "approved").length >=
-        MIN_APPROVED_COPY,
+  // Single-source copy-gate predicate (≥MIN_APPROVED_COPY approved per in-scope
+  // creative) — the same one the advance route + launch checklist enforce.
+  const approvedByCreative = new Map<string, number>();
+  for (const c of inScope) {
+    approvedByCreative.set(
+      c.id,
+      (byCreative.get(c.id) ?? []).filter((v) => v.status === "approved").length,
     );
+  }
+  const allHaveEnough = copyGateCleared(
+    inScope.map((c) => c.id),
+    approvedByCreative,
+  ).cleared;
 
   const advance = async () => {
     setBusy(true);

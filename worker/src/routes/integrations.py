@@ -69,9 +69,12 @@ router = APIRouter()
 MIN_APPROVED_COPY = 3
 
 # Good (cleared) creative_stage_state statuses (stage_state_enum). A per-creative
-# stage is cleared when every row is in one of these. The membership set is a
-# curated subset of the generated ``STAGE_STATES`` (the terminal-good states), so
-# adding/removing a stage_state value surfaces here at review time.
+# stage is cleared when every IN-SCOPE row is in one of these. This set MIRRORS
+# the SQL ``pipeline_rollup_cleared`` (migration 0039, the single authority); a
+# cross-language parity contract test (tests/test_rollup_parity.py) reads 0039 and
+# fails CI if this set or the killed-exclusion rule drifts from the SQL. The
+# membership set is a curated subset of the generated ``STAGE_STATES`` (the
+# terminal-good states), so adding/removing a stage_state value surfaces here too.
 _CLEARED_STAGE_STATUSES: frozenset[str] = frozenset(
     {"passed", "overridden", "skipped"}
 )
@@ -179,31 +182,58 @@ class LaunchPreconditions:
         }
 
 
-def _stage_cleared(pipeline_id: str, stage: str) -> bool:
-    """True iff every ``creative_stage_state`` row for (pipeline, stage) cleared.
+def _killed_creative_ids(pipeline_id: str) -> set[str]:
+    """The set of KILLED image-creative ids for a pipeline (out of gate scope).
 
-    Mirrors ``pipeline_rollup_cleared`` (migration 0018) in Python so it reads
-    through the in-memory test double + is auditable here: there must be ≥1 row
-    for the stage and EVERY row must be ``passed | overridden | skipped``. Zero
-    rows ⇒ not cleared (the stage never ran). We re-derive this server-side at
-    launch commit rather than trusting a stored flag — the architecture's
-    "preconditions re-checked at commit" requirement (#365).
+    A killed creative must never hold a gate (parity with the SQL
+    ``pipeline_rollup_cleared`` / the grid / the advance route). Only image
+    creatives can be ``killed`` (video_creative_status has no such value), so this
+    reads ``creatives``. A read miss returns an empty set: excluding FEWER
+    creatives only ever makes the launch gate STRICTER, never looser, so it can
+    never let an unqualified pipeline through.
+    """
+    sb = get_supabase_admin()
+    resp = (
+        sb.table("creatives")
+        .select("id")
+        .eq("pipeline_id", pipeline_id)
+        .eq("status", "killed")
+        .execute()
+    )
+    rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+    return {str(r["id"]) for r in rows if isinstance(r, dict) and r.get("id")}
+
+
+def _stage_cleared(pipeline_id: str, stage: str) -> bool:
+    """True iff every IN-SCOPE ``creative_stage_state`` row for (pipeline, stage) cleared.
+
+    Mirrors the SQL ``pipeline_rollup_cleared`` (migration 0039, the single
+    authority) in Python so it reads through the in-memory test double + is
+    auditable here: there must be ≥1 in-scope row for the stage and EVERY in-scope
+    row must be ``passed | overridden | skipped``. A KILLED creative is dropped
+    from the scope (it must not hold the gate). Zero in-scope rows ⇒ not cleared
+    (the stage never ran). We re-derive this server-side at launch commit rather
+    than trusting a stored flag — the architecture's "preconditions re-checked at
+    commit" requirement (#365).
     """
     sb = get_supabase_admin()
     resp = (
         sb.table("creative_stage_state")
-        .select("status")
+        .select("status, creative_id")
         .eq("pipeline_id", pipeline_id)
         .eq("stage", stage)
         .execute()
     )
     rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
-    if not rows:
-        return False
-    return all(
-        isinstance(r, dict) and r.get("status") in _CLEARED_STAGE_STATUSES
+    killed = _killed_creative_ids(pipeline_id)
+    in_scope = [
+        r
         for r in rows
-    )
+        if isinstance(r, dict) and str(r.get("creative_id") or "") not in killed
+    ]
+    if not in_scope:
+        return False
+    return all(r.get("status") in _CLEARED_STAGE_STATUSES for r in in_scope)
 
 
 def _count_approved_copy(pipeline_id: str, *, table: str = "copy_variants") -> int:

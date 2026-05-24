@@ -34,7 +34,9 @@ describe("stageClass", () => {
     expect(stageClass("launch_handoff")).toBe("hard_gate");
     expect(stageClass("creative_qa")).toBe("per_creative");
     expect(stageClass("copy")).toBe("per_creative");
-    expect(stageClass("spec_validation")).toBe("auto");
+    // E2.5: spec_validation is a per-creative gate, not an auto stage — nothing
+    // auto-advances spec_validation→variant_plan, so it must show a Continue button.
+    expect(stageClass("spec_validation")).toBe("per_creative");
     expect(stageClass("finalize_assets")).toBe("auto");
     expect(stageClass("generation")).toBe("agent_work");
     expect(stageClass("configuration")).toBe("human_gate");
