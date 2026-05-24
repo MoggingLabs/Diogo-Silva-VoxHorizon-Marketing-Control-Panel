@@ -49,49 +49,11 @@ _MIGRATIONS_DIR = _REPO_ROOT / "db" / "migrations"
 # ---------------------------------------------------------------------------
 # Supabase scaffolding a vanilla Postgres lacks (provisioned before migrations).
 # ---------------------------------------------------------------------------
-# Every object here is something a real migration references but a stock
-# Postgres image does not ship. All idempotent so re-applying is a no-op.
-_BOOTSTRAP_SQL = """
--- Roles the lockdown migrations (0010 / 0011) and Supabase defaults reference.
-do $$
-begin
-  if not exists (select 1 from pg_roles where rolname = 'anon') then
-    create role anon nologin;
-  end if;
-  if not exists (select 1 from pg_roles where rolname = 'authenticated') then
-    create role authenticated nologin;
-  end if;
-  if not exists (select 1 from pg_roles where rolname = 'service_role') then
-    create role service_role nologin bypassrls;
-  end if;
-  -- 0010 runs `alter default privileges for role postgres ...`; the throwaway
-  -- container superuser may not be named "postgres", so make sure it exists.
-  if not exists (select 1 from pg_roles where rolname = 'postgres') then
-    create role postgres login superuser;
-  end if;
-end
-$$;
-
--- The realtime publication every user-visible table is added to.
-do $$
-begin
-  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
-    create publication supabase_realtime;
-  end if;
-end
-$$;
-
--- The storage schema + buckets table 0003 inserts into.
-create schema if not exists storage;
-create table if not exists storage.buckets (
-  id                 text primary key,
-  name               text not null,
-  public             boolean not null default false,
-  file_size_limit    bigint,
-  allowed_mime_types text[],
-  created_at         timestamptz not null default now()
-);
-"""
+# The prelude lives in db/ci-bootstrap.sql (the single source) so the CI
+# migration-apply job and this harness cannot drift. It provisions only the
+# Supabase roles / publication / storage objects the migrations reference; no
+# application schema. Read once at import; the file is committed alongside.
+_BOOTSTRAP_SQL = (_REPO_ROOT / "db" / "ci-bootstrap.sql").read_text(encoding="utf-8")
 
 
 # ===========================================================================
