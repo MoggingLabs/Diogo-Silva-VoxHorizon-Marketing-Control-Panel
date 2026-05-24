@@ -66,6 +66,14 @@ jobs:
         name: Compute image tag
         run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+      # GHCR image paths MUST be lowercase. github.repository_owner can be
+      # mixed-case (e.g. "MoggingLabs"), and Docker rejects uppercase in a
+      # repository reference on push. Fold the owner to lowercase once and
+      # reuse it for the image refs below.
+      - id: owner
+        name: Lowercase image owner
+        run: echo "image_owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -73,8 +81,8 @@ jobs:
           file: worker/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/voxhorizon-worker:latest
-            ghcr.io/${{ github.repository_owner }}/voxhorizon-worker:${{ github.sha }}
+            ghcr.io/${{ steps.owner.outputs.image_owner }}/voxhorizon-worker:latest
+            ghcr.io/${{ steps.owner.outputs.image_owner }}/voxhorizon-worker:${{ github.sha }}
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
@@ -107,6 +115,11 @@ jobs:
         name: Compute image tag
         run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
 
+      # GHCR image paths MUST be lowercase (see worker job for rationale).
+      - id: owner
+        name: Lowercase image owner
+        run: echo "image_owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -114,8 +127,8 @@ jobs:
           file: web/Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/voxhorizon-web:latest
-            ghcr.io/${{ github.repository_owner }}/voxhorizon-web:${{ github.sha }}
+            ghcr.io/${{ steps.owner.outputs.image_owner }}/voxhorizon-web:latest
+            ghcr.io/${{ steps.owner.outputs.image_owner }}/voxhorizon-web:${{ github.sha }}
           build-args: |
             NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
