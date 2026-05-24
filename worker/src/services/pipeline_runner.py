@@ -30,10 +30,11 @@ background coroutine.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 import structlog
 
+from ..generated.pipeline_stages import PipelineStage
 from ..supabase_client import get_supabase_admin
 
 
@@ -73,22 +74,14 @@ _LEDGER_DEFERRED_APIS: frozenset[str] = frozenset(
 )
 
 
-PipelineStage = Literal[
-    "configuration",
-    "ideation",
-    "review",
-    "generation",
-    "creative_qa",
-    "compliance_review",
-    "copy",
-    "spec_validation",
-    "variant_plan",
-    "finalize_assets",
-    "launch_handoff",
-    "monitor",
-    "done",
-    "cancelled",
-]
+# ``PipelineStage`` (imported above) is the generated Literal of the 12-stage DAG
+# + the terminal ``cancelled`` escape, derived from the checked-in stage registry
+# ``lib/pipeline/stages.ts`` by ``scripts/gen_pipeline_stages.py`` (E2.1). It is
+# used in the annotations below AND re-exported by this module (the module-level
+# binding) so existing callers keep importing it from ``services.pipeline_runner``
+# unchanged -- the value set now lives in exactly one place, and a drift gate
+# (``gen_pipeline_stages.py --check``) fails CI if it falls behind the registry
+# or the DB enum.
 
 
 # ---------------------------------------------------------------------------

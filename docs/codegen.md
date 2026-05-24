@@ -49,6 +49,37 @@ ordered tuple plus a `Literal` type alias for each enum in its explicit
 allow-list. Add a row to `EXPORTS` in the script when the worker needs another
 enum.
 
+## Generator 3: Python pipeline stages (E2.1 stage registry)
+
+The 12-stage pipeline DAG plus each stage's advance mechanism
+(gate/auto/decision/terminal), its UI class, its per-creative flag, its hard-gate
+flag and its next-stage edge live ONCE in the checked-in TypeScript manifest
+`lib/pipeline/stages.ts` (`PIPELINE_STAGE_REGISTRY`). The TS app derives its
+`PIPELINE_STAGES` list, `advanceMechanism`, `stageClass`, `nextStage` and
+`PER_CREATIVE_STAGES` from it. A third generator reflects the same registry into
+Python so the worker stops hand-maintaining the `PipelineStage` Literal that used
+to live in `services/pipeline_runner.py`.
+
+```
+lib/pipeline/stages.ts  (the stage registry, the E2.1 source of truth)
+        |
+        |  uv run python scripts/gen_pipeline_stages.py
+        v
+worker/src/generated/pipeline_stages.py   <-- PipelineStage Literal + order + maps
+```
+
+- Command (from `worker/`): `uv run python scripts/gen_pipeline_stages.py`
+- Output: `worker/src/generated/pipeline_stages.py` (do not edit by hand)
+- Consumers: `services/pipeline_runner.py` imports and re-exports `PipelineStage`,
+  so existing callers (`routes/pipeline.py`, `routes/pipeline_tools.py`, ...) keep
+  importing it from `services.pipeline_runner` unchanged.
+
+The registry array order MUST equal the DB `pipeline_status_enum` value order;
+that is asserted from both sides (`lib/pipeline/stages.parity.test.ts` and
+`worker/tests/test_pipeline_stages_parity.py`), so the registry, the TS
+derivations, the generated Python Literal and the DB enum cannot disagree without
+a gate failing.
+
 ## Drift gates (owned by CI, epic #436)
 
 CI must run both gates. Each regenerates from the source and fails if the
@@ -79,3 +110,18 @@ uvx ruff check
 `--check` regenerates in memory and exits non-zero (with a fix hint) if
 `worker/src/generated/db_enums.py` is stale. It reads the committed
 `lib/supabase/types.gen.ts`, so run it after the TypeScript gate.
+
+### Pipeline stage registry drift gate (E2.1)
+
+```
+cd worker
+uv sync --extra dev --python 3.12
+uv run python scripts/gen_pipeline_stages.py --check
+uvx ruff check scripts/gen_pipeline_stages.py
+```
+
+`--check` regenerates in memory and exits non-zero (with a fix hint) if
+`worker/src/generated/pipeline_stages.py` is stale relative to
+`lib/pipeline/stages.ts`. The TS side of the same contract runs in the web unit
+suite: `pnpm vitest run lib/pipeline/stages.parity.test.ts` fails if the registry,
+the TS derivations, the DB enum or the generated Python Literal drift apart.

@@ -18,6 +18,7 @@
  * Wave 10 / PF-B scope only fully implements `configuration → ideation`. Later
  * milestones (PF-C / PF-D / PF-E) extend the helper as each stage gate solidifies.
  */
+import { PIPELINE_STAGE_REGISTRY, stageDef } from "@/lib/pipeline/stages";
 import type { Pipeline, PipelineFormat, PipelineStatus } from "@/lib/pipeline/types";
 
 /**
@@ -96,36 +97,22 @@ function missingPayloadsForFormat(
  */
 export type AdvanceMechanism = "gate" | "auto" | "decision" | "terminal";
 
+/**
+ * Each stage's advance mechanism. DERIVED from the stage registry (`./stages`,
+ * the E2.1 single source of truth) so it cannot drift from `stageClass`, the
+ * `PipelineStage` Literal in the worker, or the DB enum.
+ */
 export function advanceMechanism(status: PipelineStatus): AdvanceMechanism {
-  switch (status) {
-    case "configuration":
-    case "ideation":
-    case "creative_qa":
-    case "compliance_review":
-    case "copy":
-    case "spec_validation":
-    case "variant_plan":
-      return "gate";
-    case "generation":
-    case "finalize_assets":
-      return "auto";
-    case "review":
-    case "launch_handoff":
-    case "monitor":
-      return "decision";
-    case "done":
-    case "cancelled":
-      return "terminal";
-  }
+  return stageDef(status).mechanism;
 }
 
-/** The four per-creative stages whose gate is the creative_stage_state rollup. */
-export const PER_CREATIVE_STAGES = new Set<PipelineStatus>([
-  "creative_qa",
-  "compliance_review",
-  "copy",
-  "spec_validation",
-]);
+/**
+ * The four per-creative stages whose gate is the creative_stage_state rollup.
+ * DERIVED from the stage registry's `perCreative` flag (`./stages`).
+ */
+export const PER_CREATIVE_STAGES = new Set<PipelineStatus>(
+  PIPELINE_STAGE_REGISTRY.filter((s) => s.perCreative).map((s) => s.key as PipelineStatus),
+);
 
 /**
  * Per-creative + launch gate inputs the pure machine cannot derive from the
@@ -256,35 +243,10 @@ export function canAdvance(
  * The successor of each stage in the 12-stage DAG. Useful for UI labels
  * ("Continue to Compliance") even before the gate is satisfied. Returns null
  * at the terminal stages.
+ *
+ * DERIVED from the stage registry's `next` edge (`./stages`, the E2.1 single
+ * source of truth) so the DAG edges live in exactly one place.
  */
 export function nextStage(status: PipelineStatus): PipelineStatus | null {
-  switch (status) {
-    case "configuration":
-      return "ideation";
-    case "ideation":
-      return "review";
-    case "review":
-      return "generation";
-    case "generation":
-      return "creative_qa";
-    case "creative_qa":
-      return "compliance_review";
-    case "compliance_review":
-      return "copy";
-    case "copy":
-      return "spec_validation";
-    case "spec_validation":
-      return "variant_plan";
-    case "variant_plan":
-      return "finalize_assets";
-    case "finalize_assets":
-      return "launch_handoff";
-    case "launch_handoff":
-      return "monitor";
-    case "monitor":
-      return "done";
-    case "done":
-    case "cancelled":
-      return null;
-  }
+  return stageDef(status).next as PipelineStatus | null;
 }

@@ -183,6 +183,8 @@ describe("no-stall guarantees", () => {
   });
 
   it("advanceMechanism is defined for every status (no unclassified stage)", () => {
+    // The full status set comes from the stage registry (E2.1) via PIPELINE_STAGES
+    // (happy path) + the terminal `cancelled` escape.
     const all: PipelineStatus[] = [...PIPELINE_STAGES.map((s) => s.key), "cancelled"];
     for (const s of all) expect(advanceMechanism(s)).toBeTruthy();
     expect(advanceMechanism("generation")).toBe("auto");
