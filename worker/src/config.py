@@ -80,6 +80,24 @@ class Settings(BaseSettings):
     # Observability
     tailscale_hostname: str = "voxhorizon-worker"
 
+    # === Periodic background scheduler (#354) ===
+    # The worker runs three cron cores in supervised asyncio loops (see
+    # services.scheduler): the stuck-dispatch watchdog, the GHL daily
+    # reconciliation, and the observability watchdogs. All knobs are env-backed
+    # with conservative defaults. Set SCHEDULER_ENABLED=false to disable every
+    # loop; the scheduler also auto-skips when Supabase is unconfigured, so
+    # local boots / tests need set nothing.
+    scheduler_enabled: bool = True
+    scheduler_watchdog_interval_s: float = 60.0
+    scheduler_watchdog_timeout_s: float = 900.0
+    scheduler_watchdog_max_redispatch: int = 5
+    scheduler_observability_interval_s: float = 300.0
+    scheduler_observability_dispatch_timeout_s: float = 900.0
+    scheduler_observability_outbox_timeout_s: float = 300.0
+    # GHL daily reconciliation: no-op until the client_integrations table exists.
+    scheduler_reconcile_interval_s: float = 86_400.0
+    scheduler_reconcile_window_days: int = 1
+
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via
     # chat.postMessage. The bot token is sourced at deploy time from

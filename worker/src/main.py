@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import logging
 import sys
+from contextlib import asynccontextmanager
+from typing import AsyncIterator
 
 import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
+from .services.scheduler import start_scheduler
 from .routes import (
     creative,
     health,
@@ -49,6 +52,23 @@ def _configure_logging() -> None:
     )
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Start the periodic background scheduler on boot, stop it on shutdown (#354).
+
+    Wires the worker's already-built-but-unscheduled cron cores (dispatch
+    watchdog, GHL daily reconciliation, observability watchdogs) into supervised
+    asyncio loops. start_scheduler() is itself safe -- it no-ops when Supabase is
+    unconfigured or SCHEDULER_ENABLED=false -- so this never blocks startup, and
+    stop() guarantees clean task cancellation on shutdown.
+    """
+    scheduler = start_scheduler()
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+
+
 def create_app() -> FastAPI:
     """Build the FastAPI application.
 
@@ -62,6 +82,7 @@ def create_app() -> FastAPI:
         title="VoxHorizon Worker",
         version="0.1.0",
         description="Local Python worker behind the Next.js marketing control panel.",
+        lifespan=_lifespan,
     )
 
     app.add_middleware(
