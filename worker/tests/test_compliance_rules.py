@@ -32,7 +32,7 @@ _REQUIRED_KEYS = {
     "citation_url",
 }
 
-_VALID_SURFACES = {"image", "copy", "targeting"}
+_VALID_SURFACES = {"image", "copy", "targeting", "video"}
 _VALID_SEVERITIES = {"info", "warn", "block"}
 _VALID_ENGINES = {"deterministic", "llm", "both"}
 _VALID_SPEC_TYPES = {"regex_any", "field_predicate", "llm_classify"}
@@ -44,11 +44,13 @@ def test_ruleset_version_is_a_string() -> None:
 
 
 def test_rule_count_matches_seed() -> None:
-    # The acceptance criterion (#346): a stable seed count. Eight starter
-    # rules: personal_attributes, before_after, substantiation,
+    # The acceptance criterion (#346): a stable seed count. Seven copy/image
+    # starter rules (personal_attributes, before_after, substantiation,
     # guarantee_disclosure, unqualified_superlative, financial_special_ad,
-    # overlay_text.
-    assert rule_count() == 7
+    # overlay_text) plus four video spoken-claim rules (VID-10:
+    # spoken_personal_attributes, spoken_substantiation, spoken_superlative,
+    # spoken_financial).
+    assert rule_count() == 11
     assert len(get_starter_rules()) == rule_count()
 
 
@@ -109,6 +111,33 @@ def test_personal_attributes_applies_to_all_verticals() -> None:
     assert rule is not None
     assert rule["applies_to_vertical"] == ["*"]
     assert rule["severity"] == "block"
+
+
+def test_spoken_rules_mirror_their_copy_counterparts() -> None:
+    # VID-10: the video voiceover-claim rules must detect the SAME claims as
+    # their copy counterparts (a claim is the same violation whether spoken or
+    # written) and scan the spoken surface, not the copy fields.
+    pairs = [
+        ("meta.personal_attributes", "meta.spoken_personal_attributes"),
+        ("ftc.substantiation", "ftc.spoken_substantiation"),
+        ("ftc.unqualified_superlative", "ftc.spoken_superlative"),
+        ("meta.financial_special_ad", "meta.spoken_financial"),
+    ]
+    for copy_id, spoken_id in pairs:
+        copy_rule = get_rule(copy_id)
+        spoken_rule = get_rule(spoken_id)
+        assert copy_rule is not None, copy_id
+        assert spoken_rule is not None, spoken_id
+        assert spoken_rule["surface"] == "video"
+        assert spoken_rule["check_spec"]["fields"] == ["voiceover_text"]
+        # Identical detection patterns: the two surfaces cannot drift.
+        assert (
+            spoken_rule["check_spec"]["patterns"]
+            == copy_rule["check_spec"]["patterns"]
+        )
+        # Same severity + citation as the written counterpart.
+        assert spoken_rule["severity"] == copy_rule["severity"]
+        assert spoken_rule["citation_url"] == copy_rule["citation_url"]
 
 
 def test_get_rule_unknown_returns_none() -> None:

@@ -913,7 +913,9 @@ async def _produce_ideation_video_track(
                 result = await record_video_stage(
                     brief_id=brief_id,
                     stage="script",
-                    paths={"script_path": storage_path},
+                    # Persist the draft script on the creative too (0033), so a
+                    # creative carries its spoken script from ideation onward.
+                    paths={"script_path": storage_path, "script_outline": script},
                     iteration_kind="generate_script",
                     iteration_content={
                         "pipeline_id": pipeline_id,

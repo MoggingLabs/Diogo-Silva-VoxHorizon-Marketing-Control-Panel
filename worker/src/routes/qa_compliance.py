@@ -113,7 +113,7 @@ class ComplianceItem(BaseModel):
 
     creative_id: str = Field(..., min_length=1)
     copy_variant_id: str | None = None
-    surface: Literal["image", "copy", "targeting"] = "copy"
+    surface: Literal["image", "copy", "targeting", "video"] = "copy"
     vertical: str | None = None
     llm_candidates: list[LLMCandidate] = Field(default_factory=list)
 
@@ -170,7 +170,14 @@ class QARunInput(BaseModel):
 
 
 def _fetch_creative(creative_id: str) -> dict[str, Any] | None:
-    """Pull the creative columns the engines + persistence need, or None."""
+    """Pull the creative columns the engines + persistence need, or None.
+
+    Format-aware: an image creative lives in ``creatives``; a video creative
+    lives in ``video_creatives``, whose generated ``script_outline`` (0033) is
+    the *spoken* surface the voiceover-claim rules scan and which the copy/image
+    checks never see. The returned row is tagged with ``_format`` so the context
+    builder knows which surface fields to populate.
+    """
     sb = get_supabase_admin()
     resp = (
         sb.table("creatives")
@@ -182,7 +189,24 @@ def _fetch_creative(creative_id: str) -> dict[str, Any] | None:
         .maybe_single()
         .execute()
     )
-    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+    row = resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+    if row:
+        return {**row, "_format": "image"}
+
+    # Not an image creative — try the video table. ``video_creatives`` has no
+    # ``concept``/``ratio`` columns, so select only what exists; the spoken
+    # script is the surface that matters for compliance.
+    v_resp = (
+        sb.table("video_creatives")
+        .select("id, brief_id, script_outline")
+        .eq("id", creative_id)
+        .maybe_single()
+        .execute()
+    )
+    v_row = v_resp.data if (v_resp is not None and isinstance(v_resp.data, dict)) else None
+    if v_row:
+        return {**v_row, "_format": "video"}
+    return None
 
 
 def _fetch_copy_variant(copy_variant_id: str) -> dict[str, Any] | None:
@@ -310,6 +334,32 @@ def _upsert_stage_state(
 # ---------------------------------------------------------------------------
 
 
+def _spoken_text_of(script_outline: Any) -> str:
+    """Concatenate the spoken words of a video script, for claim scanning.
+
+    The voiceover is the hook + each segment's ``voiceover_text`` + the outro
+    (the ``script_outline`` shape produced by routes.video / the ideation
+    drafts). Returns ``""`` when there is no script — an image creative, or a
+    video without a generated script yet — so the voiceover-claim rules simply
+    find nothing to match.
+    """
+    if not isinstance(script_outline, dict):
+        return ""
+    parts: list[str] = []
+    hook = script_outline.get("hook")
+    if isinstance(hook, str) and hook.strip():
+        parts.append(hook.strip())
+    for seg in script_outline.get("segments") or []:
+        if isinstance(seg, dict):
+            spoken = seg.get("voiceover_text")
+            if isinstance(spoken, str) and spoken.strip():
+                parts.append(spoken.strip())
+    outro = script_outline.get("outro")
+    if isinstance(outro, str) and outro.strip():
+        parts.append(outro.strip())
+    return "\n".join(parts)
+
+
 def _build_compliance_context(
     item: ComplianceItem,
     creative: dict[str, Any],
@@ -323,6 +373,10 @@ def _build_compliance_context(
             "concept": creative.get("concept"),
             "ratio": creative.get("ratio"),
             "has_overlay_text": creative.get("has_overlay_text"),
+            # The spoken surface for video creatives (empty for image). The
+            # video voiceover-claim rules (regex_any over ``voiceover_text``)
+            # read this; image creatives leave it "" so those rules no-op.
+            "voiceover_text": _spoken_text_of(creative.get("script_outline")),
         },
         "copy": (
             {

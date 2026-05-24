@@ -80,6 +80,11 @@ STAGE_STATUS: dict[VideoStage, VideoCreativeStatus] = {
 # ``{"script_path": "..."}`` only touches that column.
 PATH_FIELDS: tuple[str, ...] = (
     "script_path",
+    # ``script_outline`` is the generated script JSON (jsonb column, 0033). Like
+    # ``broll_clips`` it is a structured output rather than a path, but it rides
+    # in the same ``paths`` dict so the script stage persists it on the creative
+    # (the spoken surface the voiceover stage + compliance gate read back).
+    "script_outline",
     "voiceover_path",
     "composed_path",
     "captioned_path",
