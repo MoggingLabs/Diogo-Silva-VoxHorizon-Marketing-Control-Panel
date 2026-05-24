@@ -428,32 +428,38 @@ def _slack_config() -> tuple[str | None, str | None]:
     return (token or None), (channel or None)
 
 
-async def _post_slack(row: dict[str, Any]) -> None:
-    """Post a high-urgency approval notification to Slack.
+async def post_slack_message(
+    *,
+    token: str,
+    channel: str,
+    text: str,
+    blocks: list[dict[str, Any]] | None = None,
+    context: dict[str, Any] | None = None,
+) -> bool:
+    """Post one ``chat.postMessage`` to Slack. Returns True on a confirmed send.
 
-    Reads ``SLACK_BOT_TOKEN`` and ``SLACK_APPROVAL_CHANNEL_ID`` from env.
-    If either is missing the function logs a warning and returns —
-    fire-and-forget semantics mean we never raise.
+    The reusable Slack send seam: any worker subsystem that needs to post to a
+    Slack channel via the bot token funnels through here so the HTTP envelope,
+    the timeout, and the ``{ok: ...}`` body interpretation live in ONE place
+    (HI-17 owns this; E5.6 ops alerting reuses it on a separate ops channel).
 
-    Failure modes (each logs ``slack_*`` and returns silently):
+    Best-effort by contract: it NEVER raises. Every failure mode logs a
+    ``slack_*`` line and returns ``False`` so the caller (a fan-out task, a
+    scheduler tick) is never blocked or crashed:
 
-    * Env not configured → ``slack_notification_skipped_missing_env``
-    * HTTP exception (timeout, DNS, TLS) → ``slack_post_exception``
-    * Slack API returns ``{ok: False}`` → ``slack_post_failed``
+    * HTTP exception (timeout, DNS, TLS) → ``slack_post_exception`` → False
+    * Slack API returns ``{ok: False}`` / a non-dict body → ``slack_post_failed``
+      → False
+    * Confirmed send (``{ok: True}``) → ``slack_post_sent`` → True
+
+    ``context`` is an optional dict of structured fields merged into the log
+    lines (e.g. ``{"approval_id": ...}`` or ``{"alert_kind": ...}``) so each
+    caller's logs stay greppable.
     """
-    token, channel = _slack_config()
-    if not token or not channel:
-        log.warning(
-            "slack_notification_skipped_missing_env",
-            has_token=bool(token),
-            has_channel=bool(channel),
-            approval_id=row.get("id"),
-        )
-        return
-
-    blocks = _build_blocks(row)
-    text_fallback = _build_text_fallback(row)
-    payload = {"channel": channel, "text": text_fallback, "blocks": blocks}
+    ctx = dict(context or {})
+    payload: dict[str, Any] = {"channel": channel, "text": text}
+    if blocks is not None:
+        payload["blocks"] = blocks
 
     try:
         async with httpx.AsyncClient(timeout=SLACK_TIMEOUT_S) as client:
@@ -466,19 +472,11 @@ async def _post_slack(row: dict[str, Any]) -> None:
                 json=payload,
             )
     except httpx.HTTPError as exc:
-        log.warning(
-            "slack_post_exception",
-            approval_id=row.get("id"),
-            error=str(exc),
-        )
-        return
+        log.warning("slack_post_exception", error=str(exc), **ctx)
+        return False
     except Exception as exc:  # noqa: BLE001 — fire-and-forget catch-all
-        log.warning(
-            "slack_post_exception",
-            approval_id=row.get("id"),
-            error=str(exc),
-        )
-        return
+        log.warning("slack_post_exception", error=str(exc), **ctx)
+        return False
 
     # Slack always returns 200 even on logical errors — the actual
     # success/failure lives in the JSON body's ``ok`` field.
@@ -489,15 +487,39 @@ async def _post_slack(row: dict[str, Any]) -> None:
     if not isinstance(data, dict) or not data.get("ok"):
         log.warning(
             "slack_post_failed",
-            approval_id=row.get("id"),
             status=resp.status_code,
             error=data.get("error") if isinstance(data, dict) else None,
+            **ctx,
+        )
+        return False
+    log.info("slack_post_sent", ts=data.get("ts"), **ctx)
+    return True
+
+
+async def _post_slack(row: dict[str, Any]) -> None:
+    """Post a high-urgency approval notification to Slack.
+
+    Reads ``SLACK_BOT_TOKEN`` and ``SLACK_APPROVAL_CHANNEL_ID`` from env.
+    If either is missing the function logs a warning and returns —
+    fire-and-forget semantics mean we never raise. The actual HTTP send is
+    delegated to :func:`post_slack_message` (the shared Slack seam).
+    """
+    token, channel = _slack_config()
+    if not token or not channel:
+        log.warning(
+            "slack_notification_skipped_missing_env",
+            has_token=bool(token),
+            has_channel=bool(channel),
+            approval_id=row.get("id"),
         )
         return
-    log.info(
-        "slack_post_sent",
-        approval_id=row.get("id"),
-        ts=data.get("ts"),
+
+    await post_slack_message(
+        token=token,
+        channel=channel,
+        text=_build_text_fallback(row),
+        blocks=_build_blocks(row),
+        context={"approval_id": row.get("id")},
     )
 
 
@@ -562,4 +584,5 @@ __all__ = [
     "SLACK_API_URL",
     "fan_out",
     "is_high_urgency",
+    "post_slack_message",
 ]

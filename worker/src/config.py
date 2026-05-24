@@ -144,6 +144,40 @@ class Settings(BaseSettings):
     # serves this URL itself; the link resolves on the operator's browser.
     dashboard_base_url: str = "https://dashboard.voxhorizon.com"
 
+    # === Ops alerting (E5.6 / #526) ===
+    # The observability/dispatch watchdog ticks detect operational problems
+    # (stuck dispatches, a growing/over-threshold outbox dead-letter pile, an
+    # open circuit breaker, cost over its cap) and DELIVER a Slack alert to a
+    # SEPARATE ops channel -- distinct from the approval channel so on-call noise
+    # never drowns the approval queue, and vice versa. The bot token is the same
+    # ``SLACK_BOT_TOKEN`` the approval fan-out uses; only the channel differs.
+    # Optional at boot: when ``SLACK_OPS_CHANNEL_ID`` (or the token) is unset the
+    # alert tick logs ``ops_alert_skipped_no_channel`` and the watchdogs still
+    # emit their structured log lines (log-based alerting keeps working). The
+    # ops-alert delivery is best-effort -- it never raises and never blocks the
+    # supervised scheduler loop.
+    slack_ops_channel_id: str | None = None
+    # SLO targets / alert thresholds. Each is the boundary at which the matching
+    # condition flips to "bad" and (on transition into bad, throttled) pages the
+    # ops channel. Conservative defaults far above a healthy steady state so a
+    # slow-but-alive system is never paged; see docs/observability.md.
+    #
+    #   * stuck-dispatch age: an operator dispatch with no terminal status whose
+    #     newest activity (heartbeat else dispatched_at) is older than this is
+    #     presumed wedged. Mirrors the observability watchdog timeout default.
+    ops_alert_stuck_dispatch_age_s: float = 900.0  # 15 min (SLO: redispatch < 15m)
+    #   * outbox dead-letter count: a dead-letter pile (status='dead' + 'failed')
+    #     at/above this is a delivery-SLO breach worth paging on.
+    ops_alert_outbox_dead_letter_threshold: int = 1  # SLO: zero dead letters
+    #   * outbox depth: pending+inflight backlog at/above this is a drain-SLO
+    #     breach (the relay is falling behind).
+    ops_alert_outbox_depth_threshold: int = 100  # SLO: depth < 100
+    # Throttle: once an alert kind has paged, the SAME kind is suppressed for
+    # this many seconds (re-arming only after a return to healthy, OR after the
+    # window lapses) so a persistent bad state pages on transition, not every
+    # tick. Default one hour mirrors the notifications dedupe window.
+    ops_alert_throttle_s: float = 3_600.0
+
     @field_validator("*", mode="before")
     @classmethod
     def _strip_strings(cls, v: object) -> object:
