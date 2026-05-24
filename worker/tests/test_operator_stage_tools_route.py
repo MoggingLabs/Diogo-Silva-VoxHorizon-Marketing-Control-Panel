@@ -167,6 +167,61 @@ def test_copy_idempotent_updates_existing_variant(
     assert updated and updated[0][1]["headline"] == "rev"
 
 
+def test_copy_routes_video_creative_to_video_table(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A video creative's copy is written to video_copy_variants, not copy_variants."""
+    stage_sb.set_single("pipelines", _pipeline_row())
+    stage_sb.seed("video_creatives", [{"id": "vc-1", "brief_id": "vb-1"}])
+    resp = client.post(
+        "/work/pipeline/tools/copy",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "variants": [
+                {
+                    "creative_id": "vc-1",
+                    "headline": "One storm from a leak",
+                    "primary_text": "Book your $99 inspection.",
+                    "cta": "Book now",
+                    "validation": {"humanized": True},
+                }
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    inserted = [t for t, _ in stage_sb.inserts]
+    assert "video_copy_variants" in inserted
+    assert "copy_variants" not in inserted
+    vrows = [r for t, r in stage_sb.inserts if t == "video_copy_variants"]
+    assert vrows[0]["body"] == "Book your $99 inspection."
+    assert vrows[0]["humanized"] is True
+    assert vrows[0]["status"] == "draft"
+    # The per-creative gate still arms (format-agnostic).
+    assert any(t == "creative_stage_state" for t, _ in stage_sb.inserts)
+    assert resp.json()["rollup"][0]["stage_state"] == "in_progress"
+
+
+def test_copy_video_resume_by_skip(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A re-dispatch skips a video creative that already has copy (no dup insert)."""
+    stage_sb.set_single("pipelines", _pipeline_row())
+    stage_sb.seed("video_creatives", [{"id": "vc-1", "brief_id": "vb-1"}])
+    stage_sb.seed("video_copy_variants", [{"id": "vcv-1", "creative_id": "vc-1"}])
+    resp = client.post(
+        "/work/pipeline/tools/copy",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "variants": [{"creative_id": "vc-1", "headline": "rev", "primary_text": "x"}],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    # Resume-by-skip: no NEW video_copy_variants insert.
+    assert all(t != "video_copy_variants" for t, _ in stage_sb.inserts)
+
+
 # ===========================================================================
 # POST /work/pipeline/tools/spec_result
 # ===========================================================================
