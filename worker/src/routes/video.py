@@ -378,7 +378,10 @@ async def generate_script(req: ScriptRequest) -> dict[str, Any]:
         result = await record_video_stage(
             brief_id=req.brief_id,
             stage="script",
-            paths={"script_path": storage_path},
+            # Persist the generated script on the creative (0040) so the
+            # voiceover stage's `_script_of` primary path resolves it and the
+            # compliance gate reads the exact spoken text it will synthesize.
+            paths={"script_path": storage_path, "script_outline": script_outline},
             iteration_kind="generate_script",
             iteration_content={"prompt": prompt, "output": script_outline},
         )

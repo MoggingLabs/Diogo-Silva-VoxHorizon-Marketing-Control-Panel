@@ -1,0 +1,22 @@
+{
+  "name": "spoken personal-attribute claim in the voiceover blocks the gate",
+  "description": "A video whose copy/image is clean but whose VOICEOVER says a banned personal-attribute claim ('Are you embarrassed by your smile?') MUST FAIL meta.spoken_personal_attributes (block). The audio surface is the one the image/copy checks never see; the spoken-claim rule scans the script_outline's hook + segments + outro via creative.voiceover_text.",
+  "context": {
+    "creative": {
+      "id": "vid-smile-01",
+      "voiceover_text": "Are you embarrassed by your smile?\nWe can fix that fast.\nBook a visit today."
+    },
+    "copy": null,
+    "client": {
+      "service_type": "dental",
+      "offer_constraints": []
+    },
+    "surface": "video"
+  },
+  "expect": {
+    "overall_verdict": "fail",
+    "rule_verdicts": {
+      "meta.spoken_personal_attributes": "fail"
+    }
+  }
+}
