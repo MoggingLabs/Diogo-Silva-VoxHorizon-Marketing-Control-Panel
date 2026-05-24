@@ -42,6 +42,11 @@ READ = "mcp_pipeline_operator_pipeline_operator_read"
 CLIENT_READ = "mcp_pipeline_operator_pipeline_operator_client_read"
 BRIEF = "mcp_pipeline_operator_pipeline_operator_brief"
 
+# Video (VID-7): video_brief is a free write (allowlisted); video_render is
+# threshold-gated in-code (NOT in the overlay sets).
+VIDEO_BRIEF = "mcp_pipeline_operator_pipeline_operator_video_brief"
+VIDEO_RENDER = "mcp_pipeline_operator_pipeline_operator_video_render"
+
 # P3 stage-persist tools (all allowlisted; none clears a gate).
 QA_RESULT = "mcp_pipeline_operator_pipeline_operator_qa_result"
 COMPLIANCE_RESULT = "mcp_pipeline_operator_pipeline_operator_compliance_result"
@@ -68,6 +73,7 @@ ALLOWLISTED_TOOLS = (
     FINALIZE_RESULT,
     MONITOR_RESULT,
     SIGNAL,
+    VIDEO_BRIEF,
 )
 
 
@@ -178,6 +184,56 @@ def test_launch_tool_is_not_allowlisted(operator_overlay: PolicyOverlay) -> None
     """The launch tool must NOT be in the allowlist (gating wins over allowing)."""
     assert LAUNCH not in operator_overlay.allowlist
     assert LAUNCH in operator_overlay.extra_requires_approval
+
+
+# ---------------------------------------------------------------------------
+# Video (VID-7): video_brief allowlisted; video_render threshold-gated (D1)
+# ---------------------------------------------------------------------------
+
+
+def test_video_brief_is_allowlisted(operator_overlay: PolicyOverlay) -> None:
+    """Authoring a video brief is a free write, like the image brief."""
+    decision = operator_overlay.evaluate(VIDEO_BRIEF, {})
+    assert decision.action == "allow"
+    assert "allowlist" in decision.reason
+
+
+def test_video_render_under_threshold_runs_inline(
+    operator_overlay: PolicyOverlay,
+) -> None:
+    """At/under the per-ad threshold the render runs inline (no round-trip).
+
+    The overlay leaves video_render unlisted, so it falls through to the in-code
+    conditional spend gate in policy.evaluate.
+    """
+    decision = operator_overlay.evaluate(
+        VIDEO_RENDER, {"pipeline_id": "p-1", "estimated_cost_usd": 1.2}
+    )
+    assert decision.action == "allow"
+
+
+def test_video_render_over_threshold_asks(operator_overlay: PolicyOverlay) -> None:
+    """Over the threshold the render long-polls the manager (spend)."""
+    decision = operator_overlay.evaluate(
+        VIDEO_RENDER, {"pipeline_id": "p-1", "estimated_cost_usd": 9.0}
+    )
+    assert decision.action == "ask_operator"
+    assert decision.risk_class == "spend"
+
+
+def test_video_render_missing_estimate_asks(
+    operator_overlay: PolicyOverlay,
+) -> None:
+    """No estimate fails safe (ask)."""
+    decision = operator_overlay.evaluate(VIDEO_RENDER, {"pipeline_id": "p-1"})
+    assert decision.action == "ask_operator"
+
+
+def test_video_render_not_in_overlay_sets(operator_overlay: PolicyOverlay) -> None:
+    """video_render is gated in-code by threshold, so it must NOT be in the
+    overlay allowlist or extra_requires_approval (else the branch is bypassed)."""
+    assert VIDEO_RENDER not in operator_overlay.allowlist
+    assert VIDEO_RENDER not in operator_overlay.extra_requires_approval
 
 
 # ---------------------------------------------------------------------------

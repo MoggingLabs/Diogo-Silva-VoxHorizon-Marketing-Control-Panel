@@ -6,7 +6,8 @@
 # shipped empty overlay, so Ekko's behavior is unchanged).
 #
 # It maps one-for-one to the pipeline-operator skill's MCP tools
-# (ekko-skills/pipeline-operator/mcp_server.py, which delegates to helper.py).
+# (infra/hermes/operator/skills/pipeline-operator/mcp_server.py, which delegates
+# to helper.py).
 # The approval plugin gates by tool name, so these keys reference the tools'
 # EXACT FULL names as Hermes presents them to the pre_tool_call hook.
 #
@@ -64,6 +65,16 @@ allowlist:
   - mcp_pipeline_operator_pipeline_operator_finalize_result
   - mcp_pipeline_operator_pipeline_operator_monitor_result
   - mcp_pipeline_operator_pipeline_operator_signal
+  # Video (VID-7): authoring a video brief is a free DB write (the manager
+  # reviews at the stage gate), like the image brief.
+  - mcp_pipeline_operator_pipeline_operator_video_brief
+  # NOTE: video_render is deliberately NOT allowlisted here. Video generation
+  # SPENDS (kie), so it is gated by an estimated-cost THRESHOLD in the in-code
+  # policy engine (policy.py: VIDEO_RENDER_TOOL). Leaving it out of this overlay
+  # lets PolicyOverlay.evaluate fall through to that conditional branch: at/under
+  # the threshold it runs inline, over it the manager approves. Do NOT add it to
+  # allowlist (that disables the spend gate) or to extra_requires_approval (that
+  # re-introduces the per-render footgun for cheap renders).
 
 # Hard-block the shell/code tools. A focused marketing operator authors brief
 # and concept payloads directly (in reasoning) and persists them via the MCP

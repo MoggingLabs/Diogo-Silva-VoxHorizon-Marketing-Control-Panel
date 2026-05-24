@@ -18,6 +18,8 @@ import pytest
 from voxhorizon_approvals.policy import (
     ALLOWLIST,
     REQUIRES_APPROVAL,
+    VIDEO_RENDER_APPROVAL_THRESHOLD_USD,
+    VIDEO_RENDER_TOOL,
     Decision,
     args_hash,
     evaluate,
@@ -276,3 +278,40 @@ def test_hot_path_latency() -> None:
     elapsed = time.perf_counter() - t0
     per_call_us = (elapsed / iters) * 1_000_000
     assert per_call_us < 200, f"hot path {per_call_us:.1f}us > 200us budget"
+
+
+# ---------------------------------------------------------------------------
+# Video render conditional spend gate (D1)
+# ---------------------------------------------------------------------------
+
+
+def test_video_render_at_threshold_allows() -> None:
+    """At exactly the threshold the render runs inline."""
+    d = evaluate(VIDEO_RENDER_TOOL, {"estimated_cost_usd": VIDEO_RENDER_APPROVAL_THRESHOLD_USD})
+    assert d.action == "allow"
+    assert d.risk_class is None
+
+
+def test_video_render_under_threshold_allows() -> None:
+    d = evaluate(VIDEO_RENDER_TOOL, {"estimated_cost_usd": 0.5})
+    assert d.action == "allow"
+
+
+def test_video_render_over_threshold_asks_spend() -> None:
+    d = evaluate(
+        VIDEO_RENDER_TOOL,
+        {"estimated_cost_usd": VIDEO_RENDER_APPROVAL_THRESHOLD_USD + 0.01},
+    )
+    assert d.action == "ask_operator"
+    assert d.risk_class == "spend"
+
+
+def test_video_render_missing_estimate_asks() -> None:
+    """No estimate fails safe (ask)."""
+    assert evaluate(VIDEO_RENDER_TOOL, {}).action == "ask_operator"
+
+
+def test_video_render_non_numeric_estimate_asks() -> None:
+    """A non-numeric estimate (incl. bool, which is not a real cost) fails safe."""
+    assert evaluate(VIDEO_RENDER_TOOL, {"estimated_cost_usd": "lots"}).action == "ask_operator"
+    assert evaluate(VIDEO_RENDER_TOOL, {"estimated_cost_usd": True}).action == "ask_operator"
