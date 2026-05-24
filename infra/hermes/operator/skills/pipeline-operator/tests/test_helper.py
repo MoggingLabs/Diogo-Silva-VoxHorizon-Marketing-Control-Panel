@@ -34,6 +34,8 @@ from helper import (  # noqa: E402
     pipeline_operator_brief,
     pipeline_operator_read,
     pipeline_operator_render,
+    pipeline_operator_video_brief,
+    pipeline_operator_video_render,
     post_brief,
     post_render,
 )
@@ -298,6 +300,96 @@ def test_brief_rejects_concept_without_prompt(env_set: None) -> None:
             pipeline_id="p-1",
             image_payload=_payload(),
             concepts=[{"concept": "before_after__a"}],
+        )
+
+
+# ---------------------------------------------------------------------------
+# Video tools (VID-7)
+# ---------------------------------------------------------------------------
+
+
+def _video_payload() -> dict[str, Any]:
+    return {
+        "market": "Austin TX roofing",
+        "offer_text": "$99 roof inspection",
+        "angles": ["before_after", "urgency"],
+        "target_duration_s": 24,
+        "voice_id": "voice-xyz",
+    }
+
+
+def test_video_brief_posts_expected_body(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(
+        monkeypatch, responses=[_FakeResponse(200, {"ok": True, "brief_id": "vb-1"})]
+    )
+    out = pipeline_operator_video_brief(
+        pipeline_id="p-1", video_payload=_video_payload(), notes="storm push"
+    )
+    assert out == {"ok": True, "brief_id": "vb-1"}
+    req = built[0].requests[0]
+    assert req.method == "POST"
+    assert req.url == "/work/pipeline/tools/video/brief"
+    assert req.json_body["video_payload"] == _video_payload()
+    assert req.json_body["notes"] == "storm push"
+
+
+def test_video_brief_requires_video_keys(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="missing required keys"):
+        pipeline_operator_video_brief(
+            pipeline_id="p-1",
+            video_payload={"market": "m", "offer_text": "o", "angles": ["urgency"]},
+        )  # no target_duration_s / voice_id
+
+
+def test_video_brief_persists_concepts(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(
+        monkeypatch, responses=[_FakeResponse(200, {"ok": True, "brief_id": "vb-1"})]
+    )
+    concepts = [
+        {"concept": "urgency__a", "angle": "urgency", "script": {"hook": "h1"}},
+        {"concept": "savings__b", "angle": "savings", "script": {"hook": "h2"}},
+    ]
+    pipeline_operator_video_brief(
+        pipeline_id="p-1", video_payload=_video_payload(), concepts=concepts
+    )
+    assert built[0].requests[0].json_body["concepts"] == concepts
+
+
+def test_video_brief_rejects_bad_concept(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="'concept' and 'script'"):
+        pipeline_operator_video_brief(
+            pipeline_id="p-1",
+            video_payload=_video_payload(),
+            concepts=[{"concept": "urgency__a"}],  # no script
+        )
+
+
+def test_video_render_posts_to_generation(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built = _install_fake_client(
+        monkeypatch,
+        responses=[_FakeResponse(200, {"accepted": True, "video_picks": 2})],
+    )
+    out = pipeline_operator_video_render(pipeline_id="p-1", estimated_cost_usd=1.2)
+    assert out == {"accepted": True, "video_picks": 2}
+    req = built[0].requests[0]
+    assert req.method == "POST"
+    assert req.url == "/work/pipeline/generation"
+    # Only pipeline_id is sent; estimated_cost_usd is the gate signal, not a body
+    # field (the worker enforces the hard cap itself).
+    assert req.json_body == {"pipeline_id": "p-1"}
+
+
+def test_video_render_rejects_bad_estimate(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match="estimated_cost_usd"):
+        pipeline_operator_video_render(
+            pipeline_id="p-1",
+            estimated_cost_usd="lots",  # type: ignore[arg-type]
         )
 
 

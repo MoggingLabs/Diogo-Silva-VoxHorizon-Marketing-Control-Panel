@@ -124,6 +124,26 @@ SAFE_SHELL_PATTERNS: re.Pattern[str] = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Conditional spend gate: the operator video-render tool (D1)
+# ---------------------------------------------------------------------------
+
+#: The operator video-render MCP tool, as Hermes presents it to the hook
+#: (``mcp_<server>_<tool>``; the ``pipeline-operator`` server normalizes to
+#: ``pipeline_operator`` and the tool is ``pipeline_operator_video_render``).
+#: Video generation SPENDS (kie), unlike the free codex image render. Rather than
+#: a blanket per-render gate (the "footgun" the live policy deliberately removed),
+#: it is gated by an estimated-cost THRESHOLD: at/under it the render runs inline
+#: (no manager round-trip); over it the manager approves. The worker enforces a
+#: hard per-ad budget cap independently. Kept OUT of policy.operator.yaml so the
+#: overlay falls through to this conditional branch in :func:`evaluate`.
+VIDEO_RENDER_TOOL = "mcp_pipeline_operator_pipeline_operator_video_render"
+
+#: Per-ad estimated-cost ceiling (USD) at/under which video_render runs without a
+#: manager approval. Over it (or with no estimate) the gate asks.
+VIDEO_RENDER_APPROVAL_THRESHOLD_USD = 2.0
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -227,6 +247,35 @@ def evaluate(
             risk_class=risk,
         )
 
+    # 4b. Video render — conditional spend gate (D1). Video generation SPENDS
+    # (kie), so gate by the operator-supplied estimated cost: at/under the
+    # threshold it runs inline (no per-render pestering, matching the live
+    # "render is free" stance); over it, the manager approves. A missing or
+    # non-numeric estimate fails SAFE (ask). The worker enforces a hard per-ad
+    # cap independently.
+    if tool_name == VIDEO_RENDER_TOOL:
+        est = args.get("estimated_cost_usd")
+        if (
+            isinstance(est, (int, float))
+            and not isinstance(est, bool)
+            and est <= VIDEO_RENDER_APPROVAL_THRESHOLD_USD
+        ):
+            return Decision(
+                action="allow",
+                reason=(
+                    f"video render estimate ${float(est):.2f} <= "
+                    f"${VIDEO_RENDER_APPROVAL_THRESHOLD_USD:.2f} threshold"
+                ),
+            )
+        return Decision(
+            action="ask_operator",
+            reason=(
+                f"video render over ${VIDEO_RENDER_APPROVAL_THRESHOLD_USD:.2f} "
+                f"estimate threshold (or unspecified)"
+            ),
+            risk_class="spend",
+        )
+
     # 5. Unknown tool — fail-closed. The agent gets asked, the operator
     # decides. If the tool turns out to be safe and common, the operator
     # will add it to ``policy.yaml`` for permanent allowlist.
@@ -243,6 +292,8 @@ __all__ = [
     "Decision",
     "REQUIRES_APPROVAL",
     "SAFE_SHELL_PATTERNS",
+    "VIDEO_RENDER_APPROVAL_THRESHOLD_USD",
+    "VIDEO_RENDER_TOOL",
     "args_hash",
     "evaluate",
 ]

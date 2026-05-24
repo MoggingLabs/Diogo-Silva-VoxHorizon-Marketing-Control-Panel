@@ -352,6 +352,86 @@ def pipeline_operator_brief(
     return _request("POST", f"{_TOOLS_PREFIX}/brief", json_body=body)
 
 
+def pipeline_operator_video_brief(
+    *,
+    pipeline_id: str,
+    video_payload: dict[str, Any],
+    notes: Optional[str] = None,
+    concepts: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Author / upsert the VIDEO brief for the pipeline.
+
+    Calls ``POST {WORKER_BASE_URL}/work/pipeline/tools/video/brief`` with
+    ``{pipeline_id, video_payload, notes?, concepts?}``. ``video_payload`` must
+    carry ``market``, ``offer_text``, ``angles``, ``target_duration_s``,
+    ``voice_id`` — build it with the ``video-ad-authoring`` skill's
+    ``build_video_brief``. ``concepts`` is the N script concepts (each
+    ``{concept, angle?, script}`` from ``build_video_concept`` +
+    ``assert_distinct_concepts``). Free database write (no paid API), so it is not
+    spend-gated; the manager reviews the brief at the dashboard stage gate.
+    Returns ``{ok, brief_id}``.
+
+    Raises:
+        PipelineOperatorError: On bad input, missing env, or a failed call.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    if not isinstance(video_payload, dict) or not video_payload:
+        raise PipelineOperatorError("video_payload must be a non-empty dict")
+    required = ("market", "offer_text", "angles", "target_duration_s", "voice_id")
+    missing = [k for k in required if k not in video_payload]
+    if missing:
+        raise PipelineOperatorError(
+            f"video_payload missing required keys: {missing}"
+        )
+    body: dict[str, Any] = {"pipeline_id": pid, "video_payload": video_payload}
+    if notes is not None:
+        if not isinstance(notes, str):
+            raise PipelineOperatorError("notes must be a string or None")
+        body["notes"] = notes
+    if concepts is not None:
+        if not isinstance(concepts, list) or not concepts:
+            raise PipelineOperatorError("concepts must be a non-empty list")
+        for c in concepts:
+            if not isinstance(c, dict) or "concept" not in c or "script" not in c:
+                raise PipelineOperatorError(
+                    "each video concept must have 'concept' and 'script'"
+                )
+        body["concepts"] = concepts
+    return _request("POST", f"{_TOOLS_PREFIX}/video/brief", json_body=body)
+
+
+def pipeline_operator_video_render(
+    *,
+    pipeline_id: str,
+    estimated_cost_usd: Optional[float] = None,
+) -> dict[str, Any]:
+    """Trigger video generation for the pipeline's picked video concepts.
+
+    Calls ``POST {WORKER_BASE_URL}/work/pipeline/generation``, which fans out the
+    video substage chain (script -> voiceover -> b-roll -> compose -> caption) for
+    each picked video creative in the background. THIS SPENDS (kie generation).
+
+    ``estimated_cost_usd`` is the operator's per-ad cost estimate (sum the kie clip
+    cost across the script segments). The approval gate reads this arg: at or under
+    the threshold the render runs inline; over it (or if omitted) the manager
+    approves first. The worker also enforces a hard per-ad budget cap before any
+    submit, so this estimate is the gate SIGNAL, not the enforcement. Only
+    ``pipeline_id`` is sent to the worker. Returns the generation-accepted body.
+
+    Raises:
+        PipelineOperatorError: On bad input, missing env, or a failed call.
+    """
+    pid = _require_pipeline_id(pipeline_id)
+    if estimated_cost_usd is not None and (
+        not isinstance(estimated_cost_usd, (int, float))
+        or isinstance(estimated_cost_usd, bool)
+    ):
+        raise PipelineOperatorError("estimated_cost_usd must be a number or None")
+    return _request(
+        "POST", "/work/pipeline/generation", json_body={"pipeline_id": pid}
+    )
+
+
 def _normalize_concept_specs(
     concepts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:

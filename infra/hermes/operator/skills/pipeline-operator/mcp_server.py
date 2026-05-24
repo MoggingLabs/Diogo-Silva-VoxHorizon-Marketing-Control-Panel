@@ -319,6 +319,66 @@ def pipeline_operator_signal(
     )
 
 
+# ---------------------------------------------------------------------------
+# VIDEO tools (VID-7) — author a video brief + trigger video generation.
+# video_brief is a free DB write (allowlisted). video_render SPENDS (kie), so it
+# is gated by an estimated-cost THRESHOLD in voxhorizon_approvals.policy
+# (VIDEO_RENDER_TOOL): pass estimated_cost_usd so the gate can decide
+# inline-vs-approve. (A broll_select tool for review_each curation is a follow-up;
+# unattended generation runs broll selection in auto mode server-side.)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+def pipeline_operator_video_brief(
+    pipeline_id: str,
+    video_payload: dict[str, Any],
+    notes: Optional[str] = None,
+    concepts: Optional[list[dict[str, Any]]] = None,
+) -> dict[str, Any]:
+    """Author or upsert the VIDEO brief for the pipeline.
+
+    Use this in the ``configuration`` stage for a video (or ``both``) pipeline.
+    ``video_payload`` must carry ``market``, ``offer_text``, ``angles``,
+    ``target_duration_s``, ``voice_id`` (build it with the ``video-ad-authoring``
+    skill's ``build_video_brief``). PASS ``concepts`` — the full set of N script
+    concepts (each ``{concept, angle, script}`` from ``build_video_concept`` +
+    ``assert_distinct_concepts``) — so the brief PERSISTS the whole plan for the
+    deterministic ideation pass. Free Supabase write; the manager reviews at the
+    dashboard stage gate. Returns ``{ok, brief_id}``.
+    """
+    return helper.pipeline_operator_video_brief(
+        pipeline_id=pipeline_id,
+        video_payload=video_payload,
+        notes=notes,
+        concepts=concepts,
+    )
+
+
+@mcp.tool()
+def pipeline_operator_video_render(
+    pipeline_id: str,
+    estimated_cost_usd: Optional[float] = None,
+) -> dict[str, Any]:
+    """Trigger VIDEO generation for the pipeline's picked concepts — THE SPEND TOOL.
+
+    Use in the ``generation`` stage after the manager has approved the picks at
+    Review. Fans out the video substage chain (script -> voiceover -> b-roll ->
+    compose -> caption) for each picked video creative in the background. This
+    SPENDS real money (kie generation), unlike the free image render.
+
+    PASS ``estimated_cost_usd`` — your per-ad cost estimate (sum the kie clip cost
+    across the script's segments). The approval gate reads it: at or under the
+    per-ad threshold the render runs inline; over it (or if omitted) it long-polls
+    the manager for approval first. The worker also enforces a hard per-ad budget
+    cap before any submit. Returns the generation-accepted body.
+    """
+    return helper.pipeline_operator_video_render(
+        pipeline_id=pipeline_id,
+        estimated_cost_usd=estimated_cost_usd,
+    )
+
+
 def main() -> None:
     """Run the server over stdio (the default Hermes MCP transport)."""
     mcp.run()
