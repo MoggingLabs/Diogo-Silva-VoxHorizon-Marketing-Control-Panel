@@ -38,17 +38,21 @@ Tool-name surface (THE GATING CONTRACT)
 ---------------------------------------
 The approval plugin (voxhorizon-approvals) gates tool calls **by tool name**
 (exact match against its allowlist / requires-approval sets — see
-``ekko-plugins/voxhorizon_approvals/policy.py::evaluate``). So the three
-operator capabilities are exposed under *distinct, stable* entrypoint names
-that the operator policy references one-for-one:
+``ekko-plugins/voxhorizon_approvals/policy.py::evaluate``). The operator
+capabilities are exposed under *distinct, stable* entrypoint names that the
+operator policy references one-for-one:
 
 * ``pipeline_operator_read``        — the READ tool (allowlisted; no spend)
 * ``pipeline_operator_client_read`` — the CLIENT-CONTEXT tool (allowlisted; no spend)
 * ``pipeline_operator_brief``       — the BRIEF tool (free Supabase write)
-* ``pipeline_operator_render``      — the RENDER tool (**spend; requires approval**)
+* ``pipeline_operator_render``      — the RENDER tool (free codex render, $0; allowlisted)
+* the stage-persist tools (qa/compliance/copy/spec/finalize/monitor/signal) are
+  all allowlisted too: they only submit results for the worker to write/adjudicate
 
-Do NOT rename ``pipeline_operator_render`` without updating
-``policy.operator.yaml`` in the plugin — the gate keys on this exact name.
+Do NOT rename these tools without updating ``policy.operator.yaml`` in the
+plugin — the gate keys on the exact names. The one approval-gated action is the
+Meta launch (``pipeline_operator_launch``), the integrations agent's tool, not
+implemented here.
 ``get_pipeline`` / ``post_brief`` / ``post_render`` remain as readable
 aliases, but the gating-canonical names are the ``pipeline_operator_*`` ones.
 """
@@ -390,7 +394,7 @@ def _normalize_concept_specs(
 
 
 # ---------------------------------------------------------------------------
-# RENDER — pipeline_operator_render (THE SPEND TOOL; requires approval)
+# RENDER — pipeline_operator_render (free codex render; allowlisted)
 # ---------------------------------------------------------------------------
 
 
@@ -400,7 +404,7 @@ def pipeline_operator_render(
     kind: str,
     items: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Render a stage's images in ONE deterministic pass — THE SPEND-GATED TOOL.
+    """Render a stage's images in ONE deterministic pass (free codex render).
 
     **Preferred (deterministic) usage: omit ``items``.** The worker/helper then
     fans out over the PERSISTED plan — every concept spec authored at brief time
@@ -440,9 +444,9 @@ def pipeline_operator_render(
 
     Either way the worker emits the SAME pipeline_events + cost line + creative
     row, so the dashboard, the auto-advance trigger, and the cost aggregator
-    behave identically. The approval plugin gates this call by its tool name
-    (``pipeline_operator_render``) regardless of backend — the manager approves
-    in the dashboard before any render runs. The gate is unchanged.
+    behave identically. Rendering is FREE and ALLOWLISTED (no per-call approval):
+    the manager supervises spend at the dashboard STAGE gates, and the only
+    approval-gated tool is ``pipeline_operator_launch`` (the Meta launch).
 
     Returns ``{ok, renders:[...], total_cost_usd, errors:[...]}`` for both
     backends (the codex path synthesizes the same shape; ``total_cost_usd`` is
