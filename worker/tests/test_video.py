@@ -602,3 +602,207 @@ def test_ffmpeg_concat_audio_nonzero(
             vid._ffmpeg_concat_audio([tmp_path / "a.mp3", tmp_path / "b.mp3"], tmp_path / "o.mp3")
         )
     assert e.value.status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# Actual cost recording (E4.3 #503): the video pipeline used to record NO
+# actual cost (broll-search only did a pre-flight estimate, never a record), so
+# a video pipeline's spend never reached the budget gauge. These prove TTS +
+# kie-video generation now land a real cost_ledger line, keyed for idempotency.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def cost_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Capture cost_ledger.record_cost calls made by the video routes."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_record_cost(**kwargs: Any) -> str:
+        calls.append(kwargs)
+        return "cost-row-id"
+
+    monkeypatch.setattr(vid.cost_ledger, "record_cost", fake_record_cost)
+    return calls
+
+
+def test_pipeline_id_of_resolves_from_creative_then_brief() -> None:
+    assert vid._pipeline_id_of({"id": "cr", "pipeline_id": "p-1"}) == "p-1"
+    assert (
+        vid._pipeline_id_of({"id": "cr", "video_briefs": {"pipeline_id": "p-2"}})
+        == "p-2"
+    )
+    assert vid._pipeline_id_of({"id": "cr"}) is None
+
+
+def test_voiceover_records_tts_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    boundaries: dict[str, Any],
+    cost_calls: list[dict[str, Any]],
+) -> None:
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "pipeline_id": "p-1",
+            "voice_id": "v1",
+            "script_outline": _script(2),
+            "video_briefs": {},
+        },
+    )
+
+    class _Tts:
+        async def synthesize(self, text: str, *, voice: str, speed: float = 1.0) -> Any:
+            return SimpleNamespace(audio_url=f"https://kie/{voice}.mp3")
+
+        async def download_audio(self, url: str) -> bytes:
+            return b"ID3audio"
+
+    monkeypatch.setattr(vid, "KieTtsClient", _Tts)
+
+    async def fake_concat(parts: list[Path], output: Path) -> Path:
+        output.write_bytes(b"concat")
+        return output
+
+    monkeypatch.setattr(vid, "_ffmpeg_concat_audio", fake_concat)
+
+    asyncio.run(vid.synthesize_voiceover(VoiceoverRequest(creative_id="cr-1")))
+
+    assert len(cost_calls) == 1
+    call = cost_calls[0]
+    assert call["pipeline_id"] == "p-1"
+    assert call["kind"] == vid.cost_ledger.KIND_TTS
+    assert call["api"] == vid.cost_ledger.API_KIE_TTS
+    # 2 segments x len("We checked the roof and found loose shingles.") == 45 chars
+    total_chars = 2 * len(_seg(0)["voiceover_text"])
+    assert call["units"] == float(total_chars)
+    assert call["amount_usd"] == pytest.approx(vid.tts_cost(total_chars))
+    assert call["amount_usd"] > 0
+    assert call["dedupe_key"].startswith("video:p-1:cr-1:voiceover:")
+
+
+def test_broll_search_records_video_gen_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    boundaries: dict[str, Any],
+    cost_calls: list[dict[str, Any]],
+) -> None:
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "pipeline_id": "p-1",
+            "script_outline": _script(2),
+            "video_briefs": {},
+        },
+    )
+
+    class _Vid:
+        async def generate_video(self, prompt: str, **kw: Any) -> Any:
+            return SimpleNamespace(video_url="https://kie/gen.mp4")
+
+        async def download_video(self, url: str) -> bytes:
+            return b"VIDEO"
+
+    class _Store:
+        async def put(self, source_url: str, local_file: Path, **kw: Any) -> StoredClip:
+            return StoredClip(
+                clip_id="gen-c", source_url=source_url, duration_s=None,
+                dimensions=None, store_backend="local", local_path=str(local_file),
+            )
+
+    async def fake_scrape(query: str, *, count: int = 5) -> list[Any]:
+        return []
+
+    monkeypatch.setattr(vid, "KieVideoClient", _Vid)
+    monkeypatch.setattr(vid, "get_broll_store", lambda: _Store())
+    monkeypatch.setattr(vid, "scrape_yt_shorts", fake_scrape)
+
+    asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+
+    assert len(cost_calls) == 1
+    call = cost_calls[0]
+    assert call["pipeline_id"] == "p-1"
+    assert call["kind"] == vid.cost_ledger.KIND_VIDEO_GEN
+    assert call["api"] == vid.cost_ledger.API_KIE_VIDEO
+    # one generated clip per segment (2), priced at the shared per-clip rate.
+    assert call["units"] == 2.0
+    assert call["amount_usd"] == pytest.approx(vid.kie_video_cost(2))
+    assert call["amount_usd"] > 0
+
+
+def test_broll_search_no_generated_clips_records_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    boundaries: dict[str, Any],
+    cost_calls: list[dict[str, Any]],
+) -> None:
+    """All-stock broll (zero generated clips) records no video-gen cost."""
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "pipeline_id": "p-1",
+            "script_outline": _script(1),
+            "video_briefs": {},
+        },
+    )
+
+    class _Vid:
+        async def generate_video(self, prompt: str, **kw: Any) -> Any:
+            raise RuntimeError("kie down")  # generation fails -> stock only
+
+        async def download_video(self, url: str) -> bytes:  # pragma: no cover
+            return b""
+
+    class _Cand:
+        source_url = "https://stock/clip.mp4"
+        local_path = Path("/tmp/clip.mp4")
+        duration_s = 5
+        dimensions = None
+
+    class _Store:
+        async def put(self, source_url: str, local_file: Any, **kw: Any) -> StoredClip:
+            return StoredClip(
+                clip_id="stock-c", source_url=source_url, duration_s=5,
+                dimensions=None, store_backend="local", local_path="/tmp/clip.mp4",
+            )
+
+    async def fake_scrape(query: str, *, count: int = 5) -> list[Any]:
+        return [_Cand()]
+
+    monkeypatch.setattr(vid, "KieVideoClient", _Vid)
+    monkeypatch.setattr(vid, "get_broll_store", lambda: _Store())
+    monkeypatch.setattr(vid, "scrape_yt_shorts", fake_scrape)
+
+    asyncio.run(vid.search_broll(BrollSearchRequest(creative_id="cr-1")))
+    assert cost_calls == []
+
+
+def test_voiceover_no_pipeline_id_skips_cost(
+    monkeypatch: pytest.MonkeyPatch,
+    boundaries: dict[str, Any],
+    cost_calls: list[dict[str, Any]],
+) -> None:
+    """A creative with no resolvable pipeline_id records no cost (logged)."""
+    _set_creative(
+        monkeypatch,
+        {
+            "id": "cr-1",
+            "brief_id": "b-1",
+            "voice_id": "v1",
+            "script_outline": _script(1),
+            "video_briefs": {},
+        },
+    )
+
+    class _Tts:
+        async def synthesize(self, text: str, *, voice: str, speed: float = 1.0) -> Any:
+            return SimpleNamespace(audio_url="https://kie/x.mp3")
+
+        async def download_audio(self, url: str) -> bytes:
+            return b"ID3audio"
+
+    monkeypatch.setattr(vid, "KieTtsClient", _Tts)
+    asyncio.run(vid.synthesize_voiceover(VoiceoverRequest(creative_id="cr-1")))
+    assert cost_calls == []

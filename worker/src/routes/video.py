@@ -39,6 +39,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..services import cost_ledger
 from ..services.atomic_inserts_video import record_video_stage
 from ..services.broll_search import scrape_yt_shorts
 from ..services.broll_selection import (
@@ -55,6 +56,11 @@ from ..services.claude_runner import ClaudeRunner
 from ..services.ffmpeg_compose import compose as ffmpeg_compose
 from ..services.kie_tts import KieTtsClient
 from ..services.kie_video import DEFAULT_VIDEO_MODEL, KieVideoClient
+from ..services.pricing import (
+    DEFAULT_PER_AD_BUDGET_USD,
+    kie_video_cost,
+    tts_cost,
+)
 from ..services.queue import get_queue
 from ..services.storage import BUCKET
 from ..supabase_client import get_supabase_admin
@@ -71,11 +77,11 @@ VIDEO_SKILL_PATH = (
     Path(__file__).resolve().parent.parent.parent / "skills" / "video-voiceover-broll"
 )
 
-# D1 per-ad spend cap. A brief may lower it via ``payload.budget_usd``; this is the
-# ceiling the worker enforces before any kie generation submit (kie has no upstream
-# per-render cap). Rough per-clip estimate for the default Veo Fast tier.
-DEFAULT_PER_AD_BUDGET_USD = 5.0
-EST_COST_PER_GENERATED_CLIP_USD = 0.40
+# D1 per-ad spend cap + per-clip generation price now read from the shared
+# pricing module (E4.2 #501) so they never drift from the TS estimator. A brief
+# may lower the cap via ``payload.budget_usd``; this is the ceiling the worker
+# enforces before any kie generation submit (kie has no upstream per-render cap).
+# ``kie_video_cost(1)`` is the per-clip price for the default Veo Fast tier.
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +225,65 @@ def _per_ad_budget(brief: dict[str, Any]) -> float:
     return DEFAULT_PER_AD_BUDGET_USD
 
 
+def _pipeline_id_of(creative: dict[str, Any]) -> str | None:
+    """Resolve the owning pipeline id off a video creative row (or its brief).
+
+    Video cost lines (TTS + clip generation) need a ``pipeline_id`` so they
+    land on the same ledger the monitor's budget gauge + reconciliation read.
+    ``video_creatives.pipeline_id`` (migration 0031) is the primary source; fall
+    back to the joined brief's ``pipeline_id`` for older rows.
+    """
+    pid = creative.get("pipeline_id")
+    if isinstance(pid, str) and pid:
+        return pid
+    brief = creative.get("video_briefs")
+    if isinstance(brief, dict):
+        bpid = brief.get("pipeline_id")
+        if isinstance(bpid, str) and bpid:
+            return bpid
+    return None
+
+
+def _record_video_cost(
+    *,
+    creative: dict[str, Any],
+    creative_id: str,
+    api: str,
+    kind: str,
+    amount_usd: float,
+    units: float,
+    meta: dict[str, Any] | None = None,
+    dedupe_suffix: str,
+) -> None:
+    """Record an ACTUAL video-stage cost line on the single ledger (E4.3 #503).
+
+    The video pipeline previously recorded NO actual cost (the broll-search gate
+    only did a pre-flight estimate, never a record), so a video pipeline's spend
+    never reached the budget gauge. This lands the real cost as each paid video
+    stage resolves, keyed on (pipeline, creative, stage-suffix) so a retried
+    stage does not double-count. No-op (logged) when the creative has no
+    resolvable pipeline_id — the ledger is pipeline-scoped.
+    """
+    pipeline_id = _pipeline_id_of(creative)
+    if not pipeline_id:
+        log.warning(
+            "video_cost_unrecorded_no_pipeline",
+            creative_id=creative_id,
+            api=api,
+        )
+        return
+    cost_ledger.record_cost(
+        pipeline_id=pipeline_id,
+        kind=kind,
+        api=api,
+        amount_usd=amount_usd,
+        units=units,
+        creative_id=creative_id,
+        meta={"stage": "generation", **(meta or {})},
+        dedupe_key=f"video:{pipeline_id}:{creative_id}:{dedupe_suffix}",
+    )
+
+
 # ---------------------------------------------------------------------------
 # script
 # ---------------------------------------------------------------------------
@@ -357,6 +422,7 @@ async def synthesize_voiceover(req: VoiceoverRequest) -> dict[str, Any]:
         client = KieTtsClient()
         work_dir = Path(tempfile.mkdtemp(prefix="vox-vo-"))
         seg_files: list[Path] = []
+        total_chars = 0
         for seg in sorted(script["segments"], key=lambda s: int(s["idx"])):
             text = str(seg.get("voiceover_text") or "").strip()
             if not text:
@@ -371,6 +437,7 @@ async def synthesize_voiceover(req: VoiceoverRequest) -> dict[str, Any]:
                 raise HTTPException(
                     status_code=502, detail=f"voiceover TTS failed: {e}"
                 ) from e
+            total_chars += len(text)
             part = work_dir / f"seg-{int(seg['idx']):02d}.mp3"
             part.write_bytes(audio)
             seg_files.append(part)
@@ -400,6 +467,22 @@ async def synthesize_voiceover(req: VoiceoverRequest) -> dict[str, Any]:
             },
             creative_id=req.creative_id,
         )
+
+    # Record the ACTUAL TTS spend (E4.3 #503): chars synthesised x the per-1k
+    # ElevenLabs rate from the shared pricing module. Dedupe-keyed per creative
+    # so a regenerate replaces (probe skips) rather than double-counts the same
+    # voiceover pass; a regenerate that re-synthesises is a new pass keyed below
+    # via the chars suffix so a genuinely re-run synthesis still records.
+    _record_video_cost(
+        creative=creative,
+        creative_id=result.creative_id,
+        api=cost_ledger.API_KIE_TTS,
+        kind=cost_ledger.KIND_TTS,
+        amount_usd=tts_cost(total_chars),
+        units=float(total_chars),
+        meta={"substage": "voiceover", "chars": total_chars, "segments": len(seg_files)},
+        dedupe_suffix=f"voiceover:{total_chars}",
+    )
     log.info("video_voiceover_done", creative_id=req.creative_id, segments=len(seg_files))
     return {"ok": True, "creative_id": result.creative_id, "voiceover_path": storage_path}
 
@@ -415,7 +498,8 @@ class BrollSearchRequest(BaseModel):
 
 
 def _estimate_generation_cost(num_segments: int) -> float:
-    return num_segments * EST_COST_PER_GENERATED_CLIP_USD
+    """Estimated kie-video spend for one generated clip per segment."""
+    return kie_video_cost(num_segments)
 
 
 @router.post("/work/video/broll-search", dependencies=[Depends(verify_secret)])
@@ -441,7 +525,7 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
             detail=(
                 f"estimated generation cost ${est:.2f} exceeds per-ad budget "
                 f"${budget:.2f} ({len(segments)} clips x "
-                f"${EST_COST_PER_GENERATED_CLIP_USD:.2f}); lower the segment count "
+                f"${kie_video_cost(1):.2f}); lower the segment count "
                 f"or raise payload.budget_usd"
             ),
         )
@@ -449,6 +533,7 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
     store = get_broll_store()
     video_client = KieVideoClient()
     candidates_by_segment: dict[str, list[dict[str, Any]]] = {}
+    generated_clips = 0
 
     async with get_queue().acquire(brief_id):
         for seg in segments:
@@ -474,6 +559,7 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
                         gen.video_url, gtmp, theme=theme or None
                     )
                     stored.append(sc.to_dict())
+                    generated_clips += 1
             except Exception as e:  # noqa: BLE001 - gen failure non-fatal; stock still runs
                 log.warning("broll_generate_failed", segment_idx=idx, error=str(e))
 
@@ -507,11 +593,29 @@ async def search_broll(req: BrollSearchRequest) -> dict[str, Any]:
             iteration_content={"candidates_by_segment": candidates_by_segment},
             creative_id=req.creative_id,
         )
+
+    # Record the ACTUAL kie-video generation spend (E4.3 #503): the only paid
+    # broll step is clip generation, priced per clip actually generated (not the
+    # pre-flight per-segment estimate). Dedupe-keyed per creative + generated
+    # count so a retried broll-search does not double-count. Zero generated clips
+    # (all stock) records nothing.
+    if generated_clips > 0:
+        _record_video_cost(
+            creative=creative,
+            creative_id=result.creative_id,
+            api=cost_ledger.API_KIE_VIDEO,
+            kind=cost_ledger.KIND_VIDEO_GEN,
+            amount_usd=kie_video_cost(generated_clips),
+            units=float(generated_clips),
+            meta={"substage": "broll_search", "generated_clips": generated_clips},
+            dedupe_suffix=f"broll_gen:{generated_clips}",
+        )
     log.info(
         "video_broll_search_done",
         creative_id=req.creative_id,
         segments=len(candidates_by_segment),
         total=sum(len(v) for v in candidates_by_segment.values()),
+        generated_clips=generated_clips,
     )
     return {
         "ok": True,

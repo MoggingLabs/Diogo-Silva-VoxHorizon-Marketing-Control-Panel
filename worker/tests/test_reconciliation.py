@@ -11,6 +11,7 @@ CPL, the perf row is written + linked, and the zero-leads divide-by-zero guard
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Any
 
 import httpx
 import pytest
@@ -88,6 +89,97 @@ async def test_reconcile_computes_cpl_and_writes_perf_row(
     assert perf[0]["ad_entity_id"] == "ae-1"
     assert perf[0]["leads"] == 4
     assert perf[0]["real_cpl"] == 50.0
+
+
+async def test_reconcile_records_meta_spend_yields_nonzero_cpl(
+    fake_supabase: FakeSupabase,
+) -> None:
+    """E4.3 #503 regression: the structural real_cpl == 0 bug.
+
+    With NO pre-seeded ledger spend (the prod reality — nothing recorded
+    meta_spend), reconcile is handed the pulled Meta insights spend and RECORDS
+    it, so summing the ledger back yields a non-zero real_cpl. Before the fix the
+    ledger was always empty -> real_cpl always 0/None -> the monitor ran on
+    garbage.
+    """
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _contacts_response(
+            [
+                {"id": f"c-{i}", "dateAdded": IN_WINDOW, "source": "camp-100"}
+                for i in range(5)
+            ]
+        )
+
+    # NOTE: cost_ledger is NOT seeded — the bug was that prod never populated it.
+    ghl = _client_with(handler)
+    result = await integrations.reconcile_pipeline(
+        pipeline_id="p-1",
+        location_id="loc-1",
+        campaign_ref="camp-100",
+        window=(SINCE, UNTIL),
+        ghl_client=ghl,
+        ad_entity_id="ae-1",
+        meta_spend_usd=250.0,  # pulled from Meta insights this pass
+    )
+    await ghl.aclose()
+
+    assert result.ghl_leads == 5
+    assert result.meta_spend_usd == 250.0
+    assert result.real_cpl == 50.0  # 250 / 5 — NON-ZERO
+    assert result.real_cpl is not None
+
+    # The pulled spend was RECORDED to the ledger (a meta_spend row landed).
+    spend_rows = [
+        row
+        for name, row in fake_supabase.inserts
+        if name == "cost_ledger" and row.get("kind") == KIND_META_SPEND
+    ]
+    assert len(spend_rows) == 1
+    assert spend_rows[0]["amount_usd"] == 250.0
+    assert spend_rows[0]["dedupe_key"].startswith("meta_spend:p-1:")
+
+
+async def test_reconcile_rerun_is_idempotent_no_double_spend(
+    fake_supabase: FakeSupabase,
+) -> None:
+    """Re-running a day's reconciliation does not double-count the spend.
+
+    The recorded meta_spend is keyed on (pipeline, campaign, window), so the
+    second pass dedupes and real_cpl stays correct instead of halving.
+    """
+
+    def handler(_req: httpx.Request) -> httpx.Response:
+        return _contacts_response(
+            [{"id": "c-1", "dateAdded": IN_WINDOW, "source": "camp-100"}]
+        )
+
+    async def _run() -> Any:  # noqa: ANN401
+        ghl = _client_with(handler)
+        res = await integrations.reconcile_pipeline(
+            pipeline_id="p-1",
+            location_id="loc-1",
+            campaign_ref="camp-100",
+            window=(SINCE, UNTIL),
+            ghl_client=ghl,
+            meta_spend_usd=100.0,
+        )
+        await ghl.aclose()
+        return res
+
+    first = await _run()
+    second = await _run()
+
+    assert first.meta_spend_usd == 100.0
+    assert second.meta_spend_usd == 100.0  # NOT 200 — deduped, not doubled
+    assert second.real_cpl == 100.0  # 100 / 1
+
+    spend_rows = [
+        row
+        for name, row in fake_supabase.inserts
+        if name == "cost_ledger" and row.get("kind") == KIND_META_SPEND
+    ]
+    assert len(spend_rows) == 1  # exactly one recorded spend row across both runs
 
 
 async def test_reconcile_zero_leads_cpl_none(fake_supabase: FakeSupabase) -> None:

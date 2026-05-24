@@ -609,12 +609,77 @@ def test_emit_cost_omits_optional_fields_when_not_supplied(
         units=1,
         subtotal=0.05,
     )
+    # The ledger write defers TTS-ish apis (elevenlabs maps to kie/video.py's
+    # recorder), so the LAST insert is the pipeline_events timeline row.
     _, row = fake_sb.inserts[-1]
     payload = row["payload"]
     assert "task_event_id" not in payload
     assert "extra" not in payload
     # Default stage is generation.
     assert row["stage"] == "generation"
+
+
+def test_emit_cost_single_write_path_also_lands_cost_ledger_row(
+    fake_sb: _FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4.1 #498: emit_cost (the one prod call site) ALSO writes a typed ledger
+    row, so the formerly test-only cost_ledger is populated in prod."""
+    from src.services import cost_ledger
+
+    monkeypatch.setattr(cost_ledger, "get_supabase_admin", lambda: fake_sb)
+
+    pr.emit_cost(
+        pipeline_id="p-1",
+        api="kie.ai",
+        units=1,
+        subtotal=0.05,
+        stage="generation",
+        extra={"creative_id": "cr-1", "ratio": "1x1"},
+    )
+
+    by_table: dict[str, list[dict]] = {}
+    for name, row in fake_sb.inserts:
+        by_table.setdefault(name, []).append(row)
+    # Both writes happened: the timeline line AND the structured ledger row.
+    assert "pipeline_events" in by_table
+    ledger_rows = by_table.get("cost_ledger", [])
+    assert len(ledger_rows) == 1
+    led = ledger_rows[0]
+    assert led["pipeline_id"] == "p-1"
+    assert led["kind"] == cost_ledger.KIND_IMAGE_GEN  # kie.ai -> image_gen
+    assert led["api"] == "kie.ai"
+    assert led["amount_usd"] == 0.05
+    # creative_id is recovered from the extra blob and linked on the ledger row.
+    assert led["creative_id"] == "cr-1"
+
+
+def test_emit_cost_defers_video_substage_apis_to_real_recorder(
+    fake_sb: _FakeSupabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E4.3 #503: the pipeline.py auto-advance path's placeholder video costs are
+    NOT written to the ledger here (routes/video.py records the real per-unit
+    cost), so they never double-count — but the timeline line still fires."""
+    from src.services import cost_ledger
+
+    monkeypatch.setattr(cost_ledger, "get_supabase_admin", lambda: fake_sb)
+
+    for api in ("kie-video", "kie-tts", "ffmpeg-local", "whisper-local"):
+        pr.emit_cost(
+            pipeline_id="p-1",
+            api=api,
+            units=1,
+            subtotal=1.20,
+            stage="generation",
+            extra={"creative_id": "cr-1"},
+        )
+
+    by_table: dict[str, list[dict]] = {}
+    for name, row in fake_sb.inserts:
+        by_table.setdefault(name, []).append(row)
+    # Four timeline lines (the dashboard shows substage cost live)...
+    assert len(by_table.get("pipeline_events", [])) == 4
+    # ...and ZERO ledger rows (deferred to the routes/video.py recorder).
+    assert by_table.get("cost_ledger", []) == []
 
 
 # ---------------------------------------------------------------------------

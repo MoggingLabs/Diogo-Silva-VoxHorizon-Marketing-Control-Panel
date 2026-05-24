@@ -711,13 +711,26 @@ async def reconcile_pipeline(
     window: tuple[datetime, datetime],
     ghl_client: GhlClient,
     ad_entity_id: str | None = None,
+    meta_spend_usd: float | None = None,
 ) -> ReconciliationResult:
     """Reconcile one pipeline: GHL leads vs Meta spend → real CPL → perf row.
 
     The daily job (#366/#367): count the leads GHL attributes to the campaign in
-    the window (GHL is lead truth), sum the pipeline's Meta spend from
-    ``cost_ledger``, compute ``real_cpl = spend / leads`` (None on zero leads),
-    and write a ``campaign_perf_image`` row linked to the pipeline (+ ad_entity).
+    the window (GHL is lead truth), determine the pipeline's Meta spend, compute
+    ``real_cpl = spend / leads`` (None on zero leads), and write a
+    ``campaign_perf_image`` row linked to the pipeline (+ ad_entity).
+
+    E4.3 (#503) fixes the structural ``real_cpl == 0`` bug. Previously this read
+    meta_spend ONLY from ``cost_ledger``, but nothing in prod ever RECORDED a
+    meta_spend row — so the sum was always 0 and real_cpl was always 0/None and
+    the monitor's kill/keep/scale ran on garbage. Now the recorded/pulled Meta
+    insights spend (``meta_spend_usd``) is RECORDED to the ledger first (keyed on
+    campaign + window so a re-run does not double-count), THEN summed back — so
+    the ledger is the single source AND it is actually populated. When
+    ``meta_spend_usd`` is None (no insight supplied this pass) we fall back to the
+    already-recorded ledger sum, so a re-run without fresh insights still reports
+    the prior spend.
+
     The cron loop over active client_integrations is wired later; this is its
     per-pipeline core, kept as a coroutine so it tests with the GHL connector's
     ``MockTransport`` and the in-memory supabase double, zero live HTTP.
@@ -731,6 +744,21 @@ async def reconcile_pipeline(
         (since, until),
         correlation_id=pipeline_id,
     )
+
+    # Record the pulled Meta spend onto the ledger BEFORE summing, so the table
+    # the budget gauge + this reconciliation read is actually populated. Keyed on
+    # (campaign, window) so re-running a day's reconciliation is idempotent.
+    if meta_spend_usd is not None and meta_spend_usd > 0:
+        cost_ledger.record_meta_spend(
+            pipeline_id=pipeline_id,
+            amount_usd=float(meta_spend_usd),
+            meta={
+                "campaign_ref": campaign_ref,
+                "window_start": since.isoformat(),
+                "window_end": until.isoformat(),
+            },
+            dedupe_key=_meta_spend_dedupe_key(pipeline_id, campaign_ref, window),
+        )
 
     totals = cost_ledger.sum_costs(pipeline_id)
     meta_spend = totals.meta_spend_usd
@@ -835,6 +863,22 @@ def _launch_idempotency_key(pipeline_id: str, entities: list[dict[str, Any]]) ->
     )
     digest = hashlib.sha256("|".join(graph).encode("utf-8")).hexdigest()[:16]
     return f"meta:record_launch:{pipeline_id}:{digest}"
+
+
+def _meta_spend_dedupe_key(
+    pipeline_id: str, campaign_ref: str, window: tuple[datetime, datetime]
+) -> str:
+    """Deterministic cost_ledger dedupe key for a recorded Meta spend line.
+
+    Folds the pipeline + campaign + the window bounds into a stable digest so a
+    re-run of the same day's reconciliation collapses to one recorded spend row
+    (the cost_ledger UNIQUE(dedupe_key) partial index, migration 0036), keeping
+    real_cpl correct instead of doubling on every retry.
+    """
+    since, until = window
+    raw = f"{pipeline_id}|{campaign_ref}|{since.isoformat()}|{until.isoformat()}"
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+    return f"meta_spend:{pipeline_id}:{digest}"
 
 
 def _finalize_idempotency_key(pipeline_id: str, assets: list[dict[str, Any]]) -> str:

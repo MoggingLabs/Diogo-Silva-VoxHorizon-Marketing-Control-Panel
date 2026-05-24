@@ -992,8 +992,9 @@ def test_render_concept_preview(
     assert body["ok"] is True
     assert len(body["renders"]) == 2
     assert body["errors"] == []
-    # 2 previews at 0.02 each.
-    assert body["total_cost_usd"] == pytest.approx(0.04)
+    # 2 previews at the shared Kie per-image price each (E4.2: was a drifting
+    # 0.02 literal, now reads from pricing.kie_image_cost == 0.05).
+    assert body["total_cost_usd"] == pytest.approx(0.10)
 
     creatives = [d for n, d in tools_sb.inserts if n == "creatives"]
     assert len(creatives) == 2
