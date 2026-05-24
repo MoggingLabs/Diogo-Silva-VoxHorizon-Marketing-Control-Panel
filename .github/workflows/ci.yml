@@ -295,18 +295,11 @@ jobs:
         working-directory: worker
         run: uv sync --frozen --extra dev
 
-      - name: Apply migrations (db/migrations 0001..N, in order)
-        env:
-          PGPASSWORD: postgres
-        run: |
-          set -euo pipefail
-          # Glob expands in lexical order, which matches the 4-digit prefix
-          # ordering (0001, 0002, ...). Fail on the first error.
-          for f in db/migrations/[0-9][0-9][0-9][0-9]_*.sql; do
-            echo "==> applying $f"
-            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$f"
-          done
-
+      # DB setup (the db/ci-bootstrap.sql prelude + every db/migrations/*.sql) is
+      # owned by the integration conftest's `migrated_db` fixture, applied once
+      # against DATABASE_URL via psycopg. We deliberately do NOT pre-apply here:
+      # the migrations target Supabase (roles / publication / storage), so a raw
+      # psql apply to a bare postgres:16 fails, and a double-apply would collide.
       - name: Run integration tests (pytest -m integration)
         working-directory: worker
         run: |
@@ -357,6 +350,17 @@ jobs:
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
     steps:
       - uses: actions/checkout@v4
+
+      - name: Bootstrap Supabase scaffolding the migrations reference
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          # The chain targets Supabase (anon / authenticated / service_role roles,
+          # the supabase_realtime publication, the storage schema). A bare
+          # postgres:16 lacks those, so provision them first from the single shared
+          # source (mirrors the integration harness). Idempotent; no app schema.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f db/ci-bootstrap.sql
 
       - name: Apply migrations 0001..N (fail on first error)
         env:
