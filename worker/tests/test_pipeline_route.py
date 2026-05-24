@@ -1654,7 +1654,7 @@ def test_generation_video_pick_runs_all_substages(
     cost = [d for d in pe if d.get("kind") == "cost_recorded"]
     assert len(cost) == 4
     apis = sorted(d["payload"]["api"] for d in cost)
-    assert apis == ["elevenlabs", "hyperframes", "submagic", "yt-dlp"]
+    assert apis == ["ffmpeg-local", "kie-tts", "kie-video", "whisper-local"]
 
 
 def test_generation_video_substage_http_exception_short_circuits(
@@ -1843,24 +1843,24 @@ def test_video_substage_cost_table() -> None:
     from src.routes.pipeline import _video_substage_cost
 
     assert _video_substage_cost("voiceover") == {
-        "api": "elevenlabs",
+        "api": "kie-tts",
         "units": 1,
-        "subtotal": 0.05,
+        "subtotal": 0.02,
     }
     assert _video_substage_cost("broll_search") == {
-        "api": "yt-dlp",
+        "api": "kie-video",
+        "units": 1,
+        "subtotal": 1.20,
+    }
+    assert _video_substage_cost("compose") == {
+        "api": "ffmpeg-local",
         "units": 1,
         "subtotal": 0.00,
     }
-    assert _video_substage_cost("compose") == {
-        "api": "hyperframes",
-        "units": 1,
-        "subtotal": 0.10,
-    }
     assert _video_substage_cost("caption") == {
-        "api": "submagic",
+        "api": "whisper-local",
         "units": 1,
-        "subtotal": 0.20,
+        "subtotal": 0.00,
     }
     # Script and broll_pick are free — None means "don't emit cost".
     assert _video_substage_cost("script") is None
