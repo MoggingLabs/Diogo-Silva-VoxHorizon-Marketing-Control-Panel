@@ -400,18 +400,21 @@ def _reset_mode_cache() -> None:
 def test_mode_auto_approve_short_circuits_to_allow(
     env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """When mode == AUTO_APPROVE the hook allows without round-tripping."""
+    """When mode == AUTO_APPROVE the hook allows without round-tripping.
+
+    Uses ``write_file`` (filesystem risk class), which IS eligible for
+    AUTO_APPROVE. Spend / external-write tools are deliberately exempt
+    (see ``test_auto_approve_does_not_cover_*`` below) so this test must
+    NOT use one or it would (correctly) fall through to the round-trip.
+    """
     from datetime import datetime, timedelta, timezone
 
     from voxhorizon_approvals import mode as mode_module
 
-    long_poll_calls = {"count": 0}
-
     def handler(request: httpx.Request) -> httpx.Response:
-        # Best-effort write_auto_decision also POSTs to the long-poll
-        # path. We allow it — but the operator prompt round-trip
-        # (timeout=10) must NOT happen.
-        long_poll_calls["count"] += 1
+        # The operator prompt round-trip (timeout=10) must NOT happen for
+        # an auto-approved filesystem tool; only the best-effort
+        # write_auto_decision POST is tolerated.
         return httpx.Response(
             200, json={"decision": "approved", "notes": None}
         )
@@ -419,15 +422,16 @@ def test_mode_auto_approve_short_circuits_to_allow(
     _ctx, hook, _client = _register_with_mock(handler)
 
     deadline = (
-        datetime.now(timezone.utc) + timedelta(hours=4)
+        datetime.now(timezone.utc) + timedelta(minutes=30)
     ).isoformat()
+    set_at = datetime.now(timezone.utc).isoformat()
 
     def _fake_fetch_mode(**_kwargs):
         return mode_module.ModeState(
             mode="AUTO_APPROVE",
             expires_at=deadline,
             set_by="dashboard",
-            set_at="x",
+            set_at=set_at,
             note=None,
         )
 
@@ -436,8 +440,8 @@ def test_mode_auto_approve_short_circuits_to_allow(
     )
 
     result = hook(
-        "send_email",
-        {"to": "x"},
+        "write_file",
+        {"path": "/tmp/x", "content": "y"},
         "task-1",
         session_id="sess-1",
         tool_call_id="tc-1",
@@ -454,6 +458,138 @@ def test_mode_auto_approve_short_circuits_to_allow(
         and "auto_mode:AUTO_APPROVE" in r["reason"]
         for r in rows
     )
+
+
+def _auto_approve_mode_fixture(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the operator mode to a valid, un-expired, within-cap AUTO_APPROVE."""
+    from datetime import datetime, timedelta, timezone
+
+    from voxhorizon_approvals import mode as mode_module
+
+    now = datetime.now(timezone.utc)
+    deadline = (now + timedelta(minutes=30)).isoformat()
+    set_at = now.isoformat()
+
+    def _fake_fetch_mode(**_kwargs):
+        return mode_module.ModeState(
+            mode="AUTO_APPROVE",
+            expires_at=deadline,
+            set_by="dashboard",
+            set_at=set_at,
+            note=None,
+        )
+
+    monkeypatch.setattr(
+        "voxhorizon_approvals.fetch_mode", _fake_fetch_mode
+    )
+
+
+def test_auto_approve_does_not_cover_spend_tool(
+    env: None, audit_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E6.5: a spend-class tool falls through to the operator EVEN under
+    AUTO_APPROVE — the convenience mode must not open an unbounded-spend
+    window. The mock operator REJECTS, proving the long-poll really ran
+    (an auto-approve would have returned None without asking)."""
+    _auto_approve_mode_fixture(monkeypatch)
+
+    long_poll = {"count": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        long_poll["count"] += 1
+        return httpx.Response(
+            200, json={"decision": "rejected", "notes": "spend cap"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    result = hook(
+        "kie_generate",
+        {"prompt": "x"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    # NOT auto-approved: it round-tripped and the operator denied it.
+    assert result is not None
+    assert result["action"] == "block"
+    assert long_poll["count"] >= 1
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    # An audit row records the refusal to auto-approve the spend tool.
+    assert any(
+        r["decision"] == "ask"
+        and "does not cover spend-class" in r["reason"]
+        for r in rows
+    )
+
+
+def test_auto_approve_does_not_cover_launch_tool(
+    env: None,
+    audit_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    _operator_policy_env: None,
+) -> None:
+    """E6.5: the Meta launch/activate tool (gated by the operator overlay,
+    tagged spend) is NOT auto-approved under AUTO_APPROVE — launches are
+    irreversible real-money side effects and must always be confirmed."""
+    _auto_approve_mode_fixture(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"decision": "rejected", "notes": "needs review"}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+
+    result = hook(
+        "mcp_pipeline_operator_pipeline_operator_launch",
+        {"pipeline_id": "p-1"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    # The launch tool round-tripped and was denied — not silently allowed.
+    assert result is not None
+    assert result["action"] == "block"
+
+    rows = [
+        json.loads(line)
+        for line in audit_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(
+        r["decision"] == "ask"
+        and "does not cover spend-class" in r["reason"]
+        for r in rows
+    )
+
+
+def test_auto_approve_still_covers_filesystem_tool(
+    env: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """E6.5 scope guard: a filesystem-class tool (not spend / external-write)
+    is STILL auto-approved under AUTO_APPROVE — the exemption is narrow."""
+    _auto_approve_mode_fixture(monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # Only the best-effort write_auto_decision POST is allowed; the
+        # operator prompt round-trip must not happen.
+        return httpx.Response(
+            200, json={"decision": "approved", "notes": None}
+        )
+
+    _ctx, hook, _client = _register_with_mock(handler)
+    result = hook(
+        "write_file",
+        {"path": "/tmp/x", "content": "y"},
+        "task-1",
+        session_id="sess-1",
+        tool_call_id="tc-1",
+    )
+    assert result is None  # auto-approved, no operator denial
 
 
 def test_mode_halt_short_circuits_to_block(
