@@ -1,30 +1,24 @@
-"""The foundation-bug proof: shared gate / evidence tables vs. both verticals.
+"""Foundation gate test: shared gate / evidence tables vs. both verticals.
 
 This is the KEY test of the E0.1 integration tier (#421). It drives a creative
 through the shared per-(creative, stage) gate + evidence writes against a REAL
 Postgres with the actual ``db/migrations/*.sql`` applied, so the foreign keys
 fire for real:
 
-  * ``creative_stage_state.creative_id`` -> ``creatives(id)``   (0018)
-  * ``compliance_finding.creative_id``   -> ``creatives(id)``   (0021)
-  * ``qa_result.creative_id``            -> ``creatives(id)``   (0021)
+  * ``creative_stage_state.creative_id`` -> ``creative(id)``  (repointed 0035)
+  * ``compliance_finding.creative_id``   -> ``creative(id)``  (repointed 0035)
+  * ``qa_result.creative_id``            -> ``creative(id)``  (repointed 0035)
 
-All three reference ``creatives(id)`` ONLY. An IMAGE creative lives in
-``creatives``, so its id writes cleanly -- the harness is provably correct
-(:func:`test_image_creative_writes_gate_rows_pass`).
-
-A VIDEO creative lives in ``video_creatives``; its id is NOT in ``creatives``,
-so the same write is rejected with a foreign-key violation. That is THE
-foundation bug -- the video pipeline (VID-12) routes video creatives through
-these image-only shared tables. M1 (#448) broadens the references so a video
-creative can own a gate row; until then the video write must fail. The video
-tests are ``xfail(strict=True)`` asserting the write SUCCEEDS: today they fail
-with the FK violation (-> xfail), and when M1 lands they pass (-> XPASS, a
-strict-xfail failure) which is the signal to delete the markers.
+Before M1 (#448) these referenced ``creatives(id)`` ONLY, so a VIDEO creative
+(which lives in ``video_creatives``) could never own a gate row -- the FK
+rejected it. That was the foundation bug. M1 introduced a neutral ``creative``
+identity (0034): every ``creatives`` / ``video_creatives`` row is mirrored to a
+``creative`` base row (by id + format), and the shared tables were repointed to
+``creative(id)`` (0035). So BOTH verticals now own gate + evidence rows.
 
 The in-memory ``FakeSupabase`` double the unit suite uses ignores FKs entirely,
-which is why this break shipped undetected; this tier is the net that catches
-the next one.
+which is why the break shipped undetected; this tier is the net that catches the
+next one.
 """
 
 from __future__ import annotations
@@ -35,23 +29,8 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-M1_FIX = (
-    "M1 (#448) broadens creative_stage_state / compliance_finding / qa_result to "
-    "accept a video_creatives(id); until then a video creative_id violates the "
-    "creatives(id)-only foreign key. When this XPASSes, M1 has landed -- remove "
-    "the xfail."
-)
-
-
-def _fk_error():
-    """The psycopg foreign-key violation class (lazy import for the skip path)."""
-    from psycopg import errors
-
-    return errors.ForeignKeyViolation
-
-
 # ===========================================================================
-# IMAGE side -- the harness is correct (these PASS today)
+# IMAGE side -- the legitimate path, always valid.
 # ===========================================================================
 
 
@@ -59,9 +38,7 @@ def test_image_creative_writes_gate_rows_pass(db_conn, image_creative) -> None:
     """An IMAGE creative writes a gate row + both evidence rows cleanly.
 
     Proves the integration harness itself is sound: with the real schema and
-    real FKs, the legitimate (image) path succeeds across all three shared
-    tables. If THIS failed, the FK-violation video tests below would be
-    meaningless.
+    real FKs, the image path succeeds across all three shared tables.
     """
     pid = image_creative["pipeline_id"]
     cid = image_creative["creative_id"]
@@ -139,22 +116,35 @@ def test_image_compliance_finding_rule_version_is_text(db_conn, image_creative) 
 
 
 # ===========================================================================
-# VIDEO side -- the foundation bug (xfail until M1 / #448)
+# VIDEO side -- M1 (#448) fixed the foundation: a video creative is mirrored
+# into the neutral `creative` base (0034) and the shared tables FK `creative(id)`
+# (0035), so it now owns gate + evidence rows exactly like an image creative.
+# (Before M1 these were xfail(strict) FK-violation proofs.)
 # ===========================================================================
 
 
-@pytest.mark.xfail(reason=M1_FIX, strict=True, raises=Exception)
-def test_video_creative_gate_row_currently_fk_violates(db_conn, video_creative) -> None:
-    """KEY PROOF: a VIDEO creative cannot own a creative_stage_state gate row.
+def test_video_creative_has_mirrored_base_row(db_conn, video_creative) -> None:
+    """0034: seeding a video_creatives row mirrors a `creative` base row.
 
-    The video creative_id is a real ``video_creatives(id)`` but not a
-    ``creatives(id)``, so this gate write -- the exact write the shared
-    compliance / QA route does for every adjudicated creative -- is rejected by
-    ``creative_stage_state_creative_id_fkey``. Asserting the insert SUCCEEDS
-    documents the post-M1 contract; today the FK violation makes it xfail.
+    The AFTER INSERT trigger creates a `creative` row with the same id and
+    format='video', which is what lets the shared FKs accept the video id.
+    """
+    cid = video_creative["creative_id"]
+    with db_conn.cursor() as cur:
+        cur.execute("select format from creative where id = %s", (cid,))
+        row = cur.fetchone()
+    assert row is not None, "video creative was not mirrored into the creative base"
+    assert row[0] == "video"
+
+
+def test_video_creative_writes_gate_row(db_conn, video_creative) -> None:
+    """A VIDEO creative now owns a creative_stage_state gate row (post-M1).
+
+    This is the exact write the shared compliance / QA route does for every
+    adjudicated creative; before M1 it was rejected by the creatives(id)-only FK.
     """
     pid = video_creative["pipeline_id"]
-    cid = video_creative["creative_id"]  # a video_creatives(id), NOT a creatives(id)
+    cid = video_creative["creative_id"]  # a video_creatives(id), mirrored into creative
     with db_conn.cursor() as cur:
         cur.execute(
             """
@@ -165,20 +155,11 @@ def test_video_creative_gate_row_currently_fk_violates(db_conn, video_creative) 
             """,
             (pid, cid),
         )
-        # If M1 has broadened the FK, the row exists and this passes (-> XPASS).
         assert cur.fetchone()[0] is not None
 
 
-@pytest.mark.xfail(reason=M1_FIX, strict=True, raises=Exception)
-def test_video_creative_compliance_finding_currently_fk_violates(
-    db_conn, video_creative
-) -> None:
-    """A VIDEO creative cannot own a compliance_finding evidence row either.
-
-    Same root cause on the evidence side: ``compliance_finding.creative_id`` FKs
-    ``creatives(id)`` only. The compliance route writes this evidence for every
-    blocking finding, so video compliance evidence has no valid home pre-M1.
-    """
+def test_video_creative_writes_compliance_finding(db_conn, video_creative) -> None:
+    """A VIDEO creative now owns a compliance_finding evidence row (post-M1)."""
     pid = video_creative["pipeline_id"]
     cid = video_creative["creative_id"]
     with db_conn.cursor() as cur:
@@ -196,14 +177,8 @@ def test_video_creative_compliance_finding_currently_fk_violates(
         assert cur.fetchone()[0] is not None
 
 
-@pytest.mark.xfail(reason=M1_FIX, strict=True, raises=Exception)
-def test_video_creative_qa_result_currently_fk_violates(db_conn, video_creative) -> None:
-    """A VIDEO creative cannot own a qa_result evidence row either.
-
-    ``qa_result.creative_id`` FKs ``creatives(id)`` only, so a video creative's
-    QA attempt -- which the qa_run route appends for every adjudicated creative
-    -- is rejected pre-M1.
-    """
+def test_video_creative_writes_qa_result(db_conn, video_creative) -> None:
+    """A VIDEO creative now owns a qa_result evidence row (post-M1)."""
     pid = video_creative["pipeline_id"]
     cid = video_creative["creative_id"]
     with db_conn.cursor() as cur:
@@ -217,30 +192,3 @@ def test_video_creative_qa_result_currently_fk_violates(db_conn, video_creative)
             (pid, cid),
         )
         assert cur.fetchone()[0] is not None
-
-
-def test_video_creative_gate_row_raises_foreign_key_violation(
-    db_conn, video_creative
-) -> None:
-    """Pin the EXACT failure mode: a ForeignKeyViolation naming the gate FK.
-
-    The xfail tests above prove the write fails; this one asserts WHY -- a real
-    ``psycopg.errors.ForeignKeyViolation`` on the creatives(id) reference -- so
-    the documented break can't quietly mutate into some other error. This test
-    is expected to keep PASSING until M1; once M1 lands it will need updating
-    alongside the xfail removals (the insert will no longer raise).
-    """
-    pid = video_creative["pipeline_id"]
-    cid = video_creative["creative_id"]
-    with pytest.raises(_fk_error()) as exc_info:
-        with db_conn.cursor() as cur:
-            cur.execute(
-                """
-                insert into creative_stage_state
-                  (pipeline_id, creative_id, stage, status, decided_by)
-                values (%s, %s, 'compliance_review', 'passed', 'worker')
-                """,
-                (pid, cid),
-            )
-    # The violation must name the creatives(id) reference, not some other FK.
-    assert "creative" in str(exc_info.value).lower()
