@@ -32,6 +32,15 @@ dependencies = [
     # Group/socket access is granted by `group_add: ["${DOCKER_GID}"]`
     # in docker-compose.yml; no Dockerfile changes are required.
     "docker>=7.0",
+    # Self-hosted speech-to-text for video-ad caption burn-in (VID-4):
+    # `services.captions.transcribe` lazily imports faster_whisper.WhisperModel
+    # to get word-level timestamps, which are grouped into cues, rendered to an
+    # ASS subtitle file, and burned into the composed clip with the in-image
+    # ffmpeg. faster-whisper is CTranslate2-based (no torch), so it stays light;
+    # the model weights are NOT in the image -- they download to the HF cache on
+    # first transcribe (the worker already has outbound egress). Dormant until
+    # the video.py substage chain wires it (VID-5).
+    "faster-whisper>=1.0",
 ]
 
 [project.optional-dependencies]
