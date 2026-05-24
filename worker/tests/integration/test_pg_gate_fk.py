@@ -192,3 +192,38 @@ def test_video_creative_writes_qa_result(db_conn, video_creative) -> None:
             (pid, cid),
         )
         assert cur.fetchone()[0] is not None
+
+
+# ===========================================================================
+# Base lifecycle sync (0034 triggers + soft on-delete refs)
+# ===========================================================================
+
+
+def test_deleting_creative_removes_base_row(db_conn, image_creative) -> None:
+    """0034 AFTER DELETE: removing a creatives row unmirrors its base row.
+
+    Without this, a deleted creative's base row lingers (holding a pipeline_id
+    reference) and blocks a later pipeline delete - the e2e cleanup regression.
+    """
+    cid = image_creative["creative_id"]
+    with db_conn.cursor() as cur:
+        cur.execute("select 1 from creative where id = %s", (cid,))
+        assert cur.fetchone() is not None  # mirrored on insert
+        cur.execute("delete from creatives where id = %s", (cid,))
+        cur.execute("select 1 from creative where id = %s", (cid,))
+        assert cur.fetchone() is None  # unmirrored on delete
+
+
+def test_deleting_pipeline_not_blocked_by_base(db_conn, image_creative) -> None:
+    """0034: creative.pipeline_id is ON DELETE SET NULL, so a pipeline delete is
+    not blocked by a base row referencing it (the exact e2e cleanup failure)."""
+    pid = image_creative["pipeline_id"]
+    cid = image_creative["creative_id"]
+    with db_conn.cursor() as cur:
+        # As the live app does, the base row references the pipeline.
+        cur.execute("update creative set pipeline_id = %s where id = %s", (pid, cid))
+        # Deleting the pipeline must succeed (set null), not FK-violate.
+        cur.execute("delete from pipelines where id = %s", (pid,))
+        cur.execute("select pipeline_id from creative where id = %s", (cid,))
+        row = cur.fetchone()
+        assert row is not None and row[0] is None  # base survives, ref nulled

@@ -23,8 +23,8 @@
 create table if not exists creative (
   id          uuid primary key,                 -- SHARED id space: equals creatives.id / video_creatives.id
   format      creative_type not null,           -- 'image' | 'video'
-  client_id   uuid references clients (id),     -- tenant seam (best-effort populated; nullable)
-  pipeline_id uuid references pipelines (id),
+  client_id   uuid references clients (id) on delete set null,    -- tenant seam (best-effort; nullable)
+  pipeline_id uuid references pipelines (id) on delete set null,  -- soft ref; deleting a pipeline must not be blocked by the base
   created_at  timestamptz not null default now(),
   deleted_at  timestamptz
 );
@@ -85,3 +85,26 @@ create trigger creatives_mirror_to_creative
 drop trigger if exists video_creatives_mirror_to_creative on video_creatives;
 create trigger video_creatives_mirror_to_creative
   after insert on video_creatives for each row execute function creative_mirror_video();
+
+-- ---------------------------------------------------------------------------
+-- Keep the base in sync on delete: when a creatives / video_creatives row is
+-- removed (e.g. brief cascade), drop its base row too, so it does not linger
+-- holding a pipeline_id reference that would block a later pipeline delete.
+-- The base delete cascades to the shared gate/evidence rows (0035), preserving
+-- the original creatives-cascade semantics.
+-- ---------------------------------------------------------------------------
+create or replace function creative_unmirror() returns trigger
+  language plpgsql security definer set search_path = public, pg_temp as $$
+begin
+  delete from creative where id = old.id;
+  return old;
+end
+$$;
+
+drop trigger if exists creatives_unmirror_creative on creatives;
+create trigger creatives_unmirror_creative
+  after delete on creatives for each row execute function creative_unmirror();
+
+drop trigger if exists video_creatives_unmirror_creative on video_creatives;
+create trigger video_creatives_unmirror_creative
+  after delete on video_creatives for each row execute function creative_unmirror();
