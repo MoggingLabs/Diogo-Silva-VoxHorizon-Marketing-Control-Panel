@@ -50,6 +50,16 @@ dev = [
     # Coverage gate (T.2/#315): CI installs this group via `uv sync --extra dev`
     # and `pytest` enforces `--cov-fail-under=90` (see [tool.pytest.ini_options]).
     "pytest-cov>=5.0",
+    # Postgres-backed integration tier (E0.1/#421). `psycopg` applies the real
+    # db/migrations/*.sql to an ephemeral Postgres so FK/CHECK/trigger/enum
+    # constraints actually fire (the in-memory FakeSupabase double ignores them,
+    # which is how the video FK break went undetected). `testcontainers` is the
+    # OPTIONAL convenience path that spins Postgres when Docker is available; the
+    # DATABASE_URL-skip contract is what the tier relies on, so neither package
+    # is needed to run the unit suite (the integration tests skip cleanly when
+    # no database is reachable).
+    "psycopg[binary]>=3.2",
+    "testcontainers[postgres]>=4.8",
 ]
 
 [build-system]
@@ -66,6 +76,15 @@ pythonpath = ["."]
 # Coverage gate (T.2/#315 DoD): the worker suite must hold >=90% line coverage.
 # `pytest` (plain) now enforces it, so CI's `uv run pytest` is the gate.
 addopts = "--cov=src --cov-report=term-missing --cov-fail-under=90"
+# Registered markers (E0.1/#421). `integration` flags the Postgres-backed tier
+# in tests/integration/ that applies the real db/migrations/*.sql to an
+# ephemeral Postgres. CI runs it with `uv run pytest -m integration`; that
+# selection skips cleanly when no database is reachable, and the integration
+# conftest relaxes the coverage floor for an integration-only selection so the
+# default `uv run pytest` gate (>=90% over src) is the one and only line gate.
+markers = [
+    "integration: Postgres-backed tests; require a reachable DB (DATABASE_URL or Docker), skipped otherwise.",
+]
 
 # Production coverage gate for the worker. The gate is enforced by the
 # `addopts` above (plain `pytest` runs `--cov-fail-under=90`) and by CI's
@@ -89,4 +108,9 @@ dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.1.0",
+    # E0.1/#421 Postgres-backed integration tier (see the optional-dependencies
+    # `dev` extra above for the rationale). Mirrored here so the uv-native
+    # default dependency group stays in sync with the `--extra dev` group.
+    "psycopg[binary]>=3.2",
+    "testcontainers[postgres]>=4.8",
 ]
