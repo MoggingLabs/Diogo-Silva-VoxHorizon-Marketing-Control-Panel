@@ -85,6 +85,7 @@ from ..services.pipeline_runner import (
     emit_pipeline_event,
     fetch_pipeline,
 )
+from ..services.pricing import codex_image_cost, kie_image_cost
 from ..services.queue import get_queue
 from ..services.storage import BUCKET, build_creative_path
 from ..supabase_client import get_supabase_admin
@@ -101,20 +102,23 @@ router = APIRouter()
 EVENTS_TAIL_LIMIT = 20
 
 # Per-kind render parameters. Single source of truth so the render loop and
-# any future caller stay in lockstep with the existing producers' SOP.
+# any future caller stay in lockstep with the existing producers' SOP. The
+# per-image ``cost_usd`` reads from the shared pricing module (E4.2 #501) — one
+# rendered ratio is one Kie image, so both kinds price at Kie's per-image rate
+# (was two drifting literals 0.02 / 0.05).
 _CONCEPT_PREVIEW = {
     "ratios": ("1x1",),
     "resolution": "1K",
     "version": "v0.ideation",
     "stage": "ideation",
-    "cost_usd": 0.02,
+    "cost_usd": kie_image_cost(1),
 }
 _FINAL = {
     "ratios": ("1x1", "9x16"),
     "resolution": "2K",
     "version": "v1.0",
     "stage": "generation",
-    "cost_usd": 0.05,
+    "cost_usd": kie_image_cost(1),
 }
 
 # Per-kind storage parameters for the codex-backed /store_creative path. The
@@ -1196,6 +1200,7 @@ async def _render_one(
         subtotal=cost_usd,
         task_event_id=done_id or running_id,
         stage=stage,
+        creative_id=insert.creative_id,
         extra={
             "creative_id": insert.creative_id,
             "ratio": ratio,
@@ -1532,9 +1537,10 @@ async def store_creative(body: StoreCreativeInput) -> dict[str, Any]:
         pipeline_id=body.pipeline_id,
         api=_CODEX_COST_API,
         units=1,
-        subtotal=0,
+        subtotal=codex_image_cost(1),
         task_event_id=done_id or running_id,
         stage=stage,
+        creative_id=insert.creative_id,
         extra={
             "creative_id": insert.creative_id,
             "ratio": body.ratio,

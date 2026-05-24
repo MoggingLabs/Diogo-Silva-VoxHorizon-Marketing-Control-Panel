@@ -58,6 +58,21 @@ _TERMINAL_KINDS = {EVENT_TASK_DONE, EVENT_TASK_ERROR}
 _NON_TERMINAL_TASK_KINDS = {EVENT_TASK_QUEUED, EVENT_TASK_RUNNING}
 
 
+# Cost ``api`` labels whose ledger write emit_cost SKIPS, because their real,
+# per-unit cost is recorded authoritatively at the actual generation site in
+# ``routes/video.py`` (E4.3 #503). The auto-advance video path in
+# ``routes/pipeline.py`` wraps each substage with a placeholder emit_cost
+# (``_video_substage_cost``: representative, not per-unit); writing THOSE to the
+# ledger too would double-count against the accurate video.py rows. The
+# pipeline_events timeline line is still emitted for both (the dashboard shows
+# the substage cost live) — only the structured ledger row is deferred to the
+# real recorder. Image render apis (kie.ai / openai-codex) stay on this single
+# emit_cost ledger path.
+_LEDGER_DEFERRED_APIS: frozenset[str] = frozenset(
+    {"kie-tts", "kie-video", "ffmpeg-local", "whisper-local", "submagic"}
+)
+
+
 PipelineStage = Literal[
     "configuration",
     "ideation",
@@ -426,13 +441,28 @@ def emit_cost(
     task_event_id: str | None = None,
     stage: PipelineStage = "generation",
     extra: dict[str, Any] | None = None,
+    creative_id: str | None = None,
+    dedupe_key: str | None = None,
 ) -> None:
-    """Emit a ``cost_recorded`` pipeline event after a paid external call.
+    """Record a paid external call's cost on the SINGLE ledger write path (E4.1).
 
-    ``api`` identifies the upstream (``"kie.ai"``, ``"elevenlabs"``,
-    ``"submagic"``). ``units`` is API-specific (image count, character
-    count, video minutes). ``subtotal`` is in USD. The aggregator in PF-F
-    sums these into ``pipelines.cost_actual``.
+    ``api`` identifies the upstream (``"kie.ai"``, ``"kie-video"``,
+    ``"kie-tts"``, ``"openai-codex"``). ``units`` is API-specific (image count,
+    character count, clips). ``subtotal`` is in USD.
+
+    This is the one cost call site prod actually exercises, so it does BOTH
+    writes that used to be split between two disconnected systems:
+
+      1. the ``cost_recorded`` ``pipeline_events`` timeline row (the dashboard's
+         realtime cost line — unchanged), and
+      2. a typed ``cost_ledger`` row (via :func:`services.cost_ledger
+         .record_generation_cost`, kind derived from ``api``) — which used to be
+         test-only and is now populated in prod, so the budget gauge + the
+         monitor's reconciliation read real numbers instead of an empty table.
+
+    The ledger write is best-effort (``record_*`` swallows + logs its own
+    failures) so a ledger hiccup never aborts a render — same contract as the
+    timeline emit.
     """
     payload: dict[str, Any] = {
         "api": api,
@@ -448,4 +478,36 @@ def emit_cost(
         kind=EVENT_COST_RECORDED,
         stage=stage,
         payload=payload,
+    )
+
+    # Video substage placeholder costs are recorded authoritatively (per-unit)
+    # at the generation site in routes/video.py; skip the ledger row here so the
+    # pipeline.py auto-advance path doesn't double-count them. The timeline line
+    # above is still emitted for the live dashboard.
+    if api in _LEDGER_DEFERRED_APIS:
+        return
+
+    # Single ledger write path (E4.1 #498): also land a typed cost_ledger row so
+    # the structured ledger prod reads from is actually populated. Imported
+    # lazily to avoid a circular import (cost_ledger imports nothing from here,
+    # but the route layer imports both — keep the dependency one-directional and
+    # cheap to mock in the pipeline_runner unit tests).
+    from .cost_ledger import record_generation_cost
+
+    # Recover the creative_id from the explicit arg or the extra blob (the render
+    # loops stamp it there) so the ledger row links to its creative.
+    resolved_creative_id = creative_id
+    if resolved_creative_id is None and isinstance(extra, dict):
+        cid = extra.get("creative_id")
+        if isinstance(cid, str) and cid:
+            resolved_creative_id = cid
+
+    record_generation_cost(
+        pipeline_id=pipeline_id,
+        api=api,
+        amount_usd=float(subtotal),
+        units=float(units),
+        creative_id=resolved_creative_id,
+        meta={"stage": stage, **({"extra": extra} if extra else {})},
+        dedupe_key=dedupe_key,
     )

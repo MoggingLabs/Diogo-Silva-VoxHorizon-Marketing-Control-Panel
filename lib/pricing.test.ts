@@ -5,6 +5,7 @@ import { PRICING } from "./pricing";
 describe("PRICING", () => {
   it("exposes the per-vendor pricing knobs", () => {
     expect(PRICING.kie_ai.per_image).toBeCloseTo(0.05);
+    expect(PRICING.kie_video.per_clip).toBeCloseTo(0.4);
     expect(PRICING.elevenlabs.per_1k_chars).toBeCloseTo(0.3);
     expect(PRICING.submagic.per_video).toBeCloseTo(1.0);
     expect(PRICING.anthropic.per_million_input).toBeCloseTo(3.0);
