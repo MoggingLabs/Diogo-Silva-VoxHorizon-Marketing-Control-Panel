@@ -100,3 +100,17 @@ def test_settings_defaults_when_optional_envs_absent(
     assert s.supabase_url is None
     assert s.supabase_secret_key is None
     assert s.broll_store_backend == "local"
+
+
+def test_pipeline_budget_cap_default_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The E4.4 per-pipeline hard cap default is set and env-overridable."""
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    assert get_settings().pipeline_budget_cap_usd == 50.0
+
+    monkeypatch.setenv("PIPELINE_BUDGET_CAP_USD", "12.5")
+    get_settings.cache_clear()
+    assert get_settings().pipeline_budget_cap_usd == 12.5

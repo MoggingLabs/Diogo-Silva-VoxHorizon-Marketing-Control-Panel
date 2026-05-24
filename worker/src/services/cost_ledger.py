@@ -34,10 +34,11 @@ enum value so the single write path stays declarative.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Final
 
 import structlog
 
+from ..config import get_settings
 from ..supabase_client import get_supabase_admin
 
 
@@ -298,11 +299,13 @@ def sum_costs(pipeline_id: str) -> CostTotals:
 
     Reads every ``cost_ledger`` row for the pipeline and folds them client-side
     (timelines are bounded — a handful of renders + a daily spend line, well
-    under a page). A read failure degrades to all-zero totals (logged) so the
-    budget gauge never crashes the caller.
+    under a page). A read failure — including a missing-config RuntimeError when
+    the worker runs without Supabase — degrades to all-zero totals (logged) so
+    the budget gauge (and the hard-cap reserve that calls this) never crashes the
+    caller. Resolving the admin client is inside the guard for the same reason.
     """
-    sb = get_supabase_admin()
     try:
+        sb = get_supabase_admin()
         resp = (
             sb.table("cost_ledger")
             .select("kind, amount_usd")
@@ -371,4 +374,149 @@ def check_budget(pipeline_id: str, cap_usd: float | None) -> BudgetStatus:
         cap_usd=cap_usd,
         over_cap=totals.total_usd > cap_usd,
         remaining_usd=round(cap_usd - totals.total_usd, 6),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Server-side hard cap enforcement (E4.4 / #506)
+# ---------------------------------------------------------------------------
+#
+# ``check_budget`` is the gauge — it reports over/under but never refuses. The
+# pipeline, however, can overrun its budget by accumulating spend across retries,
+# iterations, and many ads even when each individual ad passes the per-ad
+# pre-flight estimate in ``routes.video``. ``reserve_budget`` is the ENFORCED
+# guardrail: it sums the ACTUAL ledger and refuses (``BudgetExceeded`` →
+# HTTP 402 at the route) when the already-spent total plus the about-to-be-spent
+# estimate would exceed the pipeline's hard cap. It runs BEFORE any paid vendor
+# call, so the spend never happens. Because it reads the real ledger (which the
+# auto-approve window writes to exactly like the manual path), the cap holds
+# regardless of approval mode.
+
+
+def resolve_pipeline_cap(pipeline_id: str) -> float | None:
+    """Resolve the hard USD cap for ``pipeline_id``.
+
+    Precedence: a positive ``pipelines.budget_cap_usd`` override (migration 0042)
+    wins; otherwise the agency-wide config default
+    (``settings.pipeline_budget_cap_usd``). A non-positive default disables the
+    cap (returns ``None`` ⇒ no enforcement). A read failure degrades to the
+    config default so a transient Supabase hiccup never silently removes the cap.
+    """
+    override: float | None = None
+    try:
+        sb = get_supabase_admin()
+        resp = (
+            sb.table("pipelines")
+            .select("budget_cap_usd")
+            .eq("id", pipeline_id)
+            .maybe_single()
+            .execute()
+        )
+        row = resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+        if row is not None:
+            candidate = _as_float(row.get("budget_cap_usd"))
+            if candidate > 0:
+                override = candidate
+    except Exception as e:  # noqa: BLE001 — cap read degrades to the config default
+        log.warning(
+            "pipeline_cap_read_failed", pipeline_id=pipeline_id, error=str(e)
+        )
+    if override is not None:
+        return override
+    default = float(get_settings().pipeline_budget_cap_usd)
+    return default if default > 0 else None
+
+
+@dataclass(frozen=True)
+class BudgetExceeded(Exception):
+    """Raised when an about-to-be-incurred cost would exceed a pipeline's cap.
+
+    Carries the figures so the route can render an exact HTTP 402 detail. Frozen
+    + dataclass so it is cheap to construct and its message is deterministic.
+    """
+
+    pipeline_id: str
+    spent_usd: float
+    estimate_usd: float
+    cap_usd: float
+
+    def __str__(self) -> str:
+        return (
+            f"pipeline {self.pipeline_id} budget cap exceeded: already spent "
+            f"${self.spent_usd:.2f} + estimated ${self.estimate_usd:.2f} would "
+            f"exceed the ${self.cap_usd:.2f} hard cap"
+        )
+
+
+@dataclass(frozen=True)
+class BudgetReservation:
+    """The outcome of a successful :func:`reserve_budget` check."""
+
+    pipeline_id: str
+    spent_usd: float
+    estimate_usd: float
+    cap_usd: float | None
+    remaining_usd: float | None
+
+
+# Sentinel for "caller did not pass cap_usd" so an EXPLICIT ``cap_usd=None``
+# (meaning "no cap, gauge only") is distinguishable from the default (meaning
+# "resolve the cap from the pipeline / config").
+_UNSET: Final = object()
+
+
+def reserve_budget(
+    pipeline_id: str,
+    estimate_usd: float,
+    *,
+    cap_usd: float | None | object = _UNSET,
+) -> BudgetReservation:
+    """Refuse an about-to-be-incurred ``estimate_usd`` if it would blow the cap.
+
+    Reserve-then-check against the ACTUAL ledger: sum the pipeline's recorded
+    spend and, if ``spent + estimate > cap``, raise :class:`BudgetExceeded` so
+    the caller aborts BEFORE the paid vendor call. The sum is read fresh each
+    call, so concurrent stages each see the spend the others have already
+    recorded; the per-pipeline brief queue (``services.queue``) serialises a
+    pipeline's paid stages, making the read-then-spend effectively atomic for the
+    single-operator app, and the ledger remains the authoritative backstop.
+
+    When ``cap_usd`` is omitted it is resolved via :func:`resolve_pipeline_cap`
+    (per-pipeline override → config default). Passing an explicit ``cap_usd=None``
+    means "no cap configured" — the check is a no-op pass-through (the gauge still
+    tracks spend). A negative ``estimate_usd`` is a programming error.
+    """
+    if estimate_usd < 0:
+        raise ValueError(
+            f"reserve_budget estimate_usd must be >= 0 (got {estimate_usd!r})"
+        )
+    if cap_usd is _UNSET:
+        resolved_cap = resolve_pipeline_cap(pipeline_id)
+    else:
+        resolved_cap = cap_usd  # type: ignore[assignment]
+    spent = sum_costs(pipeline_id).total_usd
+    if resolved_cap is None:
+        return BudgetReservation(
+            pipeline_id=pipeline_id,
+            spent_usd=spent,
+            estimate_usd=round(estimate_usd, 6),
+            cap_usd=None,
+            remaining_usd=None,
+        )
+    projected = spent + estimate_usd
+    # Strict ``>``: landing exactly ON the cap is allowed (the cap is the ceiling
+    # the spend may reach, not one cent below it).
+    if projected > resolved_cap:
+        raise BudgetExceeded(
+            pipeline_id=pipeline_id,
+            spent_usd=round(spent, 6),
+            estimate_usd=round(estimate_usd, 6),
+            cap_usd=round(resolved_cap, 6),
+        )
+    return BudgetReservation(
+        pipeline_id=pipeline_id,
+        spent_usd=round(spent, 6),
+        estimate_usd=round(estimate_usd, 6),
+        cap_usd=round(resolved_cap, 6),
+        remaining_usd=round(resolved_cap - projected, 6),
     )
