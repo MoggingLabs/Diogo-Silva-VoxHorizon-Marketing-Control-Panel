@@ -43,6 +43,67 @@ describe("getReviewBundle", () => {
     expect(bundle.creatives).toEqual([]);
     expect(bundle.states).toEqual([]);
   });
+
+  // B4: a video pipeline's creatives/copy live in the parity tables; the gate
+  // state is the shared neutral creative_stage_state. The bundle additively
+  // unions video creatives + video copy variants so the launch preconditions
+  // see them like image creatives.
+  it("unions video creatives + video copy variants for a video-only pipeline", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { format_choice: "video", video_brief_id: "vb1" }, error: null },
+        },
+      },
+      video_creatives: {
+        select: { data: [{ id: "vc1", status: "captioned", captioned_path: "vc1.mp4" }] },
+      },
+      video_copy_variants: { select: { data: [{ creative_id: "vc1", status: "approved" }] } },
+      creative_stage_state: {
+        select: { data: [{ creative_id: "vc1", stage: "spec_validation", status: "passed" }] },
+      },
+    });
+    const bundle = await getReviewBundle("p1");
+    expect(bundle.creatives).toEqual([{ id: "vc1", concept: null, status: "captioned" }]);
+    expect(bundle.copyVariants).toEqual([{ creative_id: "vc1", status: "approved" }]);
+    expect(bundle.states).toHaveLength(1);
+    expect(bundle.signedUrls.vc1).toBe("https://signed.test/vc1.mp4");
+  });
+
+  it("unions BOTH tracks for a format=both pipeline", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: { single: { data: { format_choice: "both", video_brief_id: "vb1" }, error: null } },
+      },
+      creatives: {
+        select: {
+          data: [{ id: "c1", concept: "A", status: "draft", file_path_supabase: "a.png" }],
+        },
+      },
+      copy_variants: { select: { data: [{ creative_id: "c1", status: "approved" }] } },
+      video_creatives: {
+        select: { data: [{ id: "vc1", status: "captioned", captioned_path: "vc1.mp4" }] },
+      },
+      video_copy_variants: { select: { data: [{ creative_id: "vc1", status: "approved" }] } },
+      creative_stage_state: { select: { data: [] } },
+    });
+    const bundle = await getReviewBundle("p1");
+    expect(bundle.creatives.map((c) => c.id).sort()).toEqual(["c1", "vc1"]);
+    expect(bundle.copyVariants).toHaveLength(2);
+  });
+
+  it("skips the video read when the pipeline has no video_brief_id", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: { single: { data: { format_choice: "video", video_brief_id: null }, error: null } },
+      },
+      video_creatives: {
+        select: { data: [{ id: "vc1", status: "captioned", captioned_path: "vc1.mp4" }] },
+      },
+    });
+    const bundle = await getReviewBundle("p1");
+    expect(bundle.creatives).toEqual([]);
+  });
 });
 
 describe("getCopyVariants", () => {

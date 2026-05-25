@@ -1507,30 +1507,54 @@ export type Database = {
           created_at: string
           creative_id: string
           cta: string | null
+          description: string | null
           headline: string | null
           humanized: boolean | null
           id: string
+          pattern: string | null
+          pipeline_id: string | null
+          placement: string | null
+          platform: string
           status: string | null
+          updated_at: string
+          validation: Json
+          variant_index: number
         }
         Insert: {
           body?: string | null
           created_at?: string
           creative_id: string
           cta?: string | null
+          description?: string | null
           headline?: string | null
           humanized?: boolean | null
           id?: string
+          pattern?: string | null
+          pipeline_id?: string | null
+          placement?: string | null
+          platform?: string
           status?: string | null
+          updated_at?: string
+          validation?: Json
+          variant_index?: number
         }
         Update: {
           body?: string | null
           created_at?: string
           creative_id?: string
           cta?: string | null
+          description?: string | null
           headline?: string | null
           humanized?: boolean | null
           id?: string
+          pattern?: string | null
+          pipeline_id?: string | null
+          placement?: string | null
+          platform?: string
           status?: string | null
+          updated_at?: string
+          validation?: Json
+          variant_index?: number
         }
         Relationships: [
           {
@@ -1540,19 +1564,39 @@ export type Database = {
             referencedRelation: "video_creatives"
             referencedColumns: ["id"]
           },
+          {
+            foreignKeyName: "video_copy_variants_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
         ]
       }
       video_creatives: {
         Row: {
           approved_at: string | null
+          asset_name: string | null
           brief_id: string
           broll_clips: Json | null
+          broll_sources: Json | null
           captioned_path: string | null
+          clip_count: number | null
           composed_path: string | null
           created_at: string
+          deleted_at: string | null
+          drive_folder_id: string | null
           drive_url: string | null
           duration_actual_s: number | null
+          file_path_drive: string | null
+          finalize_verified: boolean
+          finalized_at: string | null
+          gen_model: string | null
           id: string
+          music_track_used: boolean | null
+          pipeline_id: string | null
+          render_cost_usd: number | null
+          script_outline: Json | null
           script_path: string | null
           status: Database["public"]["Enums"]["video_creative_status"]
           version: number
@@ -1560,14 +1604,27 @@ export type Database = {
         }
         Insert: {
           approved_at?: string | null
+          asset_name?: string | null
           brief_id: string
           broll_clips?: Json | null
+          broll_sources?: Json | null
           captioned_path?: string | null
+          clip_count?: number | null
           composed_path?: string | null
           created_at?: string
+          deleted_at?: string | null
+          drive_folder_id?: string | null
           drive_url?: string | null
           duration_actual_s?: number | null
+          file_path_drive?: string | null
+          finalize_verified?: boolean
+          finalized_at?: string | null
+          gen_model?: string | null
           id?: string
+          music_track_used?: boolean | null
+          pipeline_id?: string | null
+          render_cost_usd?: number | null
+          script_outline?: Json | null
           script_path?: string | null
           status?: Database["public"]["Enums"]["video_creative_status"]
           version?: number
@@ -1575,14 +1632,27 @@ export type Database = {
         }
         Update: {
           approved_at?: string | null
+          asset_name?: string | null
           brief_id?: string
           broll_clips?: Json | null
+          broll_sources?: Json | null
           captioned_path?: string | null
+          clip_count?: number | null
           composed_path?: string | null
           created_at?: string
+          deleted_at?: string | null
+          drive_folder_id?: string | null
           drive_url?: string | null
           duration_actual_s?: number | null
+          file_path_drive?: string | null
+          finalize_verified?: boolean
+          finalized_at?: string | null
+          gen_model?: string | null
           id?: string
+          music_track_used?: boolean | null
+          pipeline_id?: string | null
+          render_cost_usd?: number | null
+          script_outline?: Json | null
           script_path?: string | null
           status?: Database["public"]["Enums"]["video_creative_status"]
           version?: number
@@ -1594,6 +1664,13 @@ export type Database = {
             columns: ["brief_id"]
             isOneToOne: false
             referencedRelation: "video_briefs"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "video_creatives_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
             referencedColumns: ["id"]
           },
         ]

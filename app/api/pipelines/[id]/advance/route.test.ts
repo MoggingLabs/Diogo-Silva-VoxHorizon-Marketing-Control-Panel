@@ -1263,6 +1263,158 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
   });
 
+  // -------------------------------------------------------------------------
+  // B2: the copy gate counts BOTH tracks. A video creative's copy lives in
+  // `video_copy_variants` (joined to video_creatives via the pipeline's
+  // video_brief_id). Video creatives are always in scope (no `killed` value).
+  // -------------------------------------------------------------------------
+  describe("copy gate - video track (B2)", () => {
+    function videoCopyPipeline(format: "video" | "both") {
+      return {
+        id,
+        status: "copy",
+        format_choice: format,
+        video_brief_id: "vb1",
+        config_draft: null,
+        advanced_at: {},
+      };
+    }
+
+    it("advances a video-only pipeline when the video creative has >=3 approved video copy (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: videoCopyPipeline("video"), error: null } },
+          update: { single: { data: { id, status: "spec_validation" }, error: null } },
+        },
+        video_creatives: { select: { data: [{ id: "vc1", status: "captioned" }], error: null } },
+        video_copy_variants: {
+          select: {
+            data: [
+              { creative_id: "vc1", status: "approved" },
+              { creative_id: "vc1", status: "approved" },
+              { creative_id: "vc1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("spec_validation");
+    });
+
+    it("422 when a video creative is short on approved video copy", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoCopyPipeline("video"), error: null } } },
+        video_creatives: { select: { data: [{ id: "vc1", status: "captioned" }], error: null } },
+        video_copy_variants: {
+          select: { data: [{ creative_id: "vc1", status: "approved" }], error: null },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.field).toBe("copy");
+      expect(body.copy.short).toBe(1);
+    });
+
+    it("format=both: counts image AND video creatives in the same gate (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: videoCopyPipeline("both"), error: null } },
+          update: { single: { data: { id, status: "spec_validation" }, error: null } },
+        },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: {
+          select: {
+            data: [
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        video_creatives: { select: { data: [{ id: "vc1", status: "captioned" }], error: null } },
+        video_copy_variants: {
+          select: {
+            data: [
+              { creative_id: "vc1", status: "approved" },
+              { creative_id: "vc1", status: "approved" },
+              { creative_id: "vc1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+    });
+
+    it("format=both: 422 when the video creative is short even though image is satisfied", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoCopyPipeline("both"), error: null } } },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: {
+          select: {
+            data: [
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        video_creatives: { select: { data: [{ id: "vc1", status: "captioned" }], error: null } },
+        video_copy_variants: { select: { data: [], error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.copy.short).toBe(1);
+    });
+
+    it("500 when the video_creatives read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoCopyPipeline("video"), error: null } } },
+        video_creatives: { select: { data: null, error: { message: "vc boom" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+
+    it("500 when the video_copy_variants read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoCopyPipeline("video"), error: null } } },
+        video_creatives: { select: { data: [{ id: "vc1", status: "captioned" }], error: null } },
+        video_copy_variants: { select: { data: null, error: { message: "vcv boom" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+    });
+  });
+
   describe("finalize_assets → launch_handoff (no-stall wiring)", () => {
     function finalizePipeline() {
       return {
@@ -1385,6 +1537,115 @@ describe("POST /api/pipelines/:id/advance", () => {
       expect(res.status).toBe(200);
       expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
       warn.mockRestore();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // B3: finalize gate counts BOTH tracks. A video creative's finalize state is
+  // video_creatives.finalize_verified (migration 0031), joined via the
+  // pipeline's video_brief_id.
+  // -------------------------------------------------------------------------
+  describe("finalize_assets - video track (B3)", () => {
+    function videoFinalizePipeline(format: "video" | "both") {
+      return {
+        id,
+        status: "finalize_assets",
+        format_choice: format,
+        video_brief_id: "vb1",
+        config_draft: null,
+        advanced_at: {},
+      };
+    }
+
+    it("advances a video-only pipeline when every video creative is finalize_verified (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: videoFinalizePipeline("video"), error: null } },
+          update: { single: { data: { id, status: "launch_handoff" }, error: null } },
+        },
+        video_creatives: {
+          select: { data: [{ id: "vc1", finalize_verified: true }], error: null },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.pipeline.status).toBe("launch_handoff");
+    });
+
+    it("422 when a video creative is not finalize_verified (gate holds)", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoFinalizePipeline("video"), error: null } } },
+        video_creatives: {
+          select: {
+            data: [
+              { id: "vc1", finalize_verified: true },
+              { id: "vc2", finalize_verified: false },
+            ],
+            error: null,
+          },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.field).toBe("finalize");
+      expect(body.finalize.unverified).toBe(1);
+    });
+
+    it("format=both: counts image AND video creatives in the finalize gate (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: videoFinalizePipeline("both"), error: null } },
+          update: { single: { data: { id, status: "launch_handoff" }, error: null } },
+        },
+        creatives: { select: { data: [{ id: "c1", finalize_verified: true }], error: null } },
+        video_creatives: {
+          select: { data: [{ id: "vc1", finalize_verified: true }], error: null },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+    });
+
+    it("format=both: 422 when the video creative is unverified even though image is verified", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoFinalizePipeline("both"), error: null } } },
+        creatives: { select: { data: [{ id: "c1", finalize_verified: true }], error: null } },
+        video_creatives: {
+          select: { data: [{ id: "vc1", finalize_verified: false }], error: null },
+        },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(422);
+      const body = await res.json();
+      expect(body.finalize.unverified).toBe(1);
+    });
+
+    it("500 when the video_creatives read errors", async () => {
+      currentSupabase = mockClient({
+        pipelines: { select: { single: { data: videoFinalizePipeline("video"), error: null } } },
+        video_creatives: { select: { data: null, error: { message: "vc read failed" } } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
     });
   });
 });

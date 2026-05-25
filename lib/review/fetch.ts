@@ -2,9 +2,12 @@ import "server-only";
 
 import type { CopyVariantView } from "@/components/copy/CopyComposer";
 import { getSignedUrl, type Creative } from "@/lib/creatives";
+import { activeTracksLocal } from "@/lib/pipeline/transitions";
+import type { PipelineFormat } from "@/lib/pipeline/types";
 import type { GridCreative, StageStateRow } from "@/lib/review/grid";
 import type { LaunchCopyVariant } from "@/lib/review/grid";
 import { createAdminClient } from "@/lib/supabase/admin";
+import { getSignedUrl as getVideoSignedUrl } from "@/lib/video-creatives";
 
 /**
  * Server-side fetch helpers for the per-creative review surfaces (P4.2–P4.6).
@@ -25,49 +28,123 @@ export type ReviewBundle = {
 
 type CreativeRow = Pick<Creative, "id" | "concept" | "status" | "file_path_supabase">;
 
+/** A video_creatives row, narrowed to what the review bundle needs. */
+type VideoCreativeRow = {
+  id: string;
+  status: string;
+  captioned_path: string | null;
+};
+
 /**
  * Load every creative for a pipeline + its per-creative gate state + copy
  * variants, ready for the CreativeReviewGrid / launch preconditions. Killed +
  * soft-deleted creatives are still returned (the grid greys killed ones and
  * drops them from the rollup scope); deleted rows are filtered out.
+ *
+ * Format-aware (Phase 2 / B4): a VIDEO creative's data lives in the parity
+ * tables `video_creatives` + `video_copy_variants` (migration 0031), while its
+ * per-creative gate state shares the neutral `creative_stage_state` table
+ * (migration 0034/0046: a video creative id is a valid creative_stage_state
+ * key). So we additively union video creatives + video copy variants into the
+ * bundle (the states read already covers both tracks). Launch preconditions
+ * (spec-pass + compliance-clear + >=3 approved copy) then see video creatives
+ * exactly like image creatives. Image creatives may be `killed` (dropped from
+ * scope); video creatives are in scope unless soft-deleted. The video tables are
+ * read only when the video track is active, so an image-only pipeline behaves
+ * byte-identically to before.
  */
 export async function getReviewBundle(pipelineId: string): Promise<ReviewBundle> {
   const supabase = createAdminClient();
 
-  const { data: creativeRows } = await supabase
-    .from("creatives")
-    .select("id, concept, status, file_path_supabase")
-    .eq("pipeline_id", pipelineId)
-    .is("deleted_at", null)
-    .order("created_at", { ascending: true });
+  // The pipeline row drives the format branch + the video lineage join. A
+  // missing pipeline (or unreadable row) degrades to image-only behaviour.
+  const { data: pipeline } = await supabase
+    .from("pipelines")
+    .select("format_choice, video_brief_id")
+    .eq("id", pipelineId)
+    .maybeSingle();
+  const tracks = activeTracksLocal((pipeline?.format_choice ?? "image") as PipelineFormat);
 
-  const creatives: GridCreative[] = (creativeRows ?? []).map((c: CreativeRow) => ({
-    id: c.id,
-    concept: c.concept,
-    status: c.status,
-  }));
+  const creatives: GridCreative[] = [];
+  const copyVariants: LaunchCopyVariant[] = [];
+  const signedUrls: Record<string, string | null> = {};
 
+  // ----- Image track (unchanged) -----
+  let imageRows: CreativeRow[] = [];
+  if (tracks.image) {
+    const { data: creativeRows } = await supabase
+      .from("creatives")
+      .select("id, concept, status, file_path_supabase")
+      .eq("pipeline_id", pipelineId)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: true });
+    imageRows = (creativeRows ?? []) as CreativeRow[];
+
+    for (const c of imageRows) {
+      creatives.push({ id: c.id, concept: c.concept, status: c.status });
+    }
+
+    const { data: copyRows } = await supabase
+      .from("copy_variants")
+      .select("creative_id, status")
+      .eq("pipeline_id", pipelineId);
+    for (const cv of (copyRows ?? []) as LaunchCopyVariant[]) {
+      copyVariants.push(cv);
+    }
+  }
+
+  // ----- Video track (additive, B4) -----
+  let videoRows: VideoCreativeRow[] = [];
+  if (tracks.video && pipeline?.video_brief_id) {
+    const { data: videoCreativeRows } = await supabase
+      .from("video_creatives")
+      .select("id, status, captioned_path")
+      .eq("brief_id", pipeline.video_brief_id)
+      .is("deleted_at", null)
+      .order("created_at", { ascending: true });
+    videoRows = (videoCreativeRows ?? []) as VideoCreativeRow[];
+
+    for (const c of videoRows) {
+      // A video creative is always in scope (no `killed` lifecycle); its
+      // video_creative_status is not part of CreativeLifecycle but the only
+      // scope check is `!== "killed"`, which it never is.
+      creatives.push({
+        id: c.id,
+        concept: null,
+        status: c.status as GridCreative["status"],
+      });
+    }
+
+    const videoIds = videoRows.map((c) => c.id);
+    if (videoIds.length > 0) {
+      const { data: videoCopyRows } = await supabase
+        .from("video_copy_variants")
+        .select("creative_id, status")
+        .in("creative_id", videoIds);
+      for (const cv of (videoCopyRows ?? []) as LaunchCopyVariant[]) {
+        copyVariants.push(cv);
+      }
+    }
+  }
+
+  // Per-creative gate state is the shared neutral table; one read covers both
+  // image and video creatives (keyed by the neutral creative id).
   const { data: stateRows } = await supabase
     .from("creative_stage_state")
     .select("creative_id, stage, status, override_note, summary")
     .eq("pipeline_id", pipelineId);
-
   const states: StageStateRow[] = (stateRows ?? []) as StageStateRow[];
 
-  const { data: copyRows } = await supabase
-    .from("copy_variants")
-    .select("creative_id, status")
-    .eq("pipeline_id", pipelineId);
-
-  const copyVariants: LaunchCopyVariant[] = (copyRows ?? []) as LaunchCopyVariant[];
-
-  // Resolve signed preview URLs (best-effort; null when missing).
-  const signedUrls: Record<string, string | null> = {};
-  await Promise.all(
-    (creativeRows ?? []).map(async (c: CreativeRow) => {
+  // Resolve signed preview URLs (best-effort; null when missing). Image creatives
+  // sign their file_path_supabase; video creatives sign their captioned MP4 path.
+  await Promise.all([
+    ...imageRows.map(async (c) => {
       signedUrls[c.id] = await getSignedUrl(supabase, c.file_path_supabase);
     }),
-  );
+    ...videoRows.map(async (c) => {
+      signedUrls[c.id] = await getVideoSignedUrl(supabase, c.captioned_path);
+    }),
+  ]);
 
   return { creatives, states, copyVariants, signedUrls };
 }

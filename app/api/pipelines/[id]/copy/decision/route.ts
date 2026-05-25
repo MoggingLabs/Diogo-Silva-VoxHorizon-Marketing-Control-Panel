@@ -1,6 +1,10 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { CopyDecisionInput, type CopyVariantUpdate } from "@/lib/copy/schemas";
+import {
+  CopyDecisionInput,
+  type CopyVariantUpdate,
+  type VideoCopyVariantUpdate,
+} from "@/lib/copy/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -14,6 +18,13 @@ type RouteContext = { params: Promise<{ id: string }> };
  * Approve or reject a single copy variant in the copy stage (#359, P4.4).
  *   - `approved` → status = approved, approved_by/at stamped.
  *   - `rejected` → status = rejected, decided_notes stamped (notes required).
+ *
+ * Format-aware (Phase 2 / B2): an image creative's variant lives in
+ * `copy_variants`, a VIDEO creative's variant lives in `video_copy_variants`
+ * (the parity table from migration 0031). We try the image table first (the
+ * live production path, byte-identical), and only when the id is not an image
+ * variant do we update the video table, so the SAME endpoint + request shape
+ * `{ id, decision, notes? }` records a verdict for either format.
  *
  * Guards the pipeline is in the `copy` stage (409 otherwise). The ≥3-approved
  * launch precondition is enforced at the launch gate (`lib/review/grid.ts`);
@@ -73,19 +84,45 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
           updated_at: now,
         };
 
-  const { data: updated, error: updateErr } = await supabase
+  // Image path first (live production behaviour, unchanged). `maybeSingle` so a
+  // non-image variant id returns no row (data:null, error:null) instead of a
+  // not-found error; we then route it to the video table below. A real DB error
+  // on the image update still surfaces as a 500.
+  const { data: imageUpdated, error: imageErr } = await supabase
     .from("copy_variants")
     .update(update)
     .eq("id", variantId)
     .eq("pipeline_id", id)
     .select()
+    .maybeSingle();
+  if (imageErr) {
+    return NextResponse.json({ error: imageErr.message }, { status: 500 });
+  }
+  if (imageUpdated) {
+    return NextResponse.json({ variant: imageUpdated });
+  }
+
+  // Video path (B2): the id is not an image variant, so it belongs to a video
+  // creative. `video_copy_variants` (migration 0031) has no approved_by /
+  // approved_at / decided_notes columns; it carries status + updated_at, so we
+  // write only the format-appropriate subset (the approve/reject verdict).
+  const videoUpdate: VideoCopyVariantUpdate =
+    decision === "approved"
+      ? { status: "approved", updated_at: now }
+      : { status: "rejected", updated_at: now };
+
+  const { data: videoUpdated, error: videoErr } = await supabase
+    .from("video_copy_variants")
+    .update(videoUpdate)
+    .eq("id", variantId)
+    .select()
     .single();
-  if (updateErr || !updated) {
+  if (videoErr || !videoUpdated) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "copy decision update failed" },
+      { error: videoErr?.message ?? "copy decision update failed" },
       { status: 500 },
     );
   }
 
-  return NextResponse.json({ variant: updated });
+  return NextResponse.json({ variant: videoUpdated });
 }

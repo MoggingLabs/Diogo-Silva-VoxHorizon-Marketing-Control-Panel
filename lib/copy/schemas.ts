@@ -76,3 +76,9 @@ export type CopyDecisionInputT = z.infer<typeof CopyDecisionInput>;
 export type CopyVariant = Database["public"]["Tables"]["copy_variants"]["Row"];
 export type CopyVariantInsert = Database["public"]["Tables"]["copy_variants"]["Insert"];
 export type CopyVariantUpdate = Database["public"]["Tables"]["copy_variants"]["Update"];
+
+// Video parity tables (migration 0031). A video creative's copy variant lives in
+// `video_copy_variants`; the copy/decision route writes the format-appropriate
+// subset (status + updated_at) since it lacks the image-only approved_by/_at cols.
+export type VideoCopyVariant = Database["public"]["Tables"]["video_copy_variants"]["Row"];
+export type VideoCopyVariantUpdate = Database["public"]["Tables"]["video_copy_variants"]["Update"];
