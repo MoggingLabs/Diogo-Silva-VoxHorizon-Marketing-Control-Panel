@@ -36,8 +36,17 @@ type RouteContext = { params: Promise<{ id: string }> };
  *     creative: Creative,
  *     brief: { id, brief_id_human, status, client_id } | null,
  *     copy_variants: CopyVariant[],
+ *     qa: QaResult[],           // append-only, read-only here
+ *     spec: SpecCheck[],        // override-route only, read-only here
+ *     compliance: ComplianceFinding[], // override-route only, read-only here
+ *     stage_state: CreativeStageState[], // gate state, read-only here
  *     events: Event[],
  *   }
+ *
+ * The gate artifacts (qa / spec / compliance / stage_state) are surfaced
+ * READ-ONLY: per the guardrails they mutate only through their decision /
+ * override routes (which are pipeline-scoped). The manage UI links back to the
+ * pipeline review surface for those actions rather than duplicating them.
  */
 export async function GET(_req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -52,35 +61,54 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
   if (error) return serverError(error);
   if (!creative) return notFound();
 
-  const [briefRes, copyRes, eventsRes] = await Promise.all([
-    supabase
-      .from("briefs")
-      .select("id, brief_id_human, status, client_id")
-      .eq("id", creative.brief_id)
-      .maybeSingle(),
-    supabase
-      .from("copy_variants")
-      .select("*")
-      .eq("creative_id", id)
-      .order("created_at", { ascending: true })
-      .limit(200),
-    supabase
-      .from("events")
-      .select("id, kind, payload, created_at, ref_table, ref_id")
-      .eq("ref_table", "creatives")
-      .eq("ref_id", id)
-      .order("created_at", { ascending: false })
-      .limit(50),
-  ]);
+  const [briefRes, copyRes, qaRes, specRes, complianceRes, stageRes, eventsRes] = await Promise.all(
+    [
+      supabase
+        .from("briefs")
+        .select("id, brief_id_human, status, client_id")
+        .eq("id", creative.brief_id)
+        .maybeSingle(),
+      supabase
+        .from("copy_variants")
+        .select("*")
+        .eq("creative_id", id)
+        .order("created_at", { ascending: true })
+        .limit(200),
+      supabase
+        .from("qa_result")
+        .select("*")
+        .eq("creative_id", id)
+        .order("attempt", { ascending: false })
+        .limit(20),
+      supabase.from("spec_check").select("*").eq("creative_id", id).limit(50),
+      supabase.from("compliance_finding").select("*").eq("creative_id", id).limit(100),
+      supabase.from("creative_stage_state").select("*").eq("creative_id", id).limit(50),
+      supabase
+        .from("events")
+        .select("id, kind, payload, created_at, ref_table, ref_id")
+        .eq("ref_table", "creatives")
+        .eq("ref_id", id)
+        .order("created_at", { ascending: false })
+        .limit(50),
+    ],
+  );
 
   if (briefRes.error) return serverError(briefRes.error);
   if (copyRes.error) return serverError(copyRes.error);
+  if (qaRes.error) return serverError(qaRes.error);
+  if (specRes.error) return serverError(specRes.error);
+  if (complianceRes.error) return serverError(complianceRes.error);
+  if (stageRes.error) return serverError(stageRes.error);
   if (eventsRes.error) return serverError(eventsRes.error);
 
   return ok({
     creative,
     brief: briefRes.data ?? null,
     copy_variants: copyRes.data ?? [],
+    qa: qaRes.data ?? [],
+    spec: specRes.data ?? [],
+    compliance: complianceRes.data ?? [],
+    stage_state: stageRes.data ?? [],
     events: eventsRes.data ?? [],
   });
 }

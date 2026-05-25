@@ -2,7 +2,6 @@
  * Tests for `app/api/creatives/archived/route.ts` (GET unified archived rows).
  * M4 / #593.
  */
-import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -17,10 +16,6 @@ vi.mock("@/lib/supabase/admin", () => ({
 
 import { GET } from "./route";
 
-function req(): NextRequest {
-  return new NextRequest(new Request("http://localhost/api/creatives/archived"));
-}
-
 describe("GET /api/creatives/archived", () => {
   beforeEach(() => {
     buildSpy.mockReset();
@@ -28,7 +23,7 @@ describe("GET /api/creatives/archived", () => {
 
   it("200 with the archived unified rows", async () => {
     buildSpy.mockResolvedValueOnce({ rows: [{ id: "c1", kind: "image" }], error: null });
-    const res = await GET(req());
+    const res = await GET();
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.rows).toEqual([{ id: "c1", kind: "image" }]);
@@ -38,7 +33,7 @@ describe("GET /api/creatives/archived", () => {
 
   it("500 when the builder reports an error", async () => {
     buildSpy.mockResolvedValueOnce({ rows: [], error: "boom" });
-    const res = await GET(req());
+    const res = await GET();
     expect(res.status).toBe(500);
   });
 });

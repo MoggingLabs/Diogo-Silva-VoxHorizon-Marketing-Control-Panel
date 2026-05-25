@@ -99,13 +99,76 @@ describe("CreativesGrid", () => {
     expect(screen.getByText("Video one")).toBeInTheDocument();
   });
 
-  it("switches to the table view", async () => {
+  it("toggles between table and grid views (renders thumbnail + format cells)", async () => {
     const user = userEvent.setup();
-    render(<CreativesGrid initialRows={[row()]} />);
+    render(
+      <CreativesGrid
+        initialRows={[
+          // An unparseable created_at exercises the date-format fallback.
+          row({
+            thumbnail_url: "https://signed/p.png",
+            format_label: "9x16",
+            created_at: "not-a-date",
+          }),
+        ]}
+      />,
+    );
     await user.click(screen.getByRole("button", { name: /table view/i }));
     // The DataTable renders a real <table> with a Brief column header.
     expect(screen.getByRole("table")).toBeInTheDocument();
     expect(screen.getByRole("columnheader", { name: /brief/i })).toBeInTheDocument();
+    // The format cell shows the ratio label.
+    expect(screen.getByText(/9x16/)).toBeInTheDocument();
+    // Toggle back to the grid view.
+    await user.click(screen.getByRole("button", { name: /grid view/i }));
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+  });
+
+  it("archives from the table-view row action menu", async () => {
+    const user = userEvent.setup();
+    render(<CreativesGrid initialRows={[row({ id: "c7" })]} />);
+    await user.click(screen.getByRole("button", { name: /table view/i }));
+    await user.click(screen.getByRole("button", { name: /row actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /archive/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
+    await waitFor(() => expect(archiveCreativeMock).toHaveBeenCalledWith("image", "c7"));
+  });
+
+  it("restores from the table-view row action menu in the archived view", async () => {
+    const user = userEvent.setup();
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ rows: [row({ id: "a7", brief_label: "br-a7", format_label: null })] }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+    render(<CreativesGrid initialRows={[]} />);
+    await user.click(screen.getByRole("button", { name: /show archived/i }));
+    await screen.findByText("br-a7");
+    await user.click(screen.getByRole("button", { name: /table view/i }));
+    await user.click(screen.getByRole("button", { name: /row actions/i }));
+    await user.click(await screen.findByRole("menuitem", { name: /restore/i }));
+    await waitFor(() => expect(restoreCreativeMock).toHaveBeenCalledWith("image", "a7"));
+  });
+
+  it("toasts when a grid restore fails", async () => {
+    const user = userEvent.setup();
+    const { toast } = await import("sonner");
+    restoreCreativeMock.mockRejectedValueOnce(new Error("restore boom"));
+    fetchMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ rows: [row({ id: "a8", brief_label: "br-a8" })] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    render(<CreativesGrid initialRows={[]} />);
+    await user.click(screen.getByRole("button", { name: /show archived/i }));
+    await user.click(await screen.findByRole("button", { name: /restore creative br-a8/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("restore boom"));
   });
 
   it("archives a creative through the confirm dialog", async () => {

@@ -45,6 +45,20 @@ describe("listImageCreatives / listVideoCreatives", () => {
     });
   });
 
+  it("lists active video creatives (no archived param)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ creatives: [{ id: "v2" }] }));
+    const rows = await listVideoCreatives();
+    expect(rows).toEqual([{ id: "v2" }]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/creatives/video", { cache: "no-store" });
+  });
+
+  it("lists archived image creatives via the query param", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ creatives: [{ id: "c9" }] }));
+    const rows = await listImageCreatives({ archived: true });
+    expect(rows).toEqual([{ id: "c9" }]);
+    expect(fetchMock).toHaveBeenCalledWith("/api/creatives?archived=true", { cache: "no-store" });
+  });
+
   it("throws with the server error message on a non-2xx", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: "rls denied" }, { status: 500 }));
     await expect(listImageCreatives()).rejects.toThrow(/rls denied/);
@@ -72,6 +86,13 @@ describe("updateImageCreative / updateVideoCreative", () => {
   it("throws on a 404 update", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not_found" }, { status: 404 }));
     await expect(updateImageCreative("c1", { concept: "x" })).rejects.toThrow(/not_found/);
+  });
+
+  it("throws on a video update error", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "nothing to update" }, { status: 400 }));
+    await expect(updateVideoCreative("v1", { asset_name: "y" })).rejects.toThrow(
+      /nothing to update/,
+    );
   });
 });
 
@@ -104,5 +125,10 @@ describe("archiveCreative / restoreCreative", () => {
       new Response("upstream boom", { status: 502, headers: { "content-type": "text/plain" } }),
     );
     await expect(restoreCreative("image", "c1")).rejects.toThrow(/upstream boom/);
+  });
+
+  it("falls back to statusText when the error body is empty", async () => {
+    fetchMock.mockResolvedValueOnce(new Response("", { status: 503, statusText: "Service Down" }));
+    await expect(archiveCreative("image", "c1")).rejects.toThrow(/Service Down/);
   });
 });

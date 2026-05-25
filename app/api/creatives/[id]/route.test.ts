@@ -41,7 +41,7 @@ describe("GET /api/creatives/:id", () => {
     currentSupabase = mockClient();
   });
 
-  it("200 with creative + brief + copy_variants + events", async () => {
+  it("200 with creative + brief + copy_variants + gate artifacts + events", async () => {
     currentSupabase = mockClient({
       creatives: {
         select: { single: { data: { id, brief_id: "b1", status: "draft" }, error: null } },
@@ -52,6 +52,10 @@ describe("GET /api/creatives/:id", () => {
         },
       },
       copy_variants: { select: { data: [{ id: "cv1" }], error: null } },
+      qa_result: { select: { data: [{ id: "qa1", status: "pass", attempt: 1 }], error: null } },
+      spec_check: { select: { data: [{ id: "sp1", status: "pass" }], error: null } },
+      compliance_finding: { select: { data: [{ id: "cf1", verdict: "pass" }], error: null } },
+      creative_stage_state: { select: { data: [{ id: "ss1", stage: "qa" }], error: null } },
       events: { select: { data: [{ id: "e1", kind: "creative_decided" }], error: null } },
     });
     const res = await GET(req("GET"), { params });
@@ -60,7 +64,21 @@ describe("GET /api/creatives/:id", () => {
     expect(body.creative.id).toBe(id);
     expect(body.brief.brief_id_human).toBe("br-1");
     expect(body.copy_variants).toEqual([{ id: "cv1" }]);
+    expect(body.qa).toEqual([{ id: "qa1", status: "pass", attempt: 1 }]);
+    expect(body.spec).toEqual([{ id: "sp1", status: "pass" }]);
+    expect(body.compliance).toEqual([{ id: "cf1", verdict: "pass" }]);
+    expect(body.stage_state).toEqual([{ id: "ss1", stage: "qa" }]);
     expect(body.events[0].kind).toBe("creative_decided");
+  });
+
+  it("500 when a gate-artifact read errors", async () => {
+    currentSupabase = mockClient({
+      creatives: { select: { single: { data: { id, brief_id: "b1" }, error: null } } },
+      briefs: { select: { single: { data: { id: "b1" }, error: null } } },
+      qa_result: { select: { data: null, error: { message: "qa down" } } },
+    });
+    const res = await GET(req("GET"), { params });
+    expect(res.status).toBe(500);
   });
 
   it("404 when the creative is missing", async () => {
