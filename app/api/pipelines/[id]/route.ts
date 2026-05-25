@@ -1,6 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { conflict, emitEvent, eventKind, notFound, ok, serverError, softDelete } from "@/lib/crud";
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { Pipeline } from "@/lib/pipeline/schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -77,4 +79,43 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
     video_brief: video_brief ?? null,
     events: events ?? [],
   });
+}
+
+/**
+ * DELETE /api/pipelines/:id
+ *
+ * Archive (soft-delete) a pipeline. A pipeline is the orchestration root
+ * (`pipeline_events` cascade, `creatives.pipeline_id` set-null), so we never
+ * hard-delete it -- that would destroy the run's timeline. Instead we set
+ * `deleted_at = now()` (migration 0048) which hides the row from the active
+ * list and is reversible via the sibling `/restore` route. This is the
+ * makeover's "delete = soft-delete" guardrail.
+ *
+ * Compare-and-set: only a currently-active row (`deleted_at is null`) is
+ * archived. A double-archive is reported as 409 (already archived); a missing
+ * row is 404. On success we emit a `pipeline_archived` audit event (non-fatal)
+ * and return the archived row.
+ */
+export async function DELETE(_req: NextRequest, ctx: RouteContext) {
+  const { id } = await ctx.params;
+  const supabase = createAdminClient();
+
+  const result = await softDelete<Pipeline>(supabase, "pipelines", id);
+
+  switch (result.kind) {
+    case "ok":
+      await emitEvent(supabase, {
+        kind: eventKind("pipeline", "archived"),
+        refTable: "pipelines",
+        refId: id,
+        payload: { deleted_at: result.row.deleted_at },
+      });
+      return ok({ pipeline: result.row });
+    case "missing":
+      return notFound();
+    case "conflict":
+      return conflict(result.reason);
+    case "error":
+      return serverError(result.message);
+  }
 }

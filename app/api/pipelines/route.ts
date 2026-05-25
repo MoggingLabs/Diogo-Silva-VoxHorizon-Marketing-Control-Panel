@@ -15,9 +15,12 @@ export const dynamic = "force-dynamic";
 /**
  * GET /api/pipelines
  *
- * Lists pipelines newest-first. Supports:
+ * Lists pipelines newest-first. Excludes archived (soft-deleted) rows by
+ * default. Supports:
  *   - `?status=<pipeline_status_enum>` — filter by lifecycle stage.
  *   - `?client_id=<uuid>` — filter to one client.
+ *   - `?archived=true` shows ONLY archived (`deleted_at is not null`) rows.
+ *     Omitted / `false` returns only active (`deleted_at is null`) rows.
  *   - `?limit=<n>` — page size (default 50, max 200).
  *   - `?cursor=<iso8601>` — cursor for the next page; the next page is rows
  *     with `created_at < cursor`. The `next_cursor` in the response is the
@@ -40,12 +43,25 @@ export async function GET(req: NextRequest) {
   }
   const { status, client_id, limit, cursor } = parsed.data;
 
+  // Archived view is an explicit opt-in (`?archived=true`). Anything else
+  // (absent / "false" / "0") keeps the default active-only list.
+  const archivedRaw = url.searchParams.get("archived");
+  const archived = archivedRaw === "true" || archivedRaw === "1";
+
   const supabase = createAdminClient();
   let query = supabase
     .from("pipelines")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(limit);
+
+  // Soft-archive filter (migration 0048): default hides archived rows; the
+  // archived view shows only them.
+  if (archived) {
+    query = query.not("deleted_at", "is", null);
+  } else {
+    query = query.is("deleted_at", null);
+  }
 
   if (status) query = query.eq("status", status);
   if (client_id) query = query.eq("client_id", client_id);

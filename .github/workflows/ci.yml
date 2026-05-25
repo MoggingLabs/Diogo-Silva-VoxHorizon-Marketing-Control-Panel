@@ -388,6 +388,7 @@ jobs:
   #   - pipeline-video.spec.ts     (video track            - PF-G-3/#204)
   #   - pipeline-both.spec.ts      (both tracks            - PF-G-3/#204)
   #   - launch-video.spec.ts       (video launch package   - V3-8/#114)
+  #   - pipeline-archive.spec.ts   (archive/restore        - #609)
   #
   # Local-only secrets: the printed service_role key + a dummy worker bearer.
   # NEVER a cloud project / real key. Path-filtered to web + worker + db + e2e.
@@ -416,6 +417,8 @@ jobs:
           - spec: pipeline-both.spec.ts
             allow_failure: false
           - spec: launch-video.spec.ts
+            allow_failure: false
+          - spec: pipeline-archive.spec.ts
             allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).
