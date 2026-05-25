@@ -492,14 +492,17 @@ async function rawAdvance(pipelineId: string): Promise<ApiResult> {
 }
 
 /**
- * Navigate with `domcontentloaded` + one retry. A prior in-flight SPA
- * navigation can abort the first goto (net::ERR_ABORTED) on this long-running
- * flow; the retry rides over that transient.
+ * Navigate resiliently for the final Done smoke. Uses `waitUntil: "commit"`
+ * (returns as soon as the response starts, NOT after the Done page finishes
+ * loading its signed-URL media) with a bounded timeout and one retry; the
+ * subsequent `getByText("Done")` assertion does the real waiting. A prior
+ * in-flight SPA navigation can otherwise abort (net::ERR_ABORTED) or the
+ * full-load wait can hang on the media fetch on this long-running flow.
  */
 async function gotoWithRetry(page: Page, url: string): Promise<void> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await page.goto(url, { waitUntil: "commit", timeout: 20_000 });
       return;
     } catch (e) {
       if (attempt === 1) throw e;
