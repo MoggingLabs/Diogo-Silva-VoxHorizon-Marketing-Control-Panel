@@ -397,14 +397,13 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
-    # M1 (#448, the neutral creative identity) has landed, so the old "FK break"
-    # framing is gone. The image no-stall spec and the video launch-package spec
-    # are required gates. pipeline-video / pipeline-both still ALLOW-FAIL: they
-    # assert an outdated generation->done flow and are being rewritten to drive
-    # the real 12-stage gated DAG for video (see VIDEO-ARCHITECTURE.md Layer B);
-    # flip them to allow_failure:false once that rewrite + the backing video gate
-    # routing land. The DB-level FK / rollup net in the integration job is a hard
-    # gate regardless.
+    # All four e2e specs are required gates. pipeline-video / pipeline-both now
+    # drive the real 12-stage gated DAG for video (creative_qa + spec probe a
+    # real MP4 fixture, compliance/copy/finalize/launch/monitor via the real
+    # worker verdicts), so they are blocking. The DB-level FK / rollup net in the
+    # integration job is a hard gate regardless. `continue-on-error` reads the
+    # matrix flag (all false) so the wiring stays if a spec ever needs to be
+    # temporarily quarantined.
     continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
@@ -413,9 +412,9 @@ jobs:
           - spec: pipeline-workflow.spec.ts
             allow_failure: false
           - spec: pipeline-video.spec.ts
-            allow_failure: true
+            allow_failure: false
           - spec: pipeline-both.spec.ts
-            allow_failure: true
+            allow_failure: false
           - spec: launch-video.spec.ts
             allow_failure: false
     env:
