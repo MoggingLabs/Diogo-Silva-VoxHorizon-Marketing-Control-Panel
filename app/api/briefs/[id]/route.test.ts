@@ -15,6 +15,8 @@
 import { NextRequest } from "next/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("server-only", () => ({}));
+
 import { mockClient } from "@/tests/unit/helpers/api-mock";
 import { type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
@@ -24,7 +26,7 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
 
-import { GET, PATCH } from "./route";
+import { DELETE, GET, PATCH } from "./route";
 
 const briefId = "11111111-1111-4111-8111-111111111111";
 const params = Promise.resolve({ id: briefId });
@@ -273,6 +275,84 @@ describe("PATCH /api/briefs/:id", () => {
     );
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("no events table"));
+    warn.mockRestore();
+  });
+});
+
+describe("DELETE /api/briefs/:id (archive)", () => {
+  beforeEach(() => {
+    currentSupabase = mockClient();
+  });
+
+  it("200 + stamps deleted_at and emits brief_archived", async () => {
+    currentSupabase = mockClient({
+      briefs: {
+        // softDelete: update .. where deleted_at is null -> returns the row.
+        update: {
+          single: { data: { id: briefId, deleted_at: "2026-05-25T00:00:00Z" }, error: null },
+        },
+      },
+      events: { insert: { data: null, error: null } },
+    });
+    const res = await DELETE(req(`http://localhost/api/briefs/${briefId}`, { method: "DELETE" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.brief.id).toBe(briefId);
+    expect(body.brief.deleted_at).not.toBeNull();
+  });
+
+  it("409 when the brief is already archived (compare-and-set finds it gone)", async () => {
+    currentSupabase = mockClient({
+      briefs: {
+        update: { single: { data: null, error: null } },
+        select: {
+          single: { data: { id: briefId, deleted_at: "2026-05-25T00:00:00Z" }, error: null },
+        },
+      },
+    });
+    const res = await DELETE(req(`http://localhost/api/briefs/${briefId}`, { method: "DELETE" }), {
+      params,
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.error).toBe("already_archived");
+  });
+
+  it("404 when the brief does not exist", async () => {
+    currentSupabase = mockClient({
+      briefs: {
+        update: { single: { data: null, error: null } },
+        select: { single: { data: null, error: null } },
+      },
+    });
+    const res = await DELETE(req(`http://localhost/api/briefs/${briefId}`, { method: "DELETE" }), {
+      params,
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("500 on a DB error during archive", async () => {
+    currentSupabase = mockClient({
+      briefs: { update: { single: { data: null, error: { message: "nope" } } } },
+    });
+    const res = await DELETE(req(`http://localhost/api/briefs/${briefId}`, { method: "DELETE" }), {
+      params,
+    });
+    expect(res.status).toBe(500);
+  });
+
+  it("still 200 when the audit event insert fails (non-fatal)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      briefs: { update: { single: { data: { id: briefId, deleted_at: "x" }, error: null } } },
+      events: { insert: { data: null, error: { message: "events down" } } },
+    });
+    const res = await DELETE(req(`http://localhost/api/briefs/${briefId}`, { method: "DELETE" }), {
+      params,
+    });
+    expect(res.status).toBe(200);
     warn.mockRestore();
   });
 });

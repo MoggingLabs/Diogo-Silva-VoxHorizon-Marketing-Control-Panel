@@ -13,20 +13,31 @@ export const dynamic = "force-dynamic";
  * GET /api/briefs
  *
  * Lists briefs ordered by `created_at desc`. Optional `?status=<status>` and
- * `?client_id=<uuid>` filters. Intended for the index page and lightweight
- * client-side lookups — not paginated yet (volume is small in v1).
+ * `?client_id=<uuid>` filters. Active rows only by default (`deleted_at is
+ * null`); pass `?archived=1` to list archived rows or `?archived=all` to
+ * include both. Intended for the index page and lightweight client-side
+ * lookups — not paginated yet (volume is small in v1).
  */
 export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
   const url = new URL(req.url);
   const status = url.searchParams.get("status");
   const clientId = url.searchParams.get("client_id");
+  const archived = url.searchParams.get("archived");
 
   let query = supabase
     .from("briefs")
-    .select("id, brief_id_human, client_id, status, payload, created_at, posted_at, decided_at")
+    .select(
+      "id, brief_id_human, client_id, status, payload, created_at, posted_at, decided_at, deleted_at",
+    )
     .order("created_at", { ascending: false })
     .limit(200);
+
+  if (archived === "1" || archived === "true") {
+    query = query.not("deleted_at", "is", null);
+  } else if (archived !== "all") {
+    query = query.is("deleted_at", null);
+  }
 
   if (status) {
     query = query.eq(

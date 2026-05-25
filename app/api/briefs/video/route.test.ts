@@ -236,7 +236,7 @@ describe("GET /api/briefs/video", () => {
         select: { data: [{ id: "v1" }], error: null },
       },
     });
-    const res = await GET();
+    const res = await GET(req("http://localhost/api/briefs/video"));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toHaveLength(1);
@@ -246,7 +246,7 @@ describe("GET /api/briefs/video", () => {
     currentSupabase = mockClient({
       video_briefs: { select: { data: null, error: { message: "down" } } },
     });
-    const res = await GET();
+    const res = await GET(req("http://localhost/api/briefs/video"));
     expect(res.status).toBe(500);
   });
 });

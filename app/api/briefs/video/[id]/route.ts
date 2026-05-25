@@ -1,7 +1,14 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { conflict, emitEvent, eventKind, notFound, ok, serverError, softDelete } from "@/lib/crud";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
-import { canTransition, VideoBriefPatchInput, type VideoBriefUpdateRow } from "@/lib/video-briefs";
+import {
+  canTransition,
+  VideoBriefPatchInput,
+  type VideoBrief,
+  type VideoBriefUpdateRow,
+} from "@/lib/video-briefs";
 
 type Params = { params: Promise<{ id: string }> };
 
@@ -157,4 +164,39 @@ export async function PATCH(req: NextRequest, { params }: Params) {
   }
 
   return NextResponse.json(updated, { status: 200 });
+}
+
+/**
+ * DELETE /api/briefs/video/:id
+ *
+ * Archive (soft-delete) a video brief: stamps `deleted_at = now()` so it drops
+ * out of the active list while its lineage stays intact. Reversible via
+ * `POST /api/briefs/video/:id/restore`.
+ *
+ * Compare-and-set: only a currently-live row is archived. A double-archive is
+ * 409 (already archived); a missing row is 404. Emits a `video_brief_archived`
+ * audit event (non-fatal).
+ */
+export async function DELETE(_req: NextRequest, { params }: Params) {
+  const { id } = await params;
+  const supabase = createAdminClient();
+
+  const result = await softDelete<VideoBrief>(supabase, "video_briefs", id);
+
+  switch (result.kind) {
+    case "ok":
+      await emitEvent(supabase, {
+        kind: eventKind("video_brief", "archived"),
+        refTable: "video_briefs",
+        refId: id,
+        payload: null,
+      });
+      return ok(result.row);
+    case "missing":
+      return notFound();
+    case "conflict":
+      return conflict(result.reason);
+    case "error":
+      return serverError(result.message);
+  }
 }

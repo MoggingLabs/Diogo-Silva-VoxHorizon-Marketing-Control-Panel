@@ -576,6 +576,7 @@ export type Database = {
           decided_at: string | null
           decided_by: string | null
           decided_notes: string | null
+          deleted_at: string | null
           id: string
           payload: Json
           posted_at: string | null
@@ -588,6 +589,7 @@ export type Database = {
           decided_at?: string | null
           decided_by?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           payload: Json
           posted_at?: string | null
@@ -600,6 +602,7 @@ export type Database = {
           decided_at?: string | null
           decided_by?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           payload?: Json
           posted_at?: string | null
@@ -1455,6 +1458,7 @@ export type Database = {
           decided_at: string | null
           decided_by: string | null
           decided_notes: string | null
+          deleted_at: string | null
           dimensions: Database["public"]["Enums"]["ratio"] | null
           hook_style: string | null
           id: string
@@ -1475,6 +1479,7 @@ export type Database = {
           decided_at?: string | null
           decided_by?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           dimensions?: Database["public"]["Enums"]["ratio"] | null
           hook_style?: string | null
           id?: string
@@ -1495,6 +1500,7 @@ export type Database = {
           decided_at?: string | null
           decided_by?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           dimensions?: Database["public"]["Enums"]["ratio"] | null
           hook_style?: string | null
           id?: string

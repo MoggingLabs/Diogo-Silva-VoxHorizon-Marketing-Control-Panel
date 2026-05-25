@@ -4,9 +4,11 @@ import {
   UpdateBriefInput,
   canTransition,
   transitionEventKind,
+  type Brief,
   type BriefStatusT,
   type BriefUpdate,
 } from "@/lib/briefs";
+import { conflict, emitEvent, eventKind, notFound, ok, serverError, softDelete } from "@/lib/crud";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 
@@ -164,4 +166,40 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
   }
 
   return NextResponse.json({ brief });
+}
+
+/**
+ * DELETE /api/briefs/:id
+ *
+ * Archive (soft-delete) a brief: stamps `deleted_at = now()` so it drops out of
+ * the active list but its lineage (creatives, events, launches) is preserved.
+ * Reversible via `POST /api/briefs/:id/restore`.
+ *
+ * Compare-and-set: only a currently-live row (`deleted_at is null`) is archived.
+ * A double-archive is reported as 409 (already archived); a missing row is 404.
+ * On success we emit a `brief_archived` audit event (non-fatal) and return the
+ * archived row.
+ */
+export async function DELETE(_req: NextRequest, ctx: RouteContext) {
+  const { id } = await ctx.params;
+  const supabase = createAdminClient();
+
+  const result = await softDelete<Brief>(supabase, "briefs", id);
+
+  switch (result.kind) {
+    case "ok":
+      await emitEvent(supabase, {
+        kind: eventKind("brief", "archived"),
+        refTable: "briefs",
+        refId: id,
+        payload: null,
+      });
+      return ok({ brief: result.row });
+    case "missing":
+      return notFound();
+    case "conflict":
+      return conflict(result.reason);
+    case "error":
+      return serverError(result.message);
+  }
 }

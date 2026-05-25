@@ -126,16 +126,28 @@ export async function POST(req: NextRequest) {
 /**
  * GET /api/briefs/video
  *
- * Lightweight list endpoint — newest first. Useful for the optional
- * `/briefs/video` index page and for debugging.
+ * Lightweight list endpoint — newest first. Active rows only by default
+ * (`deleted_at is null`); `?archived=1` lists archived rows, `?archived=all`
+ * includes both. Useful for the optional `/briefs/video` index page and for
+ * debugging.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   const supabase = await createClient();
-  const { data, error } = await supabase
+  const archived = req.nextUrl.searchParams.get("archived");
+
+  let query = supabase
     .from("video_briefs")
     .select("*")
     .order("created_at", { ascending: false })
     .limit(100);
+
+  if (archived === "1" || archived === "true") {
+    query = query.not("deleted_at", "is", null);
+  } else if (archived !== "all") {
+    query = query.is("deleted_at", null);
+  }
+
+  const { data, error } = await query;
   if (error) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
