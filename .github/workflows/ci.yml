@@ -397,11 +397,14 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.e2e == 'true' }}
     runs-on: ubuntu-latest
-    # Image is a required gate. Video + both verticals ALLOW-FAIL until M1 (#448)
-    # lands the neutral creative identity: they surface the foundation FK break
-    # (informative) but must not block merges yet. Flip allow_failure to false for
-    # them once M1 is in (the DB-level FK net in the integration job stays a hard
-    # gate regardless).
+    # M1 (#448, the neutral creative identity) has landed, so the old "FK break"
+    # framing is gone. The image no-stall spec and the video launch-package spec
+    # are required gates. pipeline-video / pipeline-both still ALLOW-FAIL: they
+    # assert an outdated generation->done flow and are being rewritten to drive
+    # the real 12-stage gated DAG for video (see VIDEO-ARCHITECTURE.md Layer B);
+    # flip them to allow_failure:false once that rewrite + the backing video gate
+    # routing land. The DB-level FK / rollup net in the integration job is a hard
+    # gate regardless.
     continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
@@ -414,7 +417,7 @@ jobs:
           - spec: pipeline-both.spec.ts
             allow_failure: true
           - spec: launch-video.spec.ts
-            allow_failure: true
+            allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321

@@ -103,6 +103,7 @@ export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGatePro
       {error && (
         <div
           role="alert"
+          data-testid="launch-decision-error"
           className="rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
         >
           {error}
