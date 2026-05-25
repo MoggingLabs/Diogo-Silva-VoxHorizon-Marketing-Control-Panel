@@ -173,21 +173,21 @@ test.describe("pipeline - both formats", () => {
     await expect(page.getByText(/Image:\s*1\s*picked/)).toBeVisible();
     await expect(page.getByText(/Video:\s*1\s*picked/)).toBeVisible();
 
-    await page.getByRole("button", { name: /continue to review/i }).click();
-    await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
-      timeout: 15_000,
-    });
+    // The pick-checkbox clicks write `pipelines.picks` via the picks API; poll
+    // the server until BOTH tracks have a pick before advancing (the dual-track
+    // picks write is async, and the ideation->review advance gate refuses unless
+    // every active track has >=1 pick).
+    await waitForBothPicks(admin, pipelineId);
 
-    // ===================================================================
-    // review → generation
-    // The dual-track Review renders two pick-preview sections whose signed-URL
-    // image tiles make the approve button realtime/layout-brittle under
-    // Playwright; the no-stall-relevant logic is the review/decision route (it
-    // snapshots the cost estimate, stamps the approval, and advances to
-    // generation). Drive it through the Next API directly - the same approach
-    // the image no-stall spec takes for the realtime-brittle post-generation
-    // gates - with a focused UI assertion that the Review stage rendered above.
-    // ===================================================================
+    // ideation -> review -> generation.
+    // The dual-track ideation Continue + Review approve buttons are
+    // realtime/layout-brittle under Playwright (two signed-URL pick-preview
+    // sections); the no-stall-relevant logic is the advance + review/decision
+    // routes (they gate on picks, snapshot the cost estimate, stamp the
+    // approval, and advance). Drive them through the Next API directly - the
+    // same approach the image no-stall spec takes for the realtime-brittle gates
+    // - with the focused UI pick assertions above proving the grid hydrated.
+    await expectAdvance(pipelineId, "review");
     const reviewDecision = await managerPost(pipelineId, "review/decision", {
       decision: "approved",
     });
@@ -509,6 +509,34 @@ async function expectAdvance(pipelineId: string, want: string): Promise<void> {
   const res = await rawAdvance(pipelineId);
   expect(res.status, `advance to ${want} failed: ${JSON.stringify(res.body)}`).toBe(200);
   expect(await readPipelineStatus(pipelineId)).toBe(want);
+}
+
+/**
+ * Poll `pipelines.picks` until BOTH the image and video tracks have >=1 pick.
+ * The ideation pick-checkbox clicks write picks asynchronously through the picks
+ * API; advancing before both commit would 422 the ideation->review gate.
+ */
+async function waitForBothPicks(
+  admin: ReturnType<typeof getTestAdminClient>,
+  pipelineId: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let last: unknown = null;
+  while (Date.now() < deadline) {
+    const { data } = await admin
+      .from("pipelines")
+      .select("picks")
+      .eq("id", pipelineId)
+      .maybeSingle();
+    const picks = (data?.picks ?? {}) as { image?: unknown[]; video?: unknown[] };
+    last = picks;
+    if ((picks.image?.length ?? 0) >= 1 && (picks.video?.length ?? 0) >= 1) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  throw new Error(
+    `waitForBothPicks: picks never reached 1+1 for ${pipelineId}: ${JSON.stringify(last)}`,
+  );
 }
 
 /** Read image `copy_variants` rows for a (pipeline, creative), variant order. */
