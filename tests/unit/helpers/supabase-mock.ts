@@ -93,6 +93,8 @@ function buildChain(verb: Verb, tableConfig: SupabaseTableConfig | undefined) {
     "is",
     "or",
     "not",
+    "like",
+    "ilike",
     "match",
     "filter",
     "order",

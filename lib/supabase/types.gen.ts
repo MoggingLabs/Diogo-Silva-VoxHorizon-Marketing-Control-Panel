@@ -331,6 +331,7 @@ export type Database = {
           approved_at: string | null
           approved_by: string | null
           created_at: string
+          deleted_at: string | null
           hypothesis: string | null
           id: string
           notes: string | null
@@ -343,6 +344,7 @@ export type Database = {
           approved_at?: string | null
           approved_by?: string | null
           created_at?: string
+          deleted_at?: string | null
           hypothesis?: string | null
           id?: string
           notes?: string | null
@@ -355,6 +357,7 @@ export type Database = {
           approved_at?: string | null
           approved_by?: string | null
           created_at?: string
+          deleted_at?: string | null
           hypothesis?: string | null
           id?: string
           notes?: string | null
@@ -826,6 +829,7 @@ export type Database = {
           brand_colors: Json | null
           cpl_target: number | null
           created_at: string
+          deleted_at: string | null
           drive_root_folder_id: string | null
           ghl_location_id: string | null
           id: string
@@ -840,6 +844,7 @@ export type Database = {
           brand_colors?: Json | null
           cpl_target?: number | null
           created_at?: string
+          deleted_at?: string | null
           drive_root_folder_id?: string | null
           ghl_location_id?: string | null
           id?: string
@@ -854,6 +859,7 @@ export type Database = {
           brand_colors?: Json | null
           cpl_target?: number | null
           created_at?: string
+          deleted_at?: string | null
           drive_root_folder_id?: string | null
           ghl_location_id?: string | null
           id?: string
@@ -876,6 +882,7 @@ export type Database = {
           creative_id: string
           cta: string | null
           decided_notes: string | null
+          deleted_at: string | null
           description: string | null
           headline: string | null
           humanized: boolean | null
@@ -899,6 +906,7 @@ export type Database = {
           creative_id: string
           cta?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           description?: string | null
           headline?: string | null
           humanized?: boolean | null
@@ -922,6 +930,7 @@ export type Database = {
           creative_id?: string
           cta?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           description?: string | null
           headline?: string | null
           humanized?: boolean | null
@@ -1164,6 +1173,7 @@ export type Database = {
           created_at: string
           decided_at: string | null
           decided_notes: string | null
+          deleted_at: string | null
           id: string
           launched_at: string | null
           meta_campaign_id: string | null
@@ -1180,6 +1190,7 @@ export type Database = {
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           launched_at?: string | null
           meta_campaign_id?: string | null
@@ -1196,6 +1207,7 @@ export type Database = {
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           launched_at?: string | null
           meta_campaign_id?: string | null
@@ -1507,6 +1519,7 @@ export type Database = {
           created_at: string
           creative_id: string
           cta: string | null
+          deleted_at: string | null
           description: string | null
           headline: string | null
           humanized: boolean | null
@@ -1525,6 +1538,7 @@ export type Database = {
           created_at?: string
           creative_id: string
           cta?: string | null
+          deleted_at?: string | null
           description?: string | null
           headline?: string | null
           humanized?: boolean | null
@@ -1543,6 +1557,7 @@ export type Database = {
           created_at?: string
           creative_id?: string
           cta?: string | null
+          deleted_at?: string | null
           description?: string | null
           headline?: string | null
           humanized?: boolean | null
@@ -1729,6 +1744,7 @@ export type Database = {
           created_at: string
           decided_at: string | null
           decided_notes: string | null
+          deleted_at: string | null
           id: string
           payload: Json
           status: string
@@ -1738,6 +1754,7 @@ export type Database = {
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           payload: Json
           status?: string
@@ -1747,6 +1764,7 @@ export type Database = {
           created_at?: string
           decided_at?: string | null
           decided_notes?: string | null
+          deleted_at?: string | null
           id?: string
           payload?: Json
           status?: string
