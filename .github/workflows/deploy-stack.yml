@@ -12,23 +12,31 @@ name: deploy-stack
 #   - this workflow itself changes (so a workflow fix can self-deploy)
 
 on:
-  # === DEPLOY AUTO-TRIGGER GUARD (E0.5 / #436) - DO NOT RE-ENABLE WITHOUT SIGN-OFF ===
-  # Auto-deploy on push to main is DISABLED for the duration of the pipeline
-  # rebuild so CI-gated merges to main never touch the live VPS stack. Deploys
-  # are deliberate during the rebuild: trigger manually via the Actions
-  # "Run workflow" button (workflow_dispatch ONLY).
-  #
-  # This workflow MUST stay workflow_dispatch-only until the rebuild is signed
-  # off. Re-enabling `push:` here means EVERY merge to main ships to the live
-  # VPS - that is the explicit thing we are guarding against. Do not add a
-  # `push:` key below as a "convenience"; it is intentional that it is absent.
-  #
-  # When the rebuild is complete and a maintainer has signed off, re-add the
-  # push trigger that previously watched: worker/**, web/**, app/**,
-  # components/**, lib/**, hooks/**, middleware.ts, next.config.ts,
-  # package.json, pnpm-lock.yaml, Caddyfile, docker-compose.yml, and this file.
-  # (Documented in docs/ci.md under "Deploy auto-trigger guard".)
-  # === END DEPLOY AUTO-TRIGGER GUARD ===
+  # === DEPLOY AUTO-TRIGGER (E0.5 / #436) ===============================
+  # Auto-deploy on push to main was DISABLED for the duration of the pipeline
+  # rebuild (CI-gated merges must not touch the live VPS). The rebuild shipped
+  # and the go-live completed (2026-05-25), so the documented end state is
+  # restored: a push to main that touches the stack source rebuilds + ships.
+  # The pre-deploy migration gate (below) + the per-service healthchecks are the
+  # deploy-time safety; CI runs in parallel on the same commit.
+  # `workflow_dispatch` stays as the manual bootstrap / hotfix path.
+  # (Documented in docs/ci.md under "Deploy auto-trigger".)
+  push:
+    branches: [main]
+    paths:
+      - worker/**
+      - web/**
+      - app/**
+      - components/**
+      - lib/**
+      - hooks/**
+      - middleware.ts
+      - next.config.ts
+      - package.json
+      - pnpm-lock.yaml
+      - Caddyfile
+      - docker-compose.yml
+      - .github/workflows/deploy-stack.yml
   workflow_dispatch:
 
 # One rollout at a time. Do NOT cancel a deploy mid-flight — that can
@@ -63,8 +71,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        name: Compute image tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        name: Compute image tag + lowercase GHCR owner
+        run: |
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          # github.repository_owner can be mixed-case (e.g. "MoggingLabs"), but
+          # GHCR repository names must be lowercase. Lowercase it so the tag is
+          # valid and the namespace follows the repo across transfers/renames.
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -72,15 +85,14 @@ jobs:
           context: worker
           file: worker/Dockerfile
           push: true
-          # GHCR namespace is the org owner, lowercased: the repo lives under the
-          # MoggingLabs org, so packages publish to ghcr.io/mogginglabs/* (the
-          # workflow GITHUB_TOKEN has packages:write only for its own org).
-          # `${{ github.repository_owner }}` would be the mixed-case `MoggingLabs`,
-          # an invalid Docker tag, so the owner is hardcoded lowercase here. Keep
-          # in lockstep with docker-compose.yml.
+          # Publish to ghcr.io/<lowercased-repo-owner>/* (see the meta step). The
+          # workflow GITHUB_TOKEN has packages:write for its own org, so the
+          # namespace must track the repo owner; docker-compose.yml pulls the same
+          # namespace via ${GHCR_OWNER:-mogginglabs}, so keep that default in sync
+          # with this repo's owner.
           tags: |
-            ghcr.io/mogginglabs/voxhorizon-worker:latest
-            ghcr.io/mogginglabs/voxhorizon-worker:${{ github.sha }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/voxhorizon-worker:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/voxhorizon-worker:${{ github.sha }}
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
@@ -110,8 +122,13 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        name: Compute image tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        name: Compute image tag + lowercase GHCR owner
+        run: |
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          # github.repository_owner can be mixed-case (e.g. "MoggingLabs"), but
+          # GHCR repository names must be lowercase. Lowercase it so the tag is
+          # valid and the namespace follows the repo across transfers/renames.
+          echo "owner=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -119,12 +136,11 @@ jobs:
           context: .
           file: web/Dockerfile
           push: true
-          # GHCR namespace is the lowercased org owner (see the worker job above):
-          # packages publish to ghcr.io/mogginglabs/*; `MoggingLabs` would be an
-          # invalid (uppercase) Docker tag.
+          # Publish to ghcr.io/<lowercased-repo-owner>/* (see the meta step + the
+          # worker job above); docker-compose.yml pulls the same namespace.
           tags: |
-            ghcr.io/mogginglabs/voxhorizon-web:latest
-            ghcr.io/mogginglabs/voxhorizon-web:${{ github.sha }}
+            ghcr.io/${{ steps.meta.outputs.owner }}/voxhorizon-web:latest
+            ghcr.io/${{ steps.meta.outputs.owner }}/voxhorizon-web:${{ github.sha }}
           build-args: |
             NEXT_PUBLIC_SUPABASE_URL=${{ secrets.NEXT_PUBLIC_SUPABASE_URL }}
             NEXT_PUBLIC_SUPABASE_ANON_KEY=${{ secrets.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
@@ -199,8 +215,11 @@ jobs:
             # are missing or the table is absent we FAIL CLOSED: a deploy that cannot
             # verify the schema must not silently ship.
             set -a; . /opt/voxhorizon/.env; set +a
-            REQUIRED_MIGRATION="0033_video_render_tasks"
-            REQUIRED_SENTINEL_TABLE="video_render_tasks"
+            # Sentinel = the `creative` base from 0034 (the foundation keystone the
+            # whole gate/rollup/FK system depends on). Keep in lockstep with
+            # worker/src/services/schema_guard.py SENTINEL_TABLE.
+            REQUIRED_MIGRATION="0034_creative_identity_base"
+            REQUIRED_SENTINEL_TABLE="creative"
             if [ -z "${SUPABASE_URL:-}" ] || [ -z "${SUPABASE_SECRET_KEY:-}" ]; then
               echo "migration gate: SUPABASE_URL / SUPABASE_SECRET_KEY not set in"
               echo "/opt/voxhorizon/.env; cannot verify schema floor. Failing closed."

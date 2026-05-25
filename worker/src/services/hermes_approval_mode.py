@@ -4,7 +4,7 @@ The dashboard Settings tab lets the operator flip the plugin's behavior
 between three modes:
 
   * ``ASK``          — long-poll the dashboard for an operator decision
-  * ``AUTO_APPROVE`` — allow without asking (TTL-bounded, 1h .. 24h)
+  * ``AUTO_APPROVE`` — allow without asking (TTL-bounded, 60s .. 1h)
   * ``HALT``         — block all approval-needing tools
 
 State lives in the singleton ``approval_mode`` row in Supabase. Every
@@ -48,10 +48,13 @@ VALID_MODES: frozenset[str] = frozenset({"ASK", "AUTO_APPROVE", "HALT"})
 
 #: Min/max TTL the operator can pick for AUTO_APPROVE, in seconds. The
 #: lower bound (60s) prevents accidental no-op toggles; the upper bound
-#: (24h) matches the spec — anything beyond a day should be a config
-#: change, not a runtime toggle.
+#: (1h) is enforced in lockstep with the DB CHECK in migration 0044 and the
+#: approvals plugin's read-time clamp (E6.5). A longer auto-allow window is an
+#: unbounded spend / launch surface, so anything beyond an hour is a config
+#: change, not a runtime toggle. Requesting a larger TTL is rejected here
+#: rather than failing later on the 0044 constraint.
 MIN_TTL_SECONDS = 60
-MAX_TTL_SECONDS = 86_400
+MAX_TTL_SECONDS = 3_600
 
 #: Singleton row id; the table CHECK constraint rejects any other value.
 SINGLETON_ID = "singleton"
