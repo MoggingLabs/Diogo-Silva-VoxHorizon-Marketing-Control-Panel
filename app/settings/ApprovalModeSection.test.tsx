@@ -239,7 +239,7 @@ describe("ApprovalModeSection", () => {
     });
     globalThis.fetch = vi.fn(() => neverResolve) as unknown as typeof fetch;
     render(<ApprovalModeSection />);
-    expect(screen.getByText("Loading…")).toBeInTheDocument();
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
   });
 
   it("submits an ASK PUT with a note", async () => {
@@ -302,10 +302,10 @@ describe("ApprovalModeSection", () => {
     expect(screen.getByTestId("mode-save-error").textContent).toContain("offline");
   });
 
-  it("renders 'Loading…' current line when state is null", () => {
+  it("renders 'Loading...' current line when state is null", () => {
     hookState.state = null;
     render(<ApprovalModeSection />);
-    expect(screen.getByTestId("mode-current-line").textContent).toBe("Loading…");
+    expect(screen.getByTestId("mode-current-line").textContent).toBe("Loading...");
   });
 
   it("syncs form selection with the live state on first render", () => {
