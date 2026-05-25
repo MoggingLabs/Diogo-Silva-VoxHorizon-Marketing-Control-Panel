@@ -44,6 +44,28 @@ export const DecisionInput = z.object({
 export type DecisionInputT = z.infer<typeof DecisionInput>;
 
 /**
+ * Editable creative metadata for `PATCH /api/creatives/:id` (M4 / #594).
+ *
+ * Only the operator-safe descriptive fields are editable here — never
+ * `status` (which flows through the decision route), never the worker-owned
+ * render paths / verification flags, never the FK lineage (`brief_id`,
+ * `pipeline_id`). Every key is optional; at least one must be present (the
+ * route rejects an empty patch with 400 "nothing to update").
+ *
+ * `concept` / `offer_text` / `asset_name` accept an empty string or null to
+ * clear the field; `ratio` is constrained to the `ratio` enum.
+ */
+export const UpdateCreativeInput = z
+  .object({
+    concept: z.string().max(2000).nullable(),
+    offer_text: z.string().max(2000).nullable(),
+    asset_name: z.string().max(500).nullable(),
+    ratio: Ratio.nullable(),
+  })
+  .partial();
+export type UpdateCreativeInputT = z.infer<typeof UpdateCreativeInput>;
+
+/**
  * Status state machine. `draft` is the only origin state that accepts the
  * operator's approve/reject decision. Once decided, the creative is
  * terminal as far as the review UI is concerned — `live` / `killed` are

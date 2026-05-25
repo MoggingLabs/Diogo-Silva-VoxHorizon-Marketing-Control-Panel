@@ -67,6 +67,24 @@ export const VideoDecisionInput = z.object({
 });
 export type VideoDecisionInputT = z.infer<typeof VideoDecisionInput>;
 
+/**
+ * Editable video-creative metadata for `PATCH /api/creatives/video/:id`
+ * (M4 / #594).
+ *
+ * Mirrors the image side: only the operator-safe descriptive field
+ * (`asset_name`) is editable here. The pipeline status flows through the
+ * decision route, and every worker-owned column (render paths, b-roll,
+ * duration, cost, gen model) stays read-only — those are produced by the
+ * video worker walking the gated pipeline, never hand-edited. At least one
+ * key must be present (the route rejects an empty patch).
+ */
+export const UpdateVideoCreativeInput = z
+  .object({
+    asset_name: z.string().max(500).nullable(),
+  })
+  .partial();
+export type UpdateVideoCreativeInputT = z.infer<typeof UpdateVideoCreativeInput>;
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------

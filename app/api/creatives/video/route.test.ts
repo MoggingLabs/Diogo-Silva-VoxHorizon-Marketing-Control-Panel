@@ -5,12 +5,23 @@ const results: Record<string, { data: unknown; error: { message: string } | null
   video_briefs: { data: [], error: null },
 };
 
+const lastCalls: { is?: [string, unknown]; not?: [string, string, unknown] } = {};
+
 function chain(table: string) {
   const c: Record<string, unknown> = {};
   c.select = vi.fn(() => c);
   c.order = vi.fn(() => c);
+  c.limit = vi.fn(() => c);
   c.eq = vi.fn(() => c);
   c.in = vi.fn(() => c);
+  c.is = vi.fn((col: string, val: unknown) => {
+    lastCalls.is = [col, val];
+    return c;
+  });
+  c.not = vi.fn((col: string, op: string, val: unknown) => {
+    lastCalls.not = [col, op, val];
+    return c;
+  });
   (c as { then: unknown }).then = (onF: (v: (typeof results)[string]) => unknown) =>
     Promise.resolve(results[table]!).then(onF);
   return c;
@@ -29,6 +40,8 @@ function req(qs: string): Request {
 beforeEach(() => {
   results.video_creatives = { data: [], error: null };
   results.video_briefs = { data: [], error: null };
+  delete lastCalls.is;
+  delete lastCalls.not;
 });
 
 afterEach(() => {
@@ -95,8 +108,25 @@ describe("GET /api/creatives/video", () => {
     expect(await res.json()).toEqual({ creatives: [{ id: "v1" }], outlines: {} });
   });
 
-  it("400s when neither brief_id nor ids is provided", async () => {
+  it("lists the whole active set when neither brief_id nor ids is provided", async () => {
+    results.video_creatives = { data: [{ id: "v1" }, { id: "v2" }], error: null };
     const res = await GET(req("") as never);
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ creatives: [{ id: "v1" }, { id: "v2" }] });
+    expect(lastCalls.is).toEqual(["deleted_at", null]);
+  });
+
+  it("lists the archived set with ?archived=true", async () => {
+    results.video_creatives = { data: [{ id: "v9" }], error: null };
+    const res = await GET(req("?archived=true") as never);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ creatives: [{ id: "v9" }] });
+    expect(lastCalls.not).toEqual(["deleted_at", "is", null]);
+  });
+
+  it("500s on a whole-set list query error", async () => {
+    results.video_creatives = { data: null, error: { message: "boom" } };
+    const res = await GET(req("") as never);
+    expect(res.status).toBe(500);
   });
 });
