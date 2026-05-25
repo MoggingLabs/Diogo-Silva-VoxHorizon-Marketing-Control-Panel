@@ -220,6 +220,42 @@ export async function cleanupPipelines(clientId: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Pipeline seeders
+// ---------------------------------------------------------------------------
+
+export type SeedPipelineOpts = {
+  format_choice?: "image" | "video" | "both";
+  status?: "configuration" | "ideation" | "review" | "generation" | "done" | "cancelled";
+  /** Stamp `deleted_at` so the row seeds already archived. */
+  deleted_at?: string | null;
+};
+
+/**
+ * Inserts a single `pipelines` row directly via the admin client, returning
+ * its uuid. Defaults keep the run in `configuration` (the entry stage) and
+ * active (`deleted_at` null). Pass `deleted_at` to seed an already-archived
+ * row. The `pipelines` row is the orchestration root; the archive e2e seeds
+ * one, archives it, then restores it.
+ */
+export async function seedPipeline(clientId: string, opts: SeedPipelineOpts = {}): Promise<string> {
+  const admin = adminClient();
+  const { data, error } = await admin
+    .from("pipelines")
+    .insert({
+      client_id: clientId,
+      format_choice: opts.format_choice ?? "image",
+      status: opts.status ?? "configuration",
+      deleted_at: opts.deleted_at ?? null,
+    })
+    .select("id")
+    .single();
+  if (error || !data) {
+    throw new Error(`seedPipeline failed: ${error?.message ?? "no row returned"}`);
+  }
+  return data.id;
+}
+
+// ---------------------------------------------------------------------------
 // Brief seeders
 // ---------------------------------------------------------------------------
 

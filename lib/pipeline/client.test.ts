@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  archivePipeline,
   cancelPipeline,
   createLaunchPackage,
   createPipeline,
   getPipeline,
   kickoffOperatorPipeline,
   listPipelines,
+  restorePipeline,
   submitReviewDecision,
   updatePicks,
 } from "./client";
@@ -116,6 +118,20 @@ describe("listPipelines", () => {
     spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
     await listPipelines();
     expect(spy.mock.calls[0]?.[0]).toBe("http://localhost:3000/api/pipelines");
+  });
+
+  it("encodes the archived flag when requested", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
+    await listPipelines({ archived: true });
+    expect(spy.mock.calls[0]?.[0]).toContain("archived=true");
+  });
+
+  it("omits the archived flag when false", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
+    await listPipelines({ archived: false });
+    expect(spy.mock.calls[0]?.[0]).not.toContain("archived");
   });
 
   it("throws on non-2xx", async () => {
@@ -229,6 +245,44 @@ describe("cancelPipeline", () => {
     const spy = spyOnFetch();
     spy.mockResolvedValueOnce(new Response("", { status: 422 }));
     await expect(cancelPipeline("p1")).rejects.toThrow(/422/);
+  });
+});
+
+describe("archivePipeline", () => {
+  it("DELETEs the pipeline and returns the archived row", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(
+      jsonResponse({ pipeline: { id: "p1", deleted_at: "2026-05-25T00:00:00Z" } }),
+    );
+    const out = await archivePipeline("p1");
+    expect(out.pipeline.deleted_at).toBe("2026-05-25T00:00:00Z");
+    const [url, init] = spy.mock.calls[0] as [string, RequestInit];
+    expect(url.endsWith("/api/pipelines/p1")).toBe(true);
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("throws on a 409 double-archive conflict", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(new Response("already_archived", { status: 409 }));
+    await expect(archivePipeline("p1")).rejects.toThrow(/409/);
+  });
+});
+
+describe("restorePipeline", () => {
+  it("POSTs to /restore and returns the restored row", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ pipeline: { id: "p1", deleted_at: null } }));
+    const out = await restorePipeline("p1");
+    expect(out.pipeline.deleted_at).toBeNull();
+    const [url, init] = spy.mock.calls[0] as [string, RequestInit];
+    expect(url.endsWith("/p1/restore")).toBe(true);
+    expect(init.method).toBe("POST");
+  });
+
+  it("throws on a 409 not-archived conflict", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(new Response("not_archived", { status: 409 }));
+    await expect(restorePipeline("p1")).rejects.toThrow(/409/);
   });
 });
 

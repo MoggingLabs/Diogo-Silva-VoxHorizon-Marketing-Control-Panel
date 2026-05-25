@@ -27,7 +27,7 @@ export type StackedBarProps = {
  * also do the job, but it's a heavy dep for one bar — we stay dependency-free
  * and let each segment width track its share of the total via `flexGrow`.
  *
- * Empty state: when every segment is 0 we still render the rail (zinc-100) so
+ * Empty state: when every segment is 0 we still render the rail (muted) so
  * the layout never collapses; we just skip the segment fills.
  */
 export function StackedBar({ segments, title, showLegend = true }: StackedBarProps) {
@@ -52,9 +52,9 @@ export function StackedBar({ segments, title, showLegend = true }: StackedBarPro
                 .filter((s) => s.value > 0)
                 .map((s) => `${s.label} ${s.value}`)
                 .join(", ")}`
-            : "Funnel breakdown — no data yet"
+            : "Funnel breakdown - no data yet"
         }
-        className="flex h-3 w-full overflow-hidden rounded-full bg-zinc-100"
+        className="flex h-3 w-full overflow-hidden rounded-full bg-muted"
       >
         {hasData
           ? segments.map((segment) => {

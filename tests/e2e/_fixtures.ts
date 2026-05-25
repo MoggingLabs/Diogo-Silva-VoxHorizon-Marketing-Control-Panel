@@ -11,11 +11,13 @@ import {
   seedApprovedBrief,
   seedCampaignPerf,
   seedCreative,
+  seedPipeline,
   seedPushedLaunch,
   seedVideoCreative,
   type BriefFormat,
   type SeedCampaignPerfRow,
   type SeedCreativeOpts,
+  type SeedPipelineOpts,
   type SeedVideoCreativeOpts,
 } from "./_seed";
 
@@ -147,10 +149,17 @@ export {
   seedApprovedBrief,
   seedCampaignPerf,
   seedCreative,
+  seedPipeline,
   seedPushedLaunch,
   seedVideoCreative,
 };
-export type { BriefFormat, SeedCampaignPerfRow, SeedCreativeOpts, SeedVideoCreativeOpts };
+export type {
+  BriefFormat,
+  SeedCampaignPerfRow,
+  SeedCreativeOpts,
+  SeedPipelineOpts,
+  SeedVideoCreativeOpts,
+};
 
 /**
  * Aggregate teardown: wipes everything the Wave 5 specs may have seeded for

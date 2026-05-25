@@ -23,17 +23,24 @@ const STAGE_GAP =
 const NODE_MIN_HEIGHT = 4;
 const NODE_MAX_HEIGHT = HEIGHT - PADDING_Y * 2;
 
+/**
+ * Node fills, expressed against the design-system semantic tokens so the
+ * diagram tracks the active theme (the SVG inherits the same HSL variables as
+ * the rest of the app). The funnel walks neutral -> brand -> info -> warning ->
+ * success as it moves toward "sold".
+ */
 const STAGE_COLORS: Record<FunnelStageId, string> = {
-  impressions: "#71717a", // zinc-500
-  clicks: "#6366f1", // indigo-500
-  leads: "#0ea5e9", // sky-500
-  booked: "#f59e0b", // amber-500
-  showed: "#10b981", // emerald-500
-  sold: "#059669", // emerald-600
+  impressions: "hsl(var(--muted-foreground))",
+  clicks: "hsl(var(--primary))",
+  leads: "hsl(var(--info))",
+  booked: "hsl(var(--warning))",
+  showed: "hsl(var(--success) / 0.7)",
+  sold: "hsl(var(--success))",
 };
 
-// Each flow's fill — slight transparency so overlaps read as layered ribbons.
-const FLOW_COLOR = "rgba(99, 102, 241, 0.18)"; // indigo
+// Each flow's fill - the brand token at low alpha so overlaps read as layered
+// ribbons in either theme.
+const FLOW_COLOR = "hsl(var(--primary) / 0.18)";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -226,7 +233,7 @@ export function FunnelSankey({ totals }: FunnelSankeyProps) {
         {!hasAnyData ? (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <div className="rounded-md border border-border bg-card/95 px-4 py-2 text-sm text-muted-foreground shadow-sm">
-              No funnel data yet — waiting for the worker pull.
+              No funnel data yet - waiting for the worker pull.
             </div>
           </div>
         ) : null}

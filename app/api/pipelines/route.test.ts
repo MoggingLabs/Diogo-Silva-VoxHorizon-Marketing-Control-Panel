@@ -291,6 +291,42 @@ describe("GET /api/pipelines", () => {
     expect(selectChain.limit).toHaveBeenCalledWith(10);
   });
 
+  it("excludes archived rows by default (deleted_at is null)", async () => {
+    currentSupabase = mockSupabaseClient({
+      pipelines: { select: { data: [], error: null } },
+    });
+    const res = await GET(makeRequest("http://localhost/api/pipelines"));
+    expect(res.status).toBe(200);
+
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    if (!selectChain) throw new Error("select() returned no chain");
+    expect(selectChain.is).toHaveBeenCalledWith("deleted_at", null);
+    expect(selectChain.not).not.toHaveBeenCalled();
+  });
+
+  it("shows only archived rows with ?archived=true (deleted_at is not null)", async () => {
+    currentSupabase = mockSupabaseClient({
+      pipelines: { select: { data: [], error: null } },
+    });
+    const res = await GET(makeRequest("http://localhost/api/pipelines?archived=true"));
+    expect(res.status).toBe(200);
+
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    if (!selectChain) throw new Error("select() returned no chain");
+    expect(selectChain.not).toHaveBeenCalledWith("deleted_at", "is", null);
+    expect(selectChain.is).not.toHaveBeenCalledWith("deleted_at", null);
+  });
+
   it("returns 422 on an invalid status enum value", async () => {
     const res = await GET(makeRequest("http://localhost/api/pipelines?status=not-a-status"));
     expect(res.status).toBe(422);

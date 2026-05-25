@@ -26,6 +26,22 @@ vi.mock("@/hooks/useRealtimeStream", () => ({
     realtime.register(listeners as Parameters<typeof realtime.register>[0]),
 }));
 
+// The archive / restore row actions + the lazy archived-list fetch go through
+// the pipeline fetch client. Mock the whole module so the component never hits
+// the network in jsdom.
+const listPipelinesMock = vi.fn();
+const archivePipelineMock = vi.fn();
+const restorePipelineMock = vi.fn();
+vi.mock("@/lib/pipeline/client", () => ({
+  listPipelines: (...args: unknown[]) => listPipelinesMock(...args),
+  archivePipeline: (...args: unknown[]) => archivePipelineMock(...args),
+  restorePipeline: (...args: unknown[]) => restorePipelineMock(...args),
+}));
+
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
+
 import { PipelineList } from "./PipelineList";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -45,6 +61,7 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
     created_at: "2026-05-17T10:00:00Z",
     updated_at: "2026-05-17T11:00:00Z",
     advanced_at: null,
+    deleted_at: null,
     ...over,
   };
 }
@@ -52,6 +69,11 @@ function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
 beforeEach(() => {
   routerRefresh.mockReset();
   realtime.reset();
+  listPipelinesMock.mockReset();
+  archivePipelineMock.mockReset();
+  restorePipelineMock.mockReset();
+  // Default: the lazy archived fetch resolves to an empty set.
+  listPipelinesMock.mockResolvedValue({ pipelines: [], next_cursor: null });
 });
 
 afterEach(() => {
@@ -208,5 +230,95 @@ describe("PipelineList", () => {
       />,
     );
     expect(screen.getAllByText(/Image \+ Video/).length).toBeGreaterThan(0);
+  });
+
+  // ----------------------------------------------------------------------
+  // Archive / restore (#609)
+  // ----------------------------------------------------------------------
+
+  it("exposes an Archived status chip", () => {
+    render(<PipelineList initialPipelines={[makePipeline()]} clientNames={{ c1: "x" }} />);
+    expect(screen.getByRole("button", { name: "Archived", pressed: false })).toBeInTheDocument();
+  });
+
+  it("fetches the archived set on demand and lists those rows under the Archived filter", async () => {
+    const user = userEvent.setup();
+    listPipelinesMock.mockResolvedValue({
+      pipelines: [
+        makePipeline({
+          id: "arch-1",
+          client_id: "c9",
+          deleted_at: "2026-05-20T00:00:00Z",
+        }),
+      ],
+      next_cursor: null,
+    });
+
+    render(
+      <PipelineList
+        initialPipelines={[makePipeline({ id: "p1", client_id: "c1" })]}
+        clientNames={{ c1: "ActiveClient", c9: "ArchivedClient" }}
+      />,
+    );
+
+    // Active row visible up front; archived row not fetched yet.
+    expect(screen.getByText("ActiveClient")).toBeInTheDocument();
+    expect(screen.queryByText("ArchivedClient")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Archived", pressed: false }));
+
+    // The archived view fetched with the archived flag and swapped in its rows.
+    expect(listPipelinesMock).toHaveBeenCalledWith(expect.objectContaining({ archived: true }));
+    expect(await screen.findByText("ArchivedClient")).toBeInTheDocument();
+    // The active-only row is no longer shown (the data set was swapped).
+    expect(screen.queryByText("ActiveClient")).not.toBeInTheDocument();
+    // Archived rows offer a Restore action.
+    expect(screen.getByRole("button", { name: /restore pipeline/i })).toBeInTheDocument();
+  });
+
+  it("archives a row via the row action menu", async () => {
+    const user = userEvent.setup();
+    archivePipelineMock.mockResolvedValue({ pipeline: makePipeline({ id: "p1" }) });
+
+    render(
+      <PipelineList
+        initialPipelines={[makePipeline({ id: "p1", client_id: "c1" })]}
+        clientNames={{ c1: "Acme" }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /pipeline actions/i }));
+    await user.click(screen.getByRole("menuitem", { name: /archive/i }));
+
+    // The ConfirmArchive dialog opens; confirm it.
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+
+    expect(archivePipelineMock).toHaveBeenCalledWith("p1");
+  });
+
+  it("restores an archived row", async () => {
+    const user = userEvent.setup();
+    listPipelinesMock.mockResolvedValue({
+      pipelines: [
+        makePipeline({ id: "arch-1", client_id: "c9", deleted_at: "2026-05-20T00:00:00Z" }),
+      ],
+      next_cursor: null,
+    });
+    restorePipelineMock.mockResolvedValue({ pipeline: makePipeline({ id: "arch-1" }) });
+
+    render(
+      <PipelineList
+        initialPipelines={[makePipeline({ id: "p1", client_id: "c1" })]}
+        clientNames={{ c1: "ActiveClient", c9: "ArchivedClient" }}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Archived", pressed: false }));
+    expect(await screen.findByText("ArchivedClient")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /restore pipeline/i }));
+    expect(restorePipelineMock).toHaveBeenCalledWith("arch-1");
   });
 });

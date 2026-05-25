@@ -1822,6 +1822,7 @@ export type Database = {
           cost_actual: Json | null
           cost_estimate: Json | null
           created_at: string
+          deleted_at: string | null
           format_choice: Database["public"]["Enums"]["pipeline_format_enum"]
           id: string
           image_brief_id: string | null
@@ -1839,6 +1840,7 @@ export type Database = {
           cost_actual?: Json | null
           cost_estimate?: Json | null
           created_at?: string
+          deleted_at?: string | null
           format_choice: Database["public"]["Enums"]["pipeline_format_enum"]
           id?: string
           image_brief_id?: string | null
@@ -1856,6 +1858,7 @@ export type Database = {
           cost_actual?: Json | null
           cost_estimate?: Json | null
           created_at?: string
+          deleted_at?: string | null
           format_choice?: Database["public"]["Enums"]["pipeline_format_enum"]
           id?: string
           image_brief_id?: string | null
