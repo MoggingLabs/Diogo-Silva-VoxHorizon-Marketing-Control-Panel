@@ -1,20 +1,60 @@
-import { test, expect, getTestAdminClient, TEST_CLIENT_NAME } from "./_fixtures";
-import { mockWorkerGeneration, mockWorkerIdeation } from "./_mocks/sse-harness";
+import type { Page } from "@playwright/test";
+
+import { test, expect, getTestAdminClient } from "./_fixtures";
+import { mockWorkerIdeation } from "./_mocks/sse-harness";
+import {
+  CLEAN_VIDEO_SCRIPT_OUTLINE,
+  assertWorkerHealthy,
+  dropVideoIdeationDrafts,
+  emitGenerationClosure,
+  qaVideoItems,
+  readPipelineStatus,
+  readStageAdvancedOrder,
+  readStageStates,
+  readVideoCopyVariants,
+  seedFinalVideoCreatives,
+  waitForStatus,
+  workerPost,
+} from "./_mocks/workflow-driver";
 
 /**
- * Pipeline video-only happy path (PF-G-3 / #204).
+ * Full gated VIDEO workflow e2e (Phase 2 / PR2).
  *
- * Mirrors `pipeline-image.spec.ts` for the video track. Configuration uses
- * the video brief form (hook, segments, voice_id); ideation seeds video
- * drafts; generation drives six substages per pick (script, voiceover,
- * broll_search, broll_pick, compose, caption) and auto-advances to Done
- * on the last `task_done` via the DB trigger.
+ * The video twin of `pipeline-workflow.spec.ts` (image). It drives ONE
+ * video-track pipeline through ALL 12 stages to `done` against the REAL worker
+ * verdicts - the QA + spec gates probe a real MP4 in Supabase Storage with
+ * ffprobe, the compliance gate scans the real spoken script, and no verdict is
+ * ever faked. The drive executors mirror the image spec exactly:
  *
- * The cancel-from-Configuration spec from Wave 13 stays as a separate
- * `test()` so we keep coverage of both paths.
+ *   configuration→ideation        advance route (seeded video_payload draft)
+ *   ideation→review               UI Continue (picks a video concept)
+ *   review→generation             UI Approve
+ *   generation→creative_qa        AUTO (migration 0046 B1 video QA seed trigger)
+ *   creative_qa→compliance_review operator qa_run (surface=video) + advance
+ *   compliance_review→copy (HARD) operator compliance_run (surface=video, clean
+ *                                 script → real PASS) + advance
+ *   copy→spec_validation          operator copy (video_copy_variants) + manager
+ *                                 copy/decision approve (>=3) + advance
+ *   spec_validation→variant_plan  operator spec_result (reels; ffprobe spec
+ *                                 backstop must PASS the MP4) + advance
+ *   variant_plan→finalize_assets  manager variant-plan/decision approve
+ *   finalize_assets→launch_handoff operator finalize_result + advance
+ *   launch_handoff→monitor (HARD) operator launch (re-checks preconditions
+ *                                 server-side) + manager launch/decision
+ *   monitor→done                  operator monitor_result + manager
+ *                                 monitor/decision (kill)
+ *
+ * The two-pass compliance re-arm is IMAGE-ONLY (the migration 0025 re-arm
+ * trigger fires on `copy_variants`, not `video_copy_variants`), so authoring
+ * video copy does NOT void the compliance PASS - the launch gate sees it stay
+ * clear without a re-run. We assert that invariant directly.
+ *
+ * The pre-existing lightweight video UI tests (cancel-from-config,
+ * add/remove-segment) are retained in their own `test()`s so coverage of those
+ * paths is unchanged.
  */
 
-test.describe("pipeline — video format", () => {
+test.describe("pipeline - video format", () => {
   test("create → switch to video → cancel", async ({ page, clientId }) => {
     void clientId;
 
@@ -24,15 +64,9 @@ test.describe("pipeline — video format", () => {
     // Configuration stage renders by default.
     await expect(page.getByText("Configuration", { exact: true }).first()).toBeVisible();
 
-    // Switch the format radio to "video". This fires an autosave PATCH —
+    // Switch the format radio to "video". This fires an autosave PATCH -
     // the new Video brief fieldset takes the place of the image one.
     await page.getByLabel("Video", { exact: true }).click();
-
-    // Pick the test client.
-    const clientTrigger = page.locator("#stage-config-client");
-    await expect(clientTrigger).toBeEnabled();
-    await clientTrigger.click();
-    await page.getByRole("option", { name: new RegExp(TEST_CLIENT_NAME, "i") }).click();
 
     // Video brief fieldset is mounted; the hook + segments + voice fields
     // are required for the Continue gate to clear.
@@ -78,111 +112,408 @@ test.describe("pipeline — video format", () => {
     await expect(page.getByLabel(/^topic$/i)).toHaveCount(1);
   });
 
-  test("full happy path: configuration → ideation → review → generation → done", async ({
+  test("drives all 12 stages to done against the real worker MP4 + script verdicts", async ({
     page,
     clientId,
   }) => {
-    void clientId;
+    const admin = getTestAdminClient();
+    await assertWorkerHealthy();
 
-    // -----------------------------------------------------------------
-    // Step 1. Create + switch to video.
-    // -----------------------------------------------------------------
+    // ===================================================================
+    // configuration → ideation
+    // Create the pipeline via the real kickoff route, flip it to the video
+    // track + seed a valid VideoBriefInput draft (the advance route splices in
+    // the pipeline's client_id and zod-validates the payload), then drive the
+    // advance route - mirroring how the image spec seeds image_payload and
+    // drives advance directly (the multi-field config form autosave is a UI
+    // concern; the no-stall-relevant logic is the advance route).
+    // ===================================================================
     await page.goto("/pipeline/new");
     await expect(page).toHaveURL(/\/pipeline\/[a-f0-9-]{36}$/);
-    const url = page.url();
-    const pipelineId = url.match(/\/pipeline\/([a-f0-9-]{36})$/)?.[1];
-    if (!pipelineId) throw new Error(`could not extract pipeline id from ${url}`);
-
-    await page.getByLabel("Video", { exact: true }).click();
-
-    // -----------------------------------------------------------------
-    // Step 2. Pick client + fill video brief.
-    // -----------------------------------------------------------------
-    const clientTrigger = page.locator("#stage-config-client");
-    await expect(clientTrigger).toBeEnabled();
-    await clientTrigger.click();
-    await page.getByRole("option", { name: new RegExp(TEST_CLIENT_NAME, "i") }).click();
-
-    await page.getByLabel(/^hook$/i).fill("Watch what happens in 60 seconds.");
-    await page.getByLabel(/voice id/i).fill("21m00Tcm4TlvDq8ikWAM");
-    // Fill the one default segment so the canonical schema passes.
-    await page.getByLabel(/^topic$/i).fill("Drone overview");
-    // VideoBriefInput refines `sum(segments.duration_s) === target_duration_s`
-    // — the default form has one segment with duration_s=15 but target=30,
-    // so flip the target down to 15 to clear the gate.
-    await page.getByLabel(/target duration/i).fill("15");
-
-    // Wait for autosave to land.
-    await expect(page.getByText("Saved", { exact: true })).toBeVisible({ timeout: 15_000 });
-
-    // -----------------------------------------------------------------
-    // Step 3. Advance to Ideation.
-    // -----------------------------------------------------------------
-    const continueBtn = page.getByRole("button", { name: /continue to ideation/i });
-    await expect(continueBtn).toBeEnabled();
-    await continueBtn.click();
-    await expect(page.getByText("Ideation", { exact: true }).first()).toBeVisible({
+    const pipelineId = page.url().match(/\/pipeline\/([a-f0-9-]{36})$/)?.[1];
+    if (!pipelineId) throw new Error(`could not extract pipeline id from ${page.url()}`);
+    await expect(page.getByText("Configuration", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
 
-    // -----------------------------------------------------------------
-    // Step 4. Seed video ideation drafts (3 is the worker's default).
-    // -----------------------------------------------------------------
+    const cfgSeed = await admin
+      .from("pipelines")
+      .update({
+        client_id: clientId,
+        format_choice: "video",
+        config_draft: {
+          // VideoBriefInput: sum(segments.duration_s) ≈ target_duration_s.
+          // CLEAN_VIDEO_SCRIPT_OUTLINE has one 15s segment, so target = 15.
+          video_payload: {
+            script_outline: CLEAN_VIDEO_SCRIPT_OUTLINE,
+            target_duration_s: 15,
+            voice_id: "21m00Tcm4TlvDq8ikWAM",
+            dimensions: "9x16",
+            broll_selection_mode: "review_each",
+          },
+        } as never,
+      })
+      .eq("id", pipelineId);
+    expect(cfgSeed.error, JSON.stringify(cfgSeed.error)).toBeNull();
+
+    await expectAdvance(pipelineId, "ideation");
+
+    // Resolve the pipeline's video brief id (stamped at configure→ideation).
+    const { data: pipeRow } = await admin
+      .from("pipelines")
+      .select("video_brief_id, format_choice")
+      .eq("id", pipelineId)
+      .maybeSingle();
+    const videoBriefId = pipeRow?.video_brief_id;
+    expect(pipeRow?.format_choice).toBe("video");
+    if (!videoBriefId) throw new Error("pipeline has no video_brief_id after configure→ideation");
+
+    // ===================================================================
+    // ideation → review (UI): seed video variants, pick one, continue
+    // ===================================================================
     const seeded = await mockWorkerIdeation(page, { pipelineId, n: 3 });
-    expect(seeded.video).toHaveLength(3);
-
+    expect(seeded.video.length).toBe(3);
+    // config→ideation was driven via the API above, so the browser still shows
+    // the config view - reload to render the ideation grid over the seeded rows.
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText(/Picked:\s*0\s*of\s*3/)).toBeVisible({ timeout: 15_000 });
-
-    // -----------------------------------------------------------------
-    // Step 5. Pick the first video variant.
-    // -----------------------------------------------------------------
-    const pickedIds = [seeded.video[0]!.id];
-    const pickButtons = page.getByRole("checkbox", { name: /pick video concept/i });
-    await pickButtons.nth(0).click();
+    await page
+      .getByRole("checkbox", { name: /pick video concept/i })
+      .nth(0)
+      .click();
     await expect(page.getByText(/Video:\s*1\s*picked/)).toBeVisible();
 
-    // -----------------------------------------------------------------
-    // Step 6. Advance Ideation → Review.
-    // -----------------------------------------------------------------
     await page.getByRole("button", { name: /continue to review/i }).click();
     await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByText(/video picks/i)).toBeVisible();
 
-    // -----------------------------------------------------------------
-    // Step 7. Approve → Generation.
-    // -----------------------------------------------------------------
+    // ===================================================================
+    // review → generation (UI Approve)
+    // ===================================================================
     await page.getByRole("button", { name: /^approve$/i }).click();
     await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
 
-    // -----------------------------------------------------------------
-    // Step 8. Drive the substage chain; trigger auto-advances to Done.
-    // -----------------------------------------------------------------
-    await mockWorkerGeneration(page, {
+    // ===================================================================
+    // generation → creative_qa (AUTO B1 trigger, migration 0046)
+    // Seed ONE finalized captioned video creative carrying the real uploaded
+    // MP4 + a clean spoken script, then emit the generation closure so the
+    // trigger flips to creative_qa AND seeds the video creative_qa gate row.
+    //
+    // First drop the ideation drafts: the video gates scope creatives by
+    // video_brief_id (no pipeline_id / version discriminator), so the
+    // unfinished script_ready drafts would otherwise count as in-scope and hold
+    // every gate. Only the rendered (captioned) concept proceeds to QA.
+    // ===================================================================
+    await dropVideoIdeationDrafts({ briefId: videoBriefId, keepIds: [] });
+    const finals = await seedFinalVideoCreatives({
       pipelineId,
-      picks: { video: pickedIds },
+      briefId: videoBriefId,
+      count: 1,
     });
+    await emitGenerationClosure({ pipelineId, taskCount: 2, outcome: "done" });
+    await waitForStatus(pipelineId, "creative_qa");
+    // The B1 trigger seeded a pending creative_qa gate row per final VIDEO
+    // creative (joined on video_brief_id, status='captioned').
+    const qaStates = (await readStageStates(pipelineId)).filter((s) => s.stage === "creative_qa");
+    expect(qaStates.length).toBe(finals.length);
+    expect(qaStates.map((s) => s.creative_id).sort()).toEqual(finals.map((f) => f.id).sort());
 
-    await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({
-      timeout: 20_000,
+    // Focused UI assertion: the creative_qa stage renders.
+    await page.goto(`/pipeline/${pipelineId}`);
+    await expect(page.getByText(/Creative QA/i).first()).toBeVisible({ timeout: 15_000 });
+
+    // ===================================================================
+    // creative_qa → compliance_review
+    // The worker DOWNLOADS captioned_path from Storage + ffprobes it; the MP4
+    // must pass video_qa_verdict (has video, has audio, duration>0, 9:16). The
+    // verdict is the worker's - we only name the creative.
+    // ===================================================================
+    const creativeId = finals[0]!.id;
+    const qa = await workerPost("/work/pipeline/tools/qa_run", {
+      pipeline_id: pipelineId,
+      items: qaVideoItems(finals),
     });
+    expect(qa.status, JSON.stringify(qa.body)).toBe(200);
+    expect((qa.body as { rollup: string }).rollup).toBe("passed");
+    // Sanity: the worker reported a real video probe, not an image path.
+    const qaResults = (qa.body as { results: Array<{ surface: string; verdict: string }> }).results;
+    expect(qaResults[0]?.surface).toBe("video");
+    expect(qaResults[0]?.verdict).toBe("pass");
 
-    // Verify server-side row reached `done`.
-    const admin = getTestAdminClient();
-    const { data: finalPipeline } = await admin
-      .from("pipelines")
-      .select("status")
-      .eq("id", pipelineId)
-      .maybeSingle();
-    expect(finalPipeline?.status).toBe("done");
+    await expectAdvance(pipelineId, "compliance_review");
 
-    // -----------------------------------------------------------------
-    // Step 9. Done stage — video gallery + launch CTA.
-    // -----------------------------------------------------------------
-    await expect(page.getByText(/video finals/i)).toBeVisible();
-    await expect(page.getByRole("button", { name: /build launch package/i })).toBeVisible();
+    // ===================================================================
+    // compliance_review → copy (HARD gate)
+    // The clean spoken script is scanned by the worker compliance engine; with
+    // no violating claim and no client offer-constraints it adjudicates a real
+    // PASS. (The HARD block/override mechanism is proven format-agnostically by
+    // the image spec; here we drive the faithful clean PASS so the gate clears.)
+    // ===================================================================
+    const comp = await workerPost("/work/pipeline/tools/compliance_run", {
+      pipeline_id: pipelineId,
+      items: [{ creative_id: creativeId, surface: "video" }],
+    });
+    expect(comp.status, JSON.stringify(comp.body)).toBe(200);
+    expect((comp.body as { rollup: string }).rollup).toBe("passed");
+
+    await expectAdvance(pipelineId, "copy");
+
+    // Focused UI assertion: the copy stage renders.
+    await page.goto(`/pipeline/${pipelineId}`);
+    await expect(page.getByText(/^Copy$/).first()).toBeVisible({ timeout: 15_000 });
+
+    // ===================================================================
+    // copy → spec_validation
+    // The copy tool routes a video creative to video_copy_variants. Author 3
+    // variants, then approve each via the format-aware copy/decision route.
+    // ===================================================================
+    for (let i = 1; i <= 3; i += 1) {
+      const c = await workerPost("/work/pipeline/tools/copy", {
+        pipeline_id: pipelineId,
+        variants: [
+          {
+            creative_id: creativeId,
+            platform: "meta",
+            variant_index: i,
+            headline: "Refresh your kitchen this season",
+            primary_text: "Local remodeling pros ready to help you plan a remodel you will enjoy.",
+            description: "Schedule a free planning consult with our team.",
+            cta: "Learn more",
+          },
+        ],
+      });
+      expect(c.status, JSON.stringify(c.body)).toBe(200);
+    }
+
+    // The video copy tool does NOT re-arm compliance (the 0025 re-arm trigger
+    // is on copy_variants only), so the compliance PASS persists. Assert it.
+    const afterCopyStates = await readStageStates(pipelineId);
+    const compAfterCopy = afterCopyStates.find((s) => s.stage === "compliance_review");
+    expect(compAfterCopy?.status).toBe("passed");
+
+    // Manager approves each variant (status → approved) via the shared route.
+    const copyRows = await readVideoCopyVariants([creativeId]);
+    expect(copyRows.length).toBe(3);
+    for (const row of copyRows) {
+      const dec = await managerPost(pipelineId, "copy/decision", {
+        id: row.id,
+        decision: "approved",
+      });
+      expect(dec.status, JSON.stringify(dec.body)).toBe(200);
+    }
+    await expectAdvance(pipelineId, "spec_validation");
+
+    // ===================================================================
+    // spec_validation → variant_plan
+    // spec_result for the video creative at placement `reels` (9:16, 3-90s).
+    // The worker's ffprobe spec backstop DOWNGRADES a non-conformant asset to
+    // fail, so the MP4 must satisfy the reels PlacementSpec; our 9:16 H.264+AAC
+    // ~4s fixture does, so a submitted `pass` stands.
+    // ===================================================================
+    const spec = await workerPost("/work/pipeline/tools/spec_result", {
+      pipeline_id: pipelineId,
+      results: [
+        {
+          creative_id: creativeId,
+          platform: "meta",
+          placement: "reels",
+          ratio: "9x16",
+          status: "pass",
+          checks: { source: "operator" },
+        },
+      ],
+    });
+    expect(spec.status, JSON.stringify(spec.body)).toBe(200);
+    // The backstop ran the real probe and did NOT downgrade (the asset conforms).
+    const specWritten = (
+      spec.body as { results: Array<{ status: string; backstop_downgraded: boolean }> }
+    ).results;
+    expect(specWritten[0]?.status).toBe("pass");
+    expect(specWritten[0]?.backstop_downgraded).toBe(false);
+
+    await expectAdvance(pipelineId, "variant_plan");
+
+    // ===================================================================
+    // variant_plan → finalize_assets (manager variant-plan/decision approve)
+    // ===================================================================
+    const vp = await managerPost(pipelineId, "variant-plan/decision", { decision: "approved" });
+    expect(vp.status, JSON.stringify(vp.body)).toBe(200);
+    expect(await readPipelineStatus(pipelineId)).toBe("finalize_assets");
+
+    // ===================================================================
+    // finalize_assets → launch_handoff (operator finalize_result + advance)
+    // The finalize tool routes the video creative to video_creatives and stamps
+    // finalize_verified; the advance route's finalize gate reads it.
+    // ===================================================================
+    const fin = await workerPost("/work/pipeline/tools/finalize_result", {
+      pipeline_id: pipelineId,
+      results: [
+        {
+          creative_id: creativeId,
+          asset_name: "remodel_kitchen_v1_9x16",
+          drive_folder_id: "fake-drive-folder",
+          file_path_drive: "drive://fake/remodel_kitchen_v1_9x16.mp4",
+          verified: true,
+        },
+      ],
+    });
+    expect(fin.status, JSON.stringify(fin.body)).toBe(200);
+    await expectAdvance(pipelineId, "launch_handoff");
+
+    // ===================================================================
+    // launch_handoff → monitor (HARD gate)
+    // Compliance stayed clear (no video re-arm), spec passed, and 3 approved
+    // video copy variants exist - so the launch preconditions are met. The
+    // operator records the PAUSED-first Meta entities (the recorder re-checks
+    // the same preconditions server-side), then the manager approves.
+    //
+    // The ad_entity row links the (neutral) creative_id but NOT copy_variant_id:
+    // `ad_entity.copy_variant_id` FKs `copy_variants` (image) only (migration
+    // 0035 repointed creative_id to the neutral `creative` base but there is no
+    // neutral copy-variant base), so a video copy variant id would violate the
+    // FK. copy_variant_id is optional on the recorder and the launch
+    // preconditions count approved video copy independently of the ad_entity, so
+    // omitting it records a faithful, valid launch. (See PR notes: a neutral
+    // copy-variant base would let the video ad_entity carry its copy link.)
+    const record = await workerPost("/work/pipeline/tools/launch", {
+      pipeline_id: pipelineId,
+      approved_by: "e2e-manager",
+      entities: [
+        { kind: "campaign", meta_id: "fake-video-campaign-1", meta_payload: { status: "PAUSED" } },
+        {
+          kind: "ad",
+          meta_id: "fake-video-ad-1",
+          parent_meta_id: "fake-video-campaign-1",
+          creative_id: creativeId,
+        },
+      ],
+    });
+    expect(record.status, JSON.stringify(record.body)).toBe(200);
+    expect((record.body as { preconditions: { ok: boolean } }).preconditions.ok).toBe(true);
+
+    const launchOk = await managerPost(pipelineId, "launch/decision", {
+      decision: "approved",
+      confirm_paused_first: true,
+      acknowledge_preconditions: true,
+    });
+    expect(launchOk.status, JSON.stringify(launchOk.body)).toBe(200);
+    expect(await readPipelineStatus(pipelineId)).toBe("monitor");
+
+    // ===================================================================
+    // monitor → done (operator monitor_result + manager monitor/decision kill)
+    // ===================================================================
+    const mon = await workerPost("/work/pipeline/tools/monitor_result", {
+      pipeline_id: pipelineId,
+      results: [
+        {
+          campaign_id: "fake-video-campaign-1",
+          window_days: 7,
+          spend: 95.0,
+          ghl_leads: 3,
+          verdict: "keep",
+          verdict_reason: "CPL within target",
+        },
+      ],
+    });
+    expect(mon.status, JSON.stringify(mon.body)).toBe(200);
+
+    const monDec = await managerPost(pipelineId, "monitor/decision", {
+      decision: "kill",
+      campaign_id: "fake-video-campaign-1",
+      notes: "wrap the video test run",
+    });
+    expect(monDec.status, JSON.stringify(monDec.body)).toBe(200);
+    expect(await readPipelineStatus(pipelineId)).toBe("done");
+
+    // ===================================================================
+    // Every forward stage_advanced fired in DAG order; reaching `done` proves
+    // no stage stalled (every edge had an execution path for video).
+    // ===================================================================
+    const order = await readStageAdvancedOrder(pipelineId);
+    const expectedOrder = [
+      "ideation",
+      "review",
+      "generation",
+      "creative_qa",
+      "compliance_review",
+      "copy",
+      "spec_validation",
+      "variant_plan",
+      "finalize_assets",
+      "launch_handoff",
+      "monitor",
+    ];
+    const seen = order.filter((s) => expectedOrder.includes(s));
+    const firstOccurrence: string[] = [];
+    for (const s of seen) {
+      if (!firstOccurrence.includes(s)) firstOccurrence.push(s);
+    }
+    expect(firstOccurrence).toEqual(expectedOrder);
+
+    expect(await readPipelineStatus(pipelineId)).toBe("done");
+
+    // Focused UI assertion: the Done stage renders. Navigate with
+    // domcontentloaded + a retry: a prior in-flight SPA navigation can abort the
+    // first goto (net::ERR_ABORTED) on this long-running flow.
+    await gotoWithRetry(page, `/pipeline/${pipelineId}`);
+    await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({ timeout: 15_000 });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Helpers (manager API + small reads) - mirror pipeline-workflow.spec.ts.
+// ---------------------------------------------------------------------------
+
+type ApiResult = { status: number; body: unknown };
+
+/** POST to a manager Next API route (server-side gate). Uses the dev server. */
+async function managerPost(pipelineId: string, path: string, body: unknown): Promise<ApiResult> {
+  const base = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
+  const res = await fetch(`${base}/api/pipelines/${pipelineId}/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  let parsed: unknown = null;
+  try {
+    parsed = await res.json();
+  } catch {
+    parsed = null;
+  }
+  return { status: res.status, body: parsed };
+}
+
+/** POST the generic advance route (no body). */
+async function rawAdvance(pipelineId: string): Promise<ApiResult> {
+  return managerPost(pipelineId, "advance", {});
+}
+
+/**
+ * Navigate resiliently for the final Done smoke. Uses `waitUntil: "commit"`
+ * (returns as soon as the response starts, NOT after the Done page finishes
+ * loading its signed-URL media) with a bounded timeout and one retry; the
+ * subsequent `getByText("Done")` assertion does the real waiting. A prior
+ * in-flight SPA navigation can otherwise abort (net::ERR_ABORTED) or the
+ * full-load wait can hang on the media fetch on this long-running flow.
+ */
+async function gotoWithRetry(page: Page, url: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: "commit", timeout: 20_000 });
+      return;
+    } catch (e) {
+      if (attempt === 1) throw e;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
+}
+
+/** Advance and assert the pipeline reached `want`. */
+async function expectAdvance(pipelineId: string, want: string): Promise<void> {
+  const res = await rawAdvance(pipelineId);
+  expect(res.status, `advance to ${want} failed: ${JSON.stringify(res.body)}`).toBe(200);
+  expect(await readPipelineStatus(pipelineId)).toBe(want);
+}

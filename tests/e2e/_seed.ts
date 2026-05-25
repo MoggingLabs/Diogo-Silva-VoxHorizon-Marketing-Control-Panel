@@ -198,6 +198,21 @@ export async function cleanupPipelines(clientId: string): Promise<void> {
     console.warn(`cleanupPipelines (null creatives.pipeline_id): ${nulled.error.message}`);
   }
 
+  // The video parity tables (migration 0031) also gained a `pipeline_id` FK,
+  // but with NO ON DELETE rule: the video copy tool stamps
+  // `video_copy_variants.pipeline_id`, which would block the pipeline delete
+  // below. Null those FKs out first (mirrors the creatives null-out). Best-
+  // effort: a missing column / no-match is fine on an image-only DB.
+  for (const table of ["video_copy_variants", "video_creatives"] as const) {
+    const vNulled = await admin
+      .from(table as never)
+      .update({ pipeline_id: null } as never)
+      .in("pipeline_id" as never, pipelineIds as never);
+    if (vNulled.error) {
+      console.warn(`cleanupPipelines (null ${table}.pipeline_id): ${vNulled.error.message}`);
+    }
+  }
+
   const res = await admin.from("pipelines").delete().in("id", pipelineIds);
   if (res.error) {
     throw new Error(`cleanupPipelines (delete) failed: ${res.error.message}`);

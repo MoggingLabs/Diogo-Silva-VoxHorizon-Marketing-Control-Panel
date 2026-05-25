@@ -1,8 +1,14 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { expect } from "@playwright/test";
 
 import type { Database, Json } from "@/lib/supabase/types.gen";
 
 import { getAdminClient } from "./pipeline-events-seeder";
+
+/** The Supabase Storage bucket the worker reads QA/spec assets from. */
+const STORAGE_BUCKET = "creatives";
 
 /**
  * Operator + generation driver for the no-stall workflow e2e
@@ -228,4 +234,201 @@ export async function readStageStates(
     stage: string;
     status: string;
   }>;
+}
+
+// ===========================================================================
+// VIDEO track helpers (Phase 2 / PR2): the full gated video e2e.
+//
+// The video twin of seedFinalCreatives + qaPassItems. A video pipeline runs
+// the SAME 12 gates as image, but its creatives live in `video_creatives`, its
+// finished asset is a real MP4 in Supabase Storage (the QA + spec gates probe
+// it with ffprobe, no faked verdicts), and its copy lives in
+// `video_copy_variants`. These helpers seed exactly what the real worker would
+// have produced upstream so the operator/manager drive can carry the run.
+// ===========================================================================
+
+/**
+ * A clean, compliance-safe spoken script for a video creative. The HARD
+ * compliance gate scans the concatenated hook + per-segment voiceover_text;
+ * this copy deliberately avoids every deterministic spoken-claim pattern
+ * (personal attributes, superlatives, financing, substantiation/guarantee) so
+ * the worker engine adjudicates a real PASS (the verdict is never faked).
+ */
+export const CLEAN_VIDEO_SCRIPT_OUTLINE = {
+  hook: "Here is how a kitchen remodel comes together from start to finish.",
+  segments: [
+    {
+      topic: "Planning the layout",
+      duration_s: 15,
+      voiceover_text:
+        "Our local team walks the space with you and plans a layout that fits how you cook and gather.",
+    },
+  ],
+  outro: "Book a free planning visit when you are ready.",
+};
+
+/** The repo-relative path the CI step writes the generated MP4 fixture to. */
+export const VIDEO_FIXTURE_REPO_PATH = "tests/e2e/_assets/video-fixture.mp4";
+
+/**
+ * Read the CI-generated MP4 fixture from disk. The `.github/workflows/ci.yml`
+ * e2e job generates a 9:16 H.264 + AAC clip at {@link VIDEO_FIXTURE_REPO_PATH}
+ * with ffmpeg BEFORE running the spec; this resolves it relative to the repo
+ * root (the Playwright runner's cwd) so the spec/uploader can read the bytes.
+ * Throws a precise error when the fixture is missing so a misconfigured CI step
+ * fails loudly rather than uploading an empty object.
+ */
+export function readVideoFixtureBytes(): Buffer {
+  const abs = path.resolve(process.cwd(), VIDEO_FIXTURE_REPO_PATH);
+  try {
+    const bytes = readFileSync(abs);
+    if (bytes.length === 0) {
+      throw new Error(`video fixture at ${abs} is empty`);
+    }
+    return bytes;
+  } catch (e) {
+    throw new Error(
+      `could not read MP4 fixture at ${abs}: the CI e2e job must run the ` +
+        `"Generate video fixture (ffmpeg)" step before the spec. Underlying: ${String(e)}`,
+    );
+  }
+}
+
+/**
+ * Upload the real MP4 fixture to the `creatives` Storage bucket at `objectPath`
+ * (upsert). The worker's qa_run + spec backstop download THIS SAME object via
+ * the creative's `captioned_path`, then ffprobe it, so the bytes must round-
+ * trip through Storage. Returns the object path written.
+ */
+export async function uploadVideoFixture(objectPath: string): Promise<string> {
+  const admin = getAdminClient();
+  const bytes = readVideoFixtureBytes();
+  const { error } = await admin.storage.from(STORAGE_BUCKET).upload(objectPath, bytes, {
+    contentType: "video/mp4",
+    upsert: true,
+  });
+  if (error) {
+    throw new Error(`uploadVideoFixture(${objectPath}) failed: ${error.message}`);
+  }
+  return objectPath;
+}
+
+export type SeededVideoCreative = { id: string; captionedPath: string };
+
+/**
+ * Seed the finalized VIDEO creatives the real worker would have rendered for a
+ * picked concept. Each row is written to `video_creatives` at
+ * `status='captioned'` (the deliverable that enters QA; the B1 trigger seeds
+ * the creative_qa gate for `status='captioned'` rows joined on
+ * `video_brief_id`), with:
+ *   - `captioned_path` -> a unique Storage object holding the uploaded MP4
+ *     fixture (qa_run + the spec backstop download + ffprobe THIS object),
+ *   - a CLEAN `script_outline` (0040) so the HARD compliance gate's spoken-claim
+ *     scan adjudicates a real PASS.
+ *
+ * We deliberately do NOT set `video_creatives.pipeline_id`: the B1 seed trigger
+ * + the review-bundle fetch join via `video_brief_id`, and that FK has no
+ * ON DELETE rule (setting it would block the fixture's pipeline teardown). The
+ * AFTER INSERT mirror trigger (0034) writes the neutral `creative` base row, so
+ * each id is a valid creative_stage_state / spec_check / ad_entity key.
+ */
+export async function seedFinalVideoCreatives(args: {
+  pipelineId: string;
+  briefId: string;
+  count: number;
+  /** A repeatable object-path prefix; each creative gets `<prefix>-<i>.mp4`. */
+  pathPrefix?: string;
+}): Promise<SeededVideoCreative[]> {
+  const admin = getAdminClient();
+  const prefix = args.pathPrefix ?? `${args.briefId}/e2e-captioned`;
+  const out: SeededVideoCreative[] = [];
+  for (let i = 0; i < args.count; i += 1) {
+    const captionedPath = `${prefix}-${i + 1}.mp4`;
+    await uploadVideoFixture(captionedPath);
+    const { data, error } = await admin
+      .from("video_creatives")
+      .insert({
+        brief_id: args.briefId,
+        version: 1,
+        status: "captioned",
+        captioned_path: captionedPath,
+        composed_path: captionedPath,
+        duration_actual_s: 4,
+        script_outline: CLEAN_VIDEO_SCRIPT_OUTLINE as unknown as Json,
+      } as unknown as Database["public"]["Tables"]["video_creatives"]["Insert"])
+      .select("id")
+      .single();
+    if (error || !data) {
+      throw new Error(`seedFinalVideoCreatives failed: ${error?.message ?? "no row"}`);
+    }
+    out.push({ id: data.id, captionedPath });
+  }
+  return out;
+}
+
+/**
+ * Build a QA batch for video creatives. NO `image_b64` (the worker downloads
+ * the captioned MP4 from Storage + ffprobes it); `ratio` rides along but the
+ * worker prefers the brief's declared `dimensions`. The worker computes the
+ * verdict from the probed facts; this only names which creatives to QA.
+ */
+export function qaVideoItems(creatives: SeededVideoCreative[]): Array<Record<string, unknown>> {
+  return creatives.map((c) => ({
+    creative_id: c.id,
+    surface: "video",
+    ratio: "9x16",
+  }));
+}
+
+/**
+ * Soft-delete the ideation-stage video drafts for a brief (every
+ * `video_creatives` row that is NOT one of `keepIds`). The video post-
+ * generation gates + the review bundle scope a video creative by
+ * `brief_id = video_brief_id AND deleted_at IS NULL` (there is no
+ * `pipeline_id`/version discriminator the way image creatives have), so the
+ * unfinished ideation drafts would otherwise count as in-scope creatives with
+ * no gate state and hold every gate. Dropping them mirrors the real flow: only
+ * the picked concept's render proceeds to QA. Returns the count soft-deleted.
+ */
+export async function dropVideoIdeationDrafts(args: {
+  briefId: string;
+  keepIds: string[];
+}): Promise<number> {
+  const admin = getAdminClient();
+  const { data: rows, error: readErr } = await admin
+    .from("video_creatives")
+    .select("id")
+    .eq("brief_id", args.briefId)
+    .is("deleted_at", null);
+  if (readErr) {
+    throw new Error(`dropVideoIdeationDrafts read failed: ${readErr.message}`);
+  }
+  const keep = new Set(args.keepIds);
+  const toDrop = (rows ?? []).map((r) => (r as { id: string }).id).filter((id) => !keep.has(id));
+  if (toDrop.length === 0) return 0;
+  const { error: updErr } = await admin
+    .from("video_creatives")
+    .update({ deleted_at: new Date().toISOString() } as never)
+    .in("id", toDrop);
+  if (updErr) {
+    throw new Error(`dropVideoIdeationDrafts update failed: ${updErr.message}`);
+  }
+  return toDrop.length;
+}
+
+/**
+ * Read the `video_copy_variants` rows for a set of video creatives, ordered by
+ * (creative, variant_index). Mirrors `readCopyVariants` (image): used to fetch
+ * the ids the manager copy/decision route approves.
+ */
+export async function readVideoCopyVariants(
+  creativeIds: string[],
+): Promise<Array<{ id: string; creative_id: string; status: string | null }>> {
+  const admin = getAdminClient();
+  const { data } = await admin
+    .from("video_copy_variants")
+    .select("id, creative_id, status")
+    .in("creative_id", creativeIds)
+    .order("variant_index", { ascending: true });
+  return (data ?? []) as Array<{ id: string; creative_id: string; status: string | null }>;
 }
