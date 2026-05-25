@@ -10,13 +10,20 @@ import {
   Factory,
   LayoutDashboard,
   Menu,
-  Sparkles,
   Rocket,
+  Search,
   Settings,
+  ShieldCheck,
+  Sparkles,
+  Terminal,
+  Users,
 } from "lucide-react";
 
 import { ApprovalModeBadge } from "@/components/approvals/ApprovalModeBadge";
 import { ApprovalQueue } from "@/components/approvals/ApprovalQueue";
+import { Breadcrumbs } from "@/components/shared/Breadcrumbs";
+import { CommandPalette } from "@/components/shared/CommandPalette";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { WorkerStatus } from "@/components/WorkerStatus";
 import {
   Sheet,
@@ -33,109 +40,176 @@ type NavItem = {
   label: string;
   icon: ReactNode;
   /**
-   * Optional secondary route used to highlight the entry as active. The
-   * exact pathname match also wins; this list helps with `/foo/[id]` style
-   * children.
+   * Optional predicate used to highlight the entry as active for `/foo/[id]`
+   * style children. An exact pathname match always wins.
    */
   match?: (pathname: string) => boolean;
 };
 
-// typedRoutes is strict: routes that don't yet have a `page.tsx` (launches,
-// audit, creatives index) aren't in the generated `Route` union. The nav
-// links to them anyway since other Wave 4 agents are landing the pages in
-// parallel — cast through `Route` so this compiles today and lights up
-// naturally tomorrow.
-const NAV: NavItem[] = [
+type NavSection = {
+  /** Section heading shown above the group (uppercase, muted). */
+  title: string;
+  items: NavItem[];
+};
+
+// typedRoutes is strict: routes without a `page.tsx` yet (e.g. /clients,
+// /approvals) aren't in the generated `Route` union. Cast through `Route` so
+// this compiles today; the pages light up as later milestones land them.
+const NAV_SECTIONS: NavSection[] = [
   {
-    href: "/" as Route,
-    label: "Dashboard",
-    icon: <LayoutDashboard className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p === "/",
+    title: "Overview",
+    items: [
+      {
+        href: "/" as Route,
+        label: "Dashboard",
+        icon: <LayoutDashboard className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p === "/",
+      },
+    ],
   },
   {
-    href: "/pipeline" as Route,
-    label: "Pipeline",
-    icon: <Factory className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p === "/pipeline" || p.startsWith("/pipeline/"),
+    title: "Operate",
+    items: [
+      {
+        href: "/pipeline" as Route,
+        label: "Pipeline",
+        icon: <Factory className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p === "/pipeline" || /^\/pipeline(?!\/operator)/.test(p),
+      },
+      {
+        href: "/pipeline/operator" as Route,
+        label: "Operator Console",
+        icon: <Terminal className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/pipeline/operator"),
+      },
+    ],
   },
   {
-    href: "/briefs" as Route,
-    label: "Briefs",
-    icon: <ClipboardList className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p === "/briefs" || p.startsWith("/briefs/"),
+    title: "Library",
+    items: [
+      {
+        href: "/clients" as Route,
+        label: "Clients",
+        icon: <Users className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p === "/clients" || p.startsWith("/clients/"),
+      },
+      {
+        href: "/briefs" as Route,
+        label: "Briefs",
+        icon: <ClipboardList className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p === "/briefs" || p.startsWith("/briefs/"),
+      },
+      {
+        href: "/creatives" as Route,
+        label: "Creatives",
+        icon: <Sparkles className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/creatives"),
+      },
+      {
+        href: "/launches" as Route,
+        label: "Launches",
+        icon: <Rocket className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/launches"),
+      },
+    ],
   },
   {
-    href: "/creatives" as Route,
-    label: "Creatives",
-    icon: <Sparkles className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p.startsWith("/creatives"),
+    title: "Insight",
+    items: [
+      {
+        href: "/audit" as Route,
+        label: "Audit",
+        icon: <Activity className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/audit"),
+      },
+      {
+        href: "/approvals" as Route,
+        label: "Approvals",
+        icon: <ShieldCheck className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/approvals"),
+      },
+    ],
   },
   {
-    href: "/launches" as Route,
-    label: "Launches",
-    icon: <Rocket className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p.startsWith("/launches"),
-  },
-  {
-    href: "/audit" as Route,
-    label: "Audit",
-    icon: <Activity className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p.startsWith("/audit"),
-  },
-  {
-    href: "/settings" as Route,
-    label: "Settings",
-    icon: <Settings className="h-4 w-4" aria-hidden="true" />,
-    match: (p) => p.startsWith("/settings"),
+    title: "System",
+    items: [
+      {
+        href: "/settings" as Route,
+        label: "Settings",
+        icon: <Settings className="h-4 w-4" aria-hidden="true" />,
+        match: (p) => p.startsWith("/settings"),
+      },
+    ],
   },
 ];
 
 function NavList({ pathname, onNavigate }: { pathname: string; onNavigate?: () => void }) {
   return (
-    <nav aria-label="Primary" className="flex flex-col gap-0.5">
-      {NAV.map((item) => {
-        const isActive = item.match ? item.match(pathname) : pathname === item.href;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            onClick={onNavigate}
-            className={cn(
-              "flex min-h-11 items-center gap-2 rounded-md px-3 py-2 text-sm transition-colors md:min-h-0",
-              isActive
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
-            )}
-            aria-current={isActive ? "page" : undefined}
-          >
-            {item.icon}
-            <span>{item.label}</span>
-          </Link>
-        );
-      })}
+    <nav aria-label="Primary" className="flex flex-col gap-4">
+      {NAV_SECTIONS.map((section) => (
+        <div key={section.title} className="flex flex-col gap-0.5">
+          <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground/70">
+            {section.title}
+          </p>
+          {section.items.map((item) => {
+            const isActive = item.match ? item.match(pathname) : pathname === item.href;
+            return (
+              <Link
+                key={item.href}
+                href={item.href}
+                onClick={onNavigate}
+                className={cn(
+                  "flex min-h-11 items-center gap-2.5 rounded-md px-3 py-2 text-sm font-medium transition-colors md:min-h-0",
+                  isActive
+                    ? "bg-primary/12 text-primary"
+                    : "text-muted-foreground hover:bg-accent/10 hover:text-foreground",
+                )}
+                aria-current={isActive ? "page" : undefined}
+              >
+                {item.icon}
+                <span>{item.label}</span>
+              </Link>
+            );
+          })}
+        </div>
+      ))}
     </nav>
   );
 }
 
 /**
- * Top-level layout chrome: header with brand + worker status, sticky left
- * sidebar nav, and a main content slot. Rendered once at the root layout so
- * every page picks it up. Client component because the active route highlight
- * needs `usePathname()` and the worker status polls.
+ * Top-level layout chrome: a header (brand, global-search trigger, theme
+ * toggle, approval + worker chrome), a sticky sectioned left sidebar, a
+ * breadcrumb trail, and the main content slot. Rendered once at the root
+ * layout. Client component because the active-route highlight needs
+ * `usePathname()`, the worker status polls, and the command palette + theme
+ * toggle are interactive.
  *
- * On screens smaller than `md` the sidebar collapses behind a hamburger button
- * that opens a left-sliding `<Sheet>` overlay. Desktop keeps the persistent
- * sidebar layout.
+ * On screens below `md` the sidebar collapses behind a hamburger that opens a
+ * left-sliding `<Sheet>` overlay; desktop keeps the persistent sidebar.
  */
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname() ?? "/";
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
 
-  // Close the mobile drawer whenever the route changes so navigation from
-  // inside the sheet doesn't leave it dangling open over the next page.
+  // Close the mobile drawer on route change so navigation from inside the
+  // sheet doesn't leave it dangling over the next page.
   useEffect(() => {
     setMobileOpen(false);
   }, [pathname]);
+
+  // Global cmd-k / ctrl-k opens the command palette.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPaletteOpen((o) => !o);
+      }
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
 
   return (
     <div className="flex min-h-dvh flex-col bg-background">
@@ -146,7 +220,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <button
                 type="button"
                 aria-label="Open navigation menu"
-                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+                className="inline-flex min-h-11 min-w-11 items-center justify-center rounded-md text-muted-foreground hover:bg-accent/15 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
               >
                 <Menu className="h-5 w-5" aria-hidden="true" />
               </button>
@@ -156,7 +230,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <SheetTitle className="text-base">VoxHorizon</SheetTitle>
                 <SheetDescription className="text-xs">Marketing Control Panel</SheetDescription>
               </SheetHeader>
-              <div className="flex flex-col gap-1 p-3">
+              <div className="flex flex-col gap-1 overflow-y-auto p-3">
                 <NavList pathname={pathname} onNavigate={() => setMobileOpen(false)} />
               </div>
             </SheetContent>
@@ -167,30 +241,49 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <span
               aria-hidden="true"
-              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground"
+              className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-primary text-primary-foreground shadow-sm"
             >
               <span className="text-[11px] font-bold">VH</span>
             </span>
             <span className="hidden truncate sm:inline">VoxHorizon</span>
           </Link>
         </div>
-        <div className="flex items-center gap-2">
+
+        <div className="flex items-center gap-1.5 sm:gap-2">
+          <button
+            type="button"
+            onClick={() => setPaletteOpen(true)}
+            aria-label="Open command palette"
+            className="inline-flex h-9 items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 text-sm text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:px-3"
+          >
+            <Search className="h-4 w-4" aria-hidden="true" />
+            <span className="hidden sm:inline">Search</span>
+            <kbd className="hidden items-center gap-0.5 rounded border border-border bg-background px-1.5 font-mono text-[10px] text-muted-foreground sm:inline-flex">
+              <span className="text-xs">⌘</span>K
+            </kbd>
+          </button>
           <ApprovalQueue />
           <ApprovalModeBadge />
+          <ThemeToggle />
           <WorkerStatus />
         </div>
       </header>
 
       <div className="flex flex-1 flex-col md:flex-row">
-        <aside className="hidden w-56 shrink-0 border-r border-border bg-muted/20 px-3 py-4 md:block">
+        <aside className="hidden w-60 shrink-0 border-r border-border bg-muted/20 px-3 py-5 md:block">
           <NavList pathname={pathname} />
         </aside>
         {/*
-         * Use a plain div here: every page renders its own `<main>` and there
-         * must be exactly one per document for assistive tech.
+         * Plain div: every page renders its own `<main>` and there must be
+         * exactly one per document for assistive tech.
          */}
-        <div className="min-w-0 flex-1">{children}</div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          <Breadcrumbs />
+          <div className="min-w-0 flex-1">{children}</div>
+        </div>
       </div>
+
+      <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
     </div>
   );
 }

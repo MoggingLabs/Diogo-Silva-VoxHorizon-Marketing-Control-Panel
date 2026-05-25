@@ -32,8 +32,17 @@ describe("RootLayout", () => {
     expect(tree.type).toBe("html");
     expect(tree.props.className).toContain("var-inter");
     // Walk into the body → AppShell → child.
-    const body = tree.props.children;
+    // The html now wraps both a <head> (theme bootstrap) and a <body>; find
+    // the body element among the children.
+    const children = Array.isArray(tree.props.children)
+      ? tree.props.children
+      : [tree.props.children];
+    const body = children.find(
+      (c: { type?: unknown }) => c && typeof c === "object" && c.type === "body",
+    );
+    expect(body).toBeDefined();
     expect(body.type).toBe("body");
+    // body -> ThemeProvider -> ... -> AppShell -> child; just assert it nests.
     const shell = body.props.children;
     expect(shell.type).toBeDefined();
   });
