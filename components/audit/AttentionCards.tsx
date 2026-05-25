@@ -43,10 +43,10 @@ function MiniSpark({
   const normalized = Math.min(1, spend / 200); // 200 = full bar
   const colorClass =
     severity === "kill"
-      ? "bg-rose-300/70"
+      ? "bg-destructive/50"
       : severity === "watch"
-        ? "bg-amber-300/70"
-        : "bg-emerald-300/70";
+        ? "bg-warning/50"
+        : "bg-success/50";
 
   return (
     <div className="flex h-8 items-end gap-0.5" aria-hidden="true">

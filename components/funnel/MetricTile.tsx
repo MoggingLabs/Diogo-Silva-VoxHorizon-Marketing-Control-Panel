@@ -35,7 +35,7 @@ export type MetricTileProps = {
 export function MetricTile({
   label,
   value,
-  accentClass = "bg-zinc-400",
+  accentClass = "bg-muted-foreground",
   breakdown,
   delta,
 }: MetricTileProps) {
@@ -68,7 +68,7 @@ export function MetricTile({
       <span className="text-[11px] text-muted-foreground sm:text-xs">
         {typeof delta === "number"
           ? `${delta >= 0 ? "+" : ""}${delta.toLocaleString()} today`
-          : "—"}
+          : "No change data"}
       </span>
     </div>
   );

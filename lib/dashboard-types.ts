@@ -110,26 +110,29 @@ export const STAGE_LABELS: Record<FunnelStage, string> = {
 };
 
 /**
- * Tailwind background classes for each stage. Used by both the stacked bar
- * segments and the tile accent. The progression goes neutral → cool → warm →
- * green to convey "moving down the funnel toward live".
+ * Background classes for each stage, drawn from the design-system semantic
+ * tokens (no hardcoded palette colors) so the funnel reads correctly in both
+ * light and dark themes. The progression goes neutral (muted) for the entry
+ * stage, through the brand/info/warning accents mid-funnel, to success at
+ * "live" and destructive at "killed". The bar uses softened alphas; the dots
+ * use the full-strength token.
  */
 export const STAGE_BAR_COLORS: Record<FunnelStage, string> = {
-  in_brief: "bg-zinc-300",
-  in_creative: "bg-indigo-400",
-  in_copy: "bg-amber-400",
-  in_launch: "bg-sky-400",
-  live: "bg-emerald-500",
-  killed: "bg-rose-400",
+  in_brief: "bg-muted-foreground/40",
+  in_creative: "bg-primary/70",
+  in_copy: "bg-warning/70",
+  in_launch: "bg-info/70",
+  live: "bg-success",
+  killed: "bg-destructive/70",
 };
 
 export const STAGE_DOT_COLORS: Record<FunnelStage, string> = {
-  in_brief: "bg-zinc-400",
-  in_creative: "bg-indigo-500",
-  in_copy: "bg-amber-500",
-  in_launch: "bg-sky-500",
-  live: "bg-emerald-600",
-  killed: "bg-rose-500",
+  in_brief: "bg-muted-foreground",
+  in_creative: "bg-primary",
+  in_copy: "bg-warning",
+  in_launch: "bg-info",
+  live: "bg-success",
+  killed: "bg-destructive",
 };
 
 /**

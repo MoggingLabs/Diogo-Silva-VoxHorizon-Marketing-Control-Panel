@@ -142,9 +142,9 @@ export function ApprovalModeSection() {
   }, [note, refresh, refreshAudit, selectedMode, selectedTtl]);
 
   const currentLine = useMemo(() => {
-    if (!state) return "Loading…";
+    if (!state) return "Loading...";
     const when = state.set_at ? new Date(state.set_at).toLocaleString() : "unknown";
-    const who = state.set_by ?? "—";
+    const who = state.set_by ?? "unknown";
     if (state.mode === "AUTO_APPROVE") {
       return `Currently: ${modeLabel(state.mode)} (set at ${when} by ${who}; expires in ${formatTtlShort(state.expires_at ?? null)})`;
     }
@@ -209,8 +209,8 @@ export function ApprovalModeSection() {
                       className={cn(
                         "inline-flex h-7 cursor-pointer items-center gap-1 rounded-full px-3 text-xs ring-1 transition-colors",
                         selectedTtl === opt.seconds
-                          ? "bg-amber-100 text-amber-900 ring-amber-300"
-                          : "bg-background text-muted-foreground ring-input hover:bg-accent",
+                          ? "bg-warning/15 text-warning ring-warning/30"
+                          : "bg-background text-muted-foreground ring-input hover:bg-accent hover:text-accent-foreground",
                       )}
                     >
                       <input
@@ -280,14 +280,14 @@ export function ApprovalModeSection() {
               "inline-flex h-9 items-center justify-center rounded-md bg-primary px-3 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60",
             )}
           >
-            {status.kind === "saving" ? "Saving…" : "Save changes"}
+            {status.kind === "saving" ? "Saving..." : "Save changes"}
           </button>
         </div>
         {status.kind === "error" ? (
           <p
             role="alert"
             data-testid="mode-save-error"
-            className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900"
+            className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive"
           >
             {status.message}
           </p>
@@ -295,7 +295,7 @@ export function ApprovalModeSection() {
         {status.kind === "saved" ? (
           <p
             data-testid="mode-save-success"
-            className="rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-900"
+            className="rounded-md border border-success/30 bg-success/10 px-3 py-2 text-xs text-success"
           >
             Mode updated.
           </p>
@@ -308,9 +308,9 @@ export function ApprovalModeSection() {
         className="overflow-hidden rounded-md border bg-background text-sm"
       >
         {auditError ? (
-          <p className="px-3 py-2 text-xs text-rose-900">Failed to load audit: {auditError}</p>
+          <p className="px-3 py-2 text-xs text-destructive">Failed to load audit: {auditError}</p>
         ) : audit === null ? (
-          <p className="px-3 py-2 text-xs text-muted-foreground">Loading…</p>
+          <p className="px-3 py-2 text-xs text-muted-foreground">Loading...</p>
         ) : audit.length === 0 ? (
           <p
             data-testid="mode-audit-empty"

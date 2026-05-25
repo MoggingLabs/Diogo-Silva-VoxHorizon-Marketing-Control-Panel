@@ -1,6 +1,7 @@
 import { headers } from "next/headers";
 import { Bell } from "lucide-react";
 
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { worker, WorkerError, type WorkerHealth } from "@/lib/worker";
 
@@ -55,11 +56,11 @@ function formatUptime(seconds: number | undefined): string {
 }
 
 /**
- * /settings — read-only operations page.
+ * /settings - read-only operations page.
  *
  * Surfaces the configured worker URL (sanitized), live worker health, the
  * placeholder cron/notification surfaces, and basic app/server metadata.
- * Theme is hard-coded to light for v1; dark mode lands later.
+ * Styled with the design-system tokens so it tracks the active theme.
  *
  * Implements M5-5 (#68).
  */
@@ -77,7 +78,7 @@ export default async function SettingsPage() {
   const buildTime =
     process.env.NEXT_PUBLIC_BUILD_TIME?.trim() ||
     process.env.VERCEL_DEPLOYMENT_CREATED_AT?.trim() ||
-    "(unknown — set NEXT_PUBLIC_BUILD_TIME at build)";
+    "(unknown - set NEXT_PUBLIC_BUILD_TIME at build)";
   const nodeEnv = process.env.NODE_ENV ?? "(unknown)";
 
   return (
@@ -106,13 +107,13 @@ export default async function SettingsPage() {
           <dt className="text-muted-foreground">Status</dt>
           <dd>
             {workerProbe.ok ? (
-              <span className="inline-flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-emerald-500" aria-hidden="true" />
+              <span className="inline-flex items-center gap-2 font-medium text-success">
+                <span className="h-2 w-2 rounded-full bg-success" aria-hidden="true" />
                 <span>Healthy</span>
               </span>
             ) : (
-              <span className="inline-flex items-center gap-2">
-                <span className="h-2 w-2 rounded-full bg-rose-500" aria-hidden="true" />
+              <span className="inline-flex items-center gap-2 font-medium text-destructive">
+                <span className="h-2 w-2 rounded-full bg-destructive" aria-hidden="true" />
                 <span>Unreachable</span>
               </span>
             )}
@@ -133,7 +134,7 @@ export default async function SettingsPage() {
           ) : (
             <>
               <dt className="text-muted-foreground">Error</dt>
-              <dd className="break-words text-rose-600">{workerProbe.error}</dd>
+              <dd className="break-words text-destructive">{workerProbe.error}</dd>
             </>
           )}
         </dl>
@@ -144,7 +145,7 @@ export default async function SettingsPage() {
         <div className="rounded-md border border-dashed bg-muted/30 p-4 text-sm text-muted-foreground">
           <p>
             Cron jobs are configured in <span className="font-mono">worker/scheduling/</span>. A
-            live UI listing for next/last run lands with <span className="font-mono">M4-8</span> —
+            live UI listing for next/last run lands with <span className="font-mono">M4-8</span>;
             not yet shipped.
           </p>
         </div>
@@ -177,7 +178,7 @@ export default async function SettingsPage() {
           </div>
           <p
             role="note"
-            className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900"
+            className="rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning"
           >
             Push subscription wiring ships in M4-11. This button will activate once the backend is
             ready.
@@ -187,10 +188,15 @@ export default async function SettingsPage() {
 
       <section className="flex flex-col gap-3">
         <h2 className="text-lg font-semibold">Appearance</h2>
-        <dl className="grid grid-cols-[7rem_1fr] items-baseline gap-x-3 gap-y-2 rounded-md border bg-background p-3 text-sm sm:grid-cols-[10rem_1fr] sm:gap-x-4 sm:p-4">
-          <dt className="text-muted-foreground">Theme</dt>
-          <dd>Light (only theme in v1)</dd>
-        </dl>
+        <div className="flex flex-col gap-3 rounded-md border bg-background p-3 text-sm sm:flex-row sm:items-center sm:justify-between sm:p-4">
+          <div className="flex flex-col gap-1">
+            <p className="font-medium">Theme</p>
+            <p className="text-xs text-muted-foreground">
+              Switch between light, dark, and system. Your choice is remembered on this device.
+            </p>
+          </div>
+          <ThemeToggle className="shrink-0 self-start border border-border sm:self-auto" />
+        </div>
       </section>
 
       <section className="flex flex-col gap-3">

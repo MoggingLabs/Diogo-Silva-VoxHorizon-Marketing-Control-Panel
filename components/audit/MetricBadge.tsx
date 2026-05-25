@@ -8,17 +8,26 @@ const VERDICT_LABEL: Record<Verdict, string> = {
 };
 
 /**
- * Tailwind classes per verdict. Red / amber / emerald maps directly to the
- * traffic-light metaphor in the Wave 4 spec.
+ * Verdict -> design-system semantic class. The traffic-light metaphor from the
+ * Wave 4 spec maps onto the shared status tokens (destructive / warning /
+ * success) so the pill reads correctly in both light and dark themes without
+ * per-mode overrides. Same soft-fill + inset-ring treatment as the canonical
+ * status Badge.
  */
 const VERDICT_CLASS: Record<Verdict, string> = {
-  kill: "bg-rose-100 text-rose-900 ring-rose-300 dark:bg-rose-950/40 dark:text-rose-200 dark:ring-rose-800",
-  watch:
-    "bg-amber-100 text-amber-900 ring-amber-300 dark:bg-amber-950/40 dark:text-amber-200 dark:ring-amber-800",
-  keep: "bg-emerald-100 text-emerald-900 ring-emerald-300 dark:bg-emerald-950/40 dark:text-emerald-200 dark:ring-emerald-800",
+  kill: "bg-destructive/15 text-destructive ring-destructive/30",
+  watch: "bg-warning/15 text-warning ring-warning/30",
+  keep: "bg-success/15 text-success ring-success/30",
 };
 
-/** Class for the unverdicted (null) case — neutral, not alarming. */
+/** Dot color per verdict, drawn from the same semantic tokens. */
+const VERDICT_DOT: Record<Verdict, string> = {
+  kill: "bg-destructive",
+  watch: "bg-warning",
+  keep: "bg-success",
+};
+
+/** Class for the unverdicted (null) case - neutral, not alarming. */
 const UNKNOWN_CLASS = "bg-muted text-muted-foreground ring-border";
 
 export type MetricBadgeProps = {
@@ -58,15 +67,7 @@ export function MetricBadge({ verdict, reason, className }: MetricBadgeProps) {
       )}
       title={reason ?? VERDICT_LABEL[verdict]}
     >
-      <span
-        aria-hidden="true"
-        className={cn(
-          "h-1.5 w-1.5 rounded-full",
-          verdict === "kill" && "bg-rose-500",
-          verdict === "watch" && "bg-amber-500",
-          verdict === "keep" && "bg-emerald-500",
-        )}
-      />
+      <span aria-hidden="true" className={cn("h-1.5 w-1.5 rounded-full", VERDICT_DOT[verdict])} />
       {VERDICT_LABEL[verdict]}
     </span>
   );

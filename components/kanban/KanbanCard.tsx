@@ -1,6 +1,7 @@
 import type { Route } from "next";
 import Link from "next/link";
 
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import type {
   DashboardClient,
   DashboardImageBrief,
@@ -23,29 +24,17 @@ export type KanbanCardProps =
   | { kind: "video"; brief: DashboardVideoBrief; pipelineId?: string | null };
 
 /**
- * Shared status-pill palette used across both verticals. Keeping the keys as
- * a `Record<string, string>` lets us survive an enum that grows later without
- * a TypeScript error — unknown statuses fall back to the neutral pill.
+ * Status -> short label overrides where the canonical humanized label is too
+ * verbose for a narrow Kanban card. Statuses absent here fall back to the
+ * StatusBadge's own humanized label, so a new status string never crashes.
  */
-const STATUS_PILL: Record<string, string> = {
-  draft: "bg-zinc-100 text-zinc-700",
-  posted: "bg-amber-100 text-amber-800",
-  approved: "bg-emerald-100 text-emerald-800",
-  approved_with_changes: "bg-sky-100 text-sky-800",
-  rejected: "bg-rose-100 text-rose-800",
-};
-
-const STATUS_LABEL: Record<string, string> = {
-  draft: "Draft",
-  posted: "Posted",
-  approved: "Approved",
+const STATUS_LABEL_OVERRIDE: Record<string, string> = {
   approved_with_changes: "Approved w/ changes",
-  rejected: "Rejected",
 };
 
 const KIND_BADGE: Record<KanbanCardKind, { label: string; className: string }> = {
-  image: { label: "IMG", className: "bg-violet-100 text-violet-700" },
-  video: { label: "VID", className: "bg-cyan-100 text-cyan-700" },
+  image: { label: "IMG", className: "bg-primary/15 text-primary" },
+  video: { label: "VID", className: "bg-accent/15 text-accent" },
 };
 
 /**
@@ -89,8 +78,7 @@ function timeSince(iso: string): string {
 export function KanbanCard(props: KanbanCardProps) {
   const { kind, brief }: { kind: KanbanCardKind; brief: CommonBrief } = props;
   const pipelineId = props.pipelineId ?? null;
-  const pillClass = STATUS_PILL[brief.status] ?? "bg-zinc-100 text-zinc-700";
-  const pillLabel = STATUS_LABEL[brief.status] ?? brief.status;
+  const statusLabel = STATUS_LABEL_OVERRIDE[brief.status];
   const kindBadge = KIND_BADGE[kind];
 
   const href = (
@@ -107,7 +95,7 @@ export function KanbanCard(props: KanbanCardProps) {
         href={href}
         className={cn(
           "flex min-h-[88px] flex-col gap-2 rounded-md border border-border bg-card p-3 shadow-sm",
-          "transition-colors transition-shadow hover:border-zinc-300 hover:shadow active:bg-muted/40",
+          "transition-colors transition-shadow hover:border-ring/40 hover:shadow active:bg-muted/40",
           "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
         )}
       >
@@ -126,11 +114,7 @@ export function KanbanCard(props: KanbanCardProps) {
           <span className="truncate text-xs text-muted-foreground">
             {brief.client?.slug ?? brief.client?.name ?? "no client"}
           </span>
-          <span
-            className={cn("shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium", pillClass)}
-          >
-            {pillLabel}
-          </span>
+          <StatusBadge status={brief.status} label={statusLabel} className="shrink-0" />
         </div>
         <span className="text-[11px] text-muted-foreground">{timeSince(brief.created_at)}</span>
       </Link>

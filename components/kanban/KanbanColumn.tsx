@@ -22,7 +22,7 @@ export type KanbanColumnProps = {
 export function KanbanColumn({
   title,
   count,
-  accentClass = "bg-zinc-400",
+  accentClass = "bg-muted-foreground",
   children,
   emptyMessage = "No data yet.",
 }: KanbanColumnProps) {
