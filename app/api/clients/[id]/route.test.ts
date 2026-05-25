@@ -98,6 +98,31 @@ describe("PATCH /api/clients/:id", () => {
     expect((await res.json()).client).toMatchObject({ name: "Renamed" });
   });
 
+  it("applies every editable field", async () => {
+    currentSupabase = mockClient({
+      clients: {
+        select: { single: { data: { id: ID }, error: null } },
+        update: { single: { data: { id: ID }, error: null } },
+      },
+      events: { insert: { data: null, error: null } },
+    });
+    const res = await PATCH(
+      patchReq({
+        slug: "new-slug",
+        name: "New Name",
+        service_type: "pools",
+        status: "paused",
+        brand_colors: { primary: "#fff" },
+        cpl_target: 50,
+        ghl_location_id: "loc",
+        meta_account_id: "act_9",
+        drive_root_folder_id: "fold",
+      }),
+      routeContext({ id: ID }),
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("rejects an empty patch with 400", async () => {
     const res = await PATCH(patchReq({}), routeContext({ id: ID }));
     expect(res.status).toBe(400);
@@ -121,6 +146,25 @@ describe("PATCH /api/clients/:id", () => {
     const res = await PATCH(patchReq({ slug: "taken-slug" }), routeContext({ id: ID }));
     expect(res.status).toBe(409);
     expect((await res.json()).error).toBe("slug_taken");
+  });
+
+  it("500s on a non-unique update error", async () => {
+    currentSupabase = mockClient({
+      clients: {
+        select: { single: { data: { id: ID }, error: null } },
+        update: { single: { data: null, error: { message: "boom" } } },
+      },
+    });
+    const res = await PATCH(patchReq({ name: "X" }), routeContext({ id: ID }));
+    expect(res.status).toBe(500);
+  });
+
+  it("500s when the pre-update fetch errors", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await PATCH(patchReq({ name: "X" }), routeContext({ id: ID }));
+    expect(res.status).toBe(500);
   });
 
   it("400s on invalid JSON", async () => {
@@ -166,5 +210,13 @@ describe("DELETE /api/clients/:id (soft-archive)", () => {
     });
     const res = await DELETE(delReq(), routeContext({ id: ID }));
     expect(res.status).toBe(409);
+  });
+
+  it("500s on a db error during archive", async () => {
+    currentSupabase = mockClient({
+      clients: { update: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await DELETE(delReq(), routeContext({ id: ID }));
+    expect(res.status).toBe(500);
   });
 });

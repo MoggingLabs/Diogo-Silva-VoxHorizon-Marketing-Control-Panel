@@ -62,6 +62,19 @@ describe("PATCH /api/clients/:id/services/:childId", () => {
     const res = await PATCH(patchReq({}), childCtx());
     expect(res.status).toBe(400);
   });
+
+  it("400s on invalid JSON", async () => {
+    const res = await PATCH(patchReq("{bad"), childCtx());
+    expect(res.status).toBe(400);
+  });
+
+  it("500s on a db error", async () => {
+    currentSupabase = mockClient({
+      client_services: { update: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await PATCH(patchReq({ service_name: "X" }), childCtx());
+    expect(res.status).toBe(500);
+  });
 });
 
 describe("DELETE /api/clients/:id/services/:childId (soft-archive)", () => {

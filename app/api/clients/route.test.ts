@@ -149,6 +149,14 @@ describe("POST /api/clients", () => {
     expect((await res.json()).error).toBe("slug_taken");
   });
 
+  it("500s on a non-unique insert error", async () => {
+    currentSupabase = mockClient({
+      clients: { insert: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(postReq(valid));
+    expect(res.status).toBe(500);
+  });
+
   it("returns 400 on invalid JSON", async () => {
     const res = await POST(postReq("{not json"));
     expect(res.status).toBe(400);

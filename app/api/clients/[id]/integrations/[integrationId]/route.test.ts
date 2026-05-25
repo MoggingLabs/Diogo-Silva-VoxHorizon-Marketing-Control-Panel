@@ -60,6 +60,28 @@ describe("PATCH /api/clients/:id/integrations/:integrationId", () => {
     expect(integration.active).toBe(false);
   });
 
+  it("applies provider + external_id + config + active together", async () => {
+    currentSupabase = mockClient({
+      client_integrations: {
+        update: { single: { data: { id: IG, provider: "drive", config: {} }, error: null } },
+      },
+      events: { insert: { data: null, error: null } },
+    });
+    const res = await PATCH(
+      patchReq({ provider: "drive", external_id: "fold_1", config: { a: 1 }, active: true }),
+      ctx(),
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("500s on a non-unique db error", async () => {
+    currentSupabase = mockClient({
+      client_integrations: { update: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await PATCH(patchReq({ active: true }), ctx());
+    expect(res.status).toBe(500);
+  });
+
   it("404s when the row is missing or archived", async () => {
     currentSupabase = mockClient({
       client_integrations: { update: { single: { data: null, error: null } } },

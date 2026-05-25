@@ -59,4 +59,12 @@ describe("POST /api/clients/:id/restore", () => {
     const res = await POST(req(), routeContext({ id: ID }));
     expect(res.status).toBe(404);
   });
+
+  it("500s on a db error", async () => {
+    currentSupabase = mockClient({
+      clients: { update: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(req(), routeContext({ id: ID }));
+    expect(res.status).toBe(500);
+  });
 });

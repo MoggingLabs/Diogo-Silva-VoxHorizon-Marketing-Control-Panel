@@ -60,4 +60,23 @@ describe("POST /api/clients/:id/integrations/:integrationId/restore", () => {
     const res = await POST(req(), ctx());
     expect(res.status).toBe(409);
   });
+
+  it("404s when the row does not exist", async () => {
+    currentSupabase = mockClient({
+      client_integrations: {
+        update: { single: { data: null, error: null } },
+        select: { single: { data: null, error: null } },
+      },
+    });
+    const res = await POST(req(), ctx());
+    expect(res.status).toBe(404);
+  });
+
+  it("500s on a db error", async () => {
+    currentSupabase = mockClient({
+      client_integrations: { update: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(req(), ctx());
+    expect(res.status).toBe(500);
+  });
 });

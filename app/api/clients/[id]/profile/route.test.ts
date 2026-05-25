@@ -52,6 +52,14 @@ describe("GET /api/clients/:id/profile", () => {
     expect(res.status).toBe(200);
     expect((await res.json()).profile).toBeNull();
   });
+
+  it("500s on a db error", async () => {
+    currentSupabase = mockClient({
+      client_profiles: { select: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await GET(getReq(), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
 });
 
 describe("PUT /api/clients/:id/profile (1:1 upsert)", () => {
@@ -85,5 +93,22 @@ describe("PUT /api/clients/:id/profile (1:1 upsert)", () => {
   it("400s on invalid JSON", async () => {
     const res = await PUT(putReq("{bad"), routeContext({ id: CLIENT }));
     expect(res.status).toBe(400);
+  });
+
+  it("500s when the client lookup errors", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await PUT(putReq({ tone: "x" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
+
+  it("500s when the upsert fails", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: { id: CLIENT }, error: null } } },
+      client_profiles: { insert: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await PUT(putReq({ tone: "x" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
   });
 });

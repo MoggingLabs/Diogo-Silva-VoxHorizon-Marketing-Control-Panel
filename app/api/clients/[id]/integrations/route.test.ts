@@ -95,6 +95,23 @@ describe("POST /api/clients/:id/integrations", () => {
     expect(res.status).toBe(400);
   });
 
+  it("500s when the client lookup errors", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(postReq({ provider: "meta" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
+
+  it("500s on a non-unique insert error", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: { id: CLIENT }, error: null } } },
+      client_integrations: { insert: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(postReq({ provider: "meta" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
+
   it("409s on a duplicate provider", async () => {
     currentSupabase = mockClient({
       clients: { select: { single: { data: { id: CLIENT }, error: null } } },

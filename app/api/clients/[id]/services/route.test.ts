@@ -88,4 +88,21 @@ describe("POST /api/clients/:id/services (child create)", () => {
     const res = await POST(createReq("{bad"), routeContext({ id: CLIENT }));
     expect(res.status).toBe(400);
   });
+
+  it("500s when the parent-client lookup errors", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: null, error: { message: "boom" } } } },
+    });
+    const res = await POST(createReq({ service_name: "Roofing" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
+
+  it("500s when the insert fails", async () => {
+    currentSupabase = mockClient({
+      clients: { select: { single: { data: { id: CLIENT }, error: null } } },
+      client_services: { insert: { single: { data: null, error: { message: "insert boom" } } } },
+    });
+    const res = await POST(createReq({ service_name: "Roofing" }), routeContext({ id: CLIENT }));
+    expect(res.status).toBe(500);
+  });
 });
