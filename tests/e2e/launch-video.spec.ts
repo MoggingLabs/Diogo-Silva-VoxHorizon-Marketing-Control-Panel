@@ -100,10 +100,12 @@ test.describe("video launch package", () => {
     await expect(page.getByTestId("launch-decision-error")).toContainText(/notes are required/i);
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
-    // With notes the launch transitions.
+    // With notes the launch transitions. Match the status badge exactly: the
+    // timeline also renders "Approved with changes · <date>", so a substring
+    // locator resolves to 2 elements (strict-mode violation).
     await page.getByLabel(/notes/i).fill("Tighten the hook.");
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByText(/Approved with changes/i)).toBeVisible({
+    await expect(page.getByText("Approved with changes", { exact: true })).toBeVisible({
       timeout: 15_000,
     });
   });
