@@ -54,7 +54,6 @@ for (const format of ["image", "video"] as const) {
       // Step 1. Seed an approved brief + a posted launch package.
       const briefId = await seedApprovedBrief(clientId, format);
       const launchId = await seedPushedLaunch(briefId, format);
-      const admin = getTestAdminClient();
       const detailHref = `${DETAIL_PREFIX[format]}/${launchId}`;
 
       // Step 2. Edit the operator notes on the detail page.
