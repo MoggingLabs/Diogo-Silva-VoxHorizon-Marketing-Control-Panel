@@ -2,28 +2,98 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * VoxHorizon design system - "operator console" language.
+ *
+ * Dark-mode-first: the dark palette is the reference design; the light
+ * palette is a faithful inversion for daylight use. Tokens are HSL triplets
+ * (no `hsl()` wrapper) so Tailwind can compose them with alpha via
+ * `hsl(var(--token) / <alpha>)`. Token NAMES are stable - every existing
+ * surface references background/foreground/primary/accent/muted/destructive/
+ * border/input/ring/card/popover/secondary, so those keep working; only their
+ * VALUES changed plus a few additive tokens (success/warning/info + status
+ * accents) that new components opt into.
+ *
+ * Palette direction: deep slate-blue surfaces, a confident indigo primary,
+ * cyan accent, and a clear traffic-light status set (emerald/amber/rose/sky)
+ * that the canonical StatusBadge maps onto. Calm, dense, legible.
+ */
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 240 10% 3.9%;
+    /* Surfaces */
+    --background: 220 24% 98%;
+    --foreground: 222 30% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
+    --card-foreground: 222 30% 12%;
     --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
+    --popover-foreground: 222 30% 12%;
+
+    /* Brand */
+    --primary: 243 75% 56%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 16% 94%;
+    --secondary-foreground: 222 25% 18%;
+    --accent: 199 89% 48%;
+    --accent-foreground: 0 0% 100%;
+
+    /* Muted / chrome */
+    --muted: 220 16% 95%;
+    --muted-foreground: 220 12% 42%;
+
+    /* Status semantics (used by StatusBadge + status surfaces) */
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 60% 36%;
+    --success-foreground: 0 0% 100%;
+    --warning: 38 92% 45%;
+    --warning-foreground: 0 0% 100%;
+    --info: 199 89% 48%;
+    --info-foreground: 0 0% 100%;
+
+    /* Lines / inputs / focus */
+    --border: 220 18% 88%;
+    --input: 220 18% 86%;
+    --ring: 243 75% 56%;
+
     --radius: 0.5rem;
+  }
+
+  .dark {
+    /* Surfaces - deep slate-blue, layered (bg < card < popover) */
+    --background: 224 32% 8%;
+    --foreground: 213 31% 91%;
+    --card: 223 30% 11%;
+    --card-foreground: 213 31% 91%;
+    --popover: 223 30% 11%;
+    --popover-foreground: 213 31% 91%;
+
+    /* Brand - lighter indigo for contrast on dark */
+    --primary: 243 80% 70%;
+    --primary-foreground: 224 40% 10%;
+    --secondary: 222 22% 18%;
+    --secondary-foreground: 213 31% 91%;
+    --accent: 199 90% 55%;
+    --accent-foreground: 224 40% 10%;
+
+    /* Muted / chrome */
+    --muted: 222 22% 16%;
+    --muted-foreground: 217 14% 65%;
+
+    /* Status semantics */
+    --destructive: 0 70% 60%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 55% 48%;
+    --success-foreground: 224 40% 10%;
+    --warning: 38 92% 58%;
+    --warning-foreground: 224 40% 10%;
+    --info: 199 90% 60%;
+    --info-foreground: 224 40% 10%;
+
+    /* Lines / inputs / focus */
+    --border: 220 18% 20%;
+    --input: 220 18% 22%;
+    --ring: 243 80% 70%;
   }
 }
 
@@ -33,5 +103,17 @@
   }
   body {
     @apply bg-background text-foreground antialiased;
+  }
+  /*
+   * Block the flash-of-wrong-theme jump: the inline bootstrap script in
+   * `layout.tsx` sets `.dark` before paint; this just keeps the
+   * color-scheme hint in sync so native widgets (scrollbars, form
+   * controls) match the active theme.
+   */
+  :root {
+    color-scheme: light;
+  }
+  .dark {
+    color-scheme: dark;
   }
 }
