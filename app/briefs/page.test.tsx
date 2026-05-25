@@ -8,87 +8,93 @@ vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => currentSupabase,
 }));
 
-vi.mock("@/components/EmptyState", () => ({
-  EmptyState: ({ title, action }: { title: string; action: { label: string; href: string } }) => (
-    <div data-testid="empty">
-      {title} <a href={action.href}>{action.label}</a>
+// Stub the (client) list so we can assert on the props the server page derives
+// without pulling Radix / router into the server-component render.
+vi.mock("@/components/briefs/BriefsListClient", () => ({
+  BriefsListClient: ({
+    rows,
+    archived,
+  }: {
+    rows: Array<{ id: string; format: string; clientName: string | null }>;
+    archived: boolean;
+  }) => (
+    <div data-testid="list" data-archived={String(archived)} data-count={rows.length}>
+      {rows.map((r) => (
+        <span key={r.id} data-format={r.format} data-client={r.clientName ?? ""}>
+          {r.id}
+        </span>
+      ))}
     </div>
   ),
 }));
 
 import BriefsListPage from "./page";
 
-function brief(over: Record<string, unknown>) {
+function imageBrief(over: Record<string, unknown>) {
   return {
-    id: "b1",
-    brief_id_human: "br-1",
+    id: "i1",
+    brief_id_human: "img-1",
+    client_id: "c1",
     status: "draft",
-    created_at: "2026-05-17T00:00:00Z",
+    created_at: "2026-05-20T00:00:00Z",
     payload: { service: "roofing", budget: 100, market: "Austin" },
+    deleted_at: null,
     ...over,
   };
 }
 
-describe("BriefsListPage", () => {
-  it("renders the empty state when no briefs", async () => {
+function videoBrief(over: Record<string, unknown>) {
+  return {
+    id: "v1",
+    brief_id_human: "vid-1",
+    client_id: "c1",
+    status: "posted",
+    created_at: "2026-05-21T00:00:00Z",
+    dimensions: "9x16",
+    target_duration_s: 30,
+    deleted_at: null,
+    ...over,
+  };
+}
+
+const noParams = Promise.resolve({});
+
+describe("BriefsListPage (unified)", () => {
+  it("merges image + video rows and resolves client names", async () => {
+    currentSupabase = mockSupabaseClient({
+      briefs: { select: { data: [imageBrief({})], error: null } },
+      video_briefs: { select: { data: [videoBrief({})], error: null } },
+      clients: { select: { data: [{ id: "c1", name: "Acme Co" }], error: null } },
+    });
+    const el = await BriefsListPage({ searchParams: noParams });
+    render(el);
+    const list = screen.getByTestId("list");
+    expect(list).toHaveAttribute("data-count", "2");
+    expect(list).toHaveAttribute("data-archived", "false");
+    // Both formats present, client name joined.
+    expect(screen.getByText("i1")).toHaveAttribute("data-client", "Acme Co");
+    expect(screen.getByText("v1")).toHaveAttribute("data-format", "video");
+  });
+
+  it("passes archived=true when ?archived=1", async () => {
     currentSupabase = mockSupabaseClient({
       briefs: { select: { data: [], error: null } },
+      video_briefs: { select: { data: [], error: null } },
+      clients: { select: { data: [], error: null } },
     });
-    const element = await BriefsListPage();
-    render(element);
-    expect(screen.getByTestId("empty")).toBeInTheDocument();
+    const el = await BriefsListPage({ searchParams: Promise.resolve({ archived: "1" }) });
+    render(el);
+    expect(screen.getByTestId("list")).toHaveAttribute("data-archived", "true");
   });
 
-  it("renders the alert when the query errors", async () => {
+  it("renders the error banner when the briefs query fails", async () => {
     currentSupabase = mockSupabaseClient({
       briefs: { select: { data: null, error: { message: "db down" } } },
+      video_briefs: { select: { data: [], error: null } },
+      clients: { select: { data: [], error: null } },
     });
-    const element = await BriefsListPage();
-    render(element);
+    const el = await BriefsListPage({ searchParams: noParams });
+    render(el);
     expect(screen.getByText(/Failed to load briefs: db down/i)).toBeInTheDocument();
-  });
-
-  it("groups briefs by status into sections", async () => {
-    currentSupabase = mockSupabaseClient({
-      briefs: {
-        select: {
-          data: [
-            brief({ id: "1", status: "draft", brief_id_human: "br-draft" }),
-            brief({ id: "2", status: "posted", brief_id_human: "br-posted" }),
-            brief({ id: "3", status: "approved", brief_id_human: "br-appr" }),
-            brief({
-              id: "4",
-              status: "approved_with_changes",
-              brief_id_human: "br-appr-c",
-            }),
-            brief({ id: "5", status: "rejected", brief_id_human: "br-rej" }),
-          ],
-          error: null,
-        },
-      },
-    });
-    const element = await BriefsListPage();
-    render(element);
-    // Each status section heading is rendered.
-    expect(screen.getByRole("heading", { name: /^Draft$/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /^Posted$/i })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: /^Approved$/i })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /br-draft/ })).toHaveAttribute("href", "/briefs/1");
-  });
-
-  it("renders dashes when payload fields are missing", async () => {
-    currentSupabase = mockSupabaseClient({
-      briefs: {
-        select: {
-          data: [brief({ id: "no-payload", payload: null })],
-          error: null,
-        },
-      },
-    });
-    const element = await BriefsListPage();
-    render(element);
-    // Multiple dash placeholders are rendered for missing fields.
-    const dashes = screen.getAllByText("—");
-    expect(dashes.length).toBeGreaterThan(0);
   });
 });

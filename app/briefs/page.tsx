@@ -1,9 +1,10 @@
-import Link from "next/link";
-import { ClipboardList } from "lucide-react";
-
-import { EmptyState } from "@/components/EmptyState";
-import { Button } from "@/components/ui/button";
-import { readBriefPayload, type Brief, type BriefStatusT } from "@/lib/briefs";
+import { BriefsListClient } from "@/components/briefs/BriefsListClient";
+import {
+  imageBriefToRow,
+  mergeBriefRows,
+  videoBriefToRow,
+  type ClientNameMap,
+} from "@/lib/briefs-unified";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -12,147 +13,76 @@ export const metadata = {
   title: "Briefs — VoxHorizon",
 };
 
-const STATUS_ORDER: BriefStatusT[] = [
-  "draft",
-  "posted",
-  "approved",
-  "approved_with_changes",
-  "rejected",
-];
+type SearchParams = { archived?: string };
 
-const STATUS_LABEL: Record<BriefStatusT, string> = {
-  draft: "Draft",
-  posted: "Posted",
-  approved: "Approved",
-  approved_with_changes: "Approved w/ changes",
-  rejected: "Rejected",
-};
-
-const STATUS_BADGE: Record<BriefStatusT, string> = {
-  draft: "bg-muted text-muted-foreground",
-  posted: "bg-amber-100 text-amber-900 dark:bg-amber-950/40 dark:text-amber-200",
-  approved: "bg-emerald-100 text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200",
-  approved_with_changes: "bg-sky-100 text-sky-900 dark:bg-sky-950/40 dark:text-sky-200",
-  rejected: "bg-destructive/10 text-destructive",
-};
-
-function formatDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleString();
-  } catch {
-    return iso;
-  }
-}
-
-export default async function BriefsListPage() {
+/**
+ * Unified Briefs list page (Makeover M3 / E3.1, #590).
+ *
+ * Server-fetches the image (`briefs`) + video (`video_briefs`) tables and the
+ * client lookup, folds both into the shared `UnifiedBriefRow` shape, and hands
+ * them to the client `BriefsListClient` (ResourceShell + DataTable + format
+ * tab). `?archived=1` flips the page to the archived view (soft-deleted rows).
+ */
+export default async function BriefsListPage({
+  searchParams,
+}: {
+  searchParams: Promise<SearchParams>;
+}) {
+  const { archived: archivedParam } = await searchParams;
+  const archived = archivedParam === "1" || archivedParam === "true";
   const supabase = await createClient();
-  const { data, error } = await supabase
-    .from("briefs")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(200);
 
-  const briefs: Brief[] = (data ?? []) as Brief[];
-
-  // Group by status for a simple board-ish view (the proper Kanban lands in
-  // M1-7 / Wave 2). Falls back to a flat list when nothing is grouped.
-  const grouped: Record<BriefStatusT, Brief[]> = {
-    draft: [],
-    posted: [],
-    approved: [],
-    approved_with_changes: [],
-    rejected: [],
-  };
-  for (const b of briefs) {
-    grouped[b.status]?.push(b);
+  // Soft-delete filter: active rows have `deleted_at is null`; the archived view
+  // wants the inverse. We cast through `as never` only where the curated
+  // types.gen lags the live column (briefs/video_briefs gained `deleted_at` in
+  // migration 0049, reflected in types.gen here).
+  function applyArchive<
+    Q extends { is(c: string, v: null): Q; not(c: string, op: string, v: null): Q },
+  >(q: Q): Q {
+    return archived ? q.not("deleted_at", "is", null) : q.is("deleted_at", null);
   }
+
+  const [imageRes, videoRes, clientsRes] = await Promise.all([
+    applyArchive(
+      supabase
+        .from("briefs")
+        .select("id, brief_id_human, client_id, status, payload, created_at, deleted_at")
+        .order("created_at", { ascending: false })
+        .limit(500),
+    ),
+    applyArchive(
+      supabase
+        .from("video_briefs")
+        .select(
+          "id, brief_id_human, client_id, status, created_at, dimensions, target_duration_s, deleted_at",
+        )
+        .order("created_at", { ascending: false })
+        .limit(500),
+    ),
+    supabase.from("clients").select("id, name"),
+  ]);
+
+  const clientMap: ClientNameMap = {};
+  for (const c of clientsRes.data ?? []) {
+    if (c.id && c.name) clientMap[c.id] = c.name;
+  }
+
+  const imageRows = (imageRes.data ?? []).map((b) => imageBriefToRow(b, clientMap));
+  const videoRows = (videoRes.data ?? []).map((b) => videoBriefToRow(b, clientMap));
+  const rows = mergeBriefRows(imageRows, videoRows);
+
+  const loadError = imageRes.error?.message ?? videoRes.error?.message ?? null;
 
   return (
-    <main className="container mx-auto flex min-h-dvh flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
-      <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Briefs</h1>
-        <Button asChild className="self-start sm:self-auto">
-          <Link href="/briefs/new">New brief</Link>
-        </Button>
-      </header>
-
-      {error ? (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-          Failed to load briefs: {error.message}
+    <>
+      {loadError ? (
+        <div className="mx-auto w-full max-w-7xl px-4 pt-6 sm:px-6">
+          <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            Failed to load briefs: {loadError}
+          </div>
         </div>
       ) : null}
-
-      {briefs.length === 0 && !error ? (
-        <EmptyState
-          icon={<ClipboardList className="h-8 w-8" aria-hidden="true" />}
-          title="No briefs yet"
-          description="Create your first image brief to start drafting creative variants."
-          action={{ label: "New brief", href: "/briefs/new" }}
-        />
-      ) : briefs.length > 0 ? (
-        <div className="space-y-8">
-          {STATUS_ORDER.map((status) => {
-            const rows = grouped[status];
-            if (rows.length === 0) return null;
-            return (
-              <section key={status} className="space-y-3">
-                <div className="flex items-center gap-3">
-                  <h2 className="text-lg font-semibold">{STATUS_LABEL[status]}</h2>
-                  <span className="text-xs text-muted-foreground">{rows.length}</span>
-                </div>
-                <div className="overflow-x-auto rounded-md border">
-                  <table className="w-full min-w-[640px] text-sm">
-                    <thead className="bg-muted/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
-                      <tr>
-                        <th className="px-3 py-2 font-medium">Human ID</th>
-                        <th className="px-3 py-2 font-medium">Market</th>
-                        <th className="px-3 py-2 font-medium">Service</th>
-                        <th className="px-3 py-2 font-medium">Budget</th>
-                        <th className="px-3 py-2 font-medium">Created</th>
-                        <th className="px-3 py-2 font-medium">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows.map((b) => {
-                        const payload = readBriefPayload(b);
-                        return (
-                          <tr key={b.id} className="border-t hover:bg-muted/30">
-                            <td className="px-3 py-2">
-                              <Link
-                                href={`/briefs/${b.id}`}
-                                className="font-mono text-xs underline-offset-4 hover:underline"
-                              >
-                                {b.brief_id_human}
-                              </Link>
-                            </td>
-                            <td className="px-3 py-2">{payload?.market ?? "—"}</td>
-                            <td className="px-3 py-2 capitalize">{payload?.service ?? "—"}</td>
-                            <td className="px-3 py-2">
-                              {typeof payload?.budget === "number"
-                                ? `$${payload.budget.toLocaleString()}`
-                                : "—"}
-                            </td>
-                            <td className="px-3 py-2 text-muted-foreground">
-                              {formatDate(b.created_at)}
-                            </td>
-                            <td className="px-3 py-2">
-                              <span
-                                className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[b.status]}`}
-                              >
-                                {STATUS_LABEL[b.status]}
-                              </span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              </section>
-            );
-          })}
-        </div>
-      ) : null}
-    </main>
+      <BriefsListClient rows={rows} archived={archived} />
+    </>
   );
 }
