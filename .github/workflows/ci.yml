@@ -480,7 +480,12 @@ jobs:
       - name: Setup Supabase CLI
         uses: supabase/setup-cli@v1
         with:
-          version: latest
+          # Pinned (not `latest`): resolving "latest" hits the GitHub releases
+          # API, which intermittently rate-limits ("Failed to resolve latest
+          # Supabase CLI release") and flakes the now-blocking e2e matrix. A
+          # pinned version downloads the release asset directly (no API lookup).
+          # Bump deliberately. v2.101.0 is what `latest` resolved to here.
+          version: 2.101.0
 
       - name: Start Supabase (local stack)
         run: supabase start
