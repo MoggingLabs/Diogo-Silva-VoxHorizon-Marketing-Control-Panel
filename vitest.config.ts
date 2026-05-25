@@ -3,7 +3,16 @@ import { fileURLToPath } from "node:url";
 
 import { defineConfig } from "vitest/config";
 
-const alias = { "@": fileURLToPath(new URL("./", import.meta.url)) };
+const alias = {
+  "@": fileURLToPath(new URL("./", import.meta.url)),
+  // `server-only` throws when imported outside a React Server Component. In
+  // unit tests (node + jsdom) we import server modules directly to exercise
+  // their logic, so stub it to a no-op. The real import guard still applies in
+  // the Next build, which is the gate that actually matters.
+  "server-only": fileURLToPath(
+    new URL("./tests/unit/helpers/server-only-stub.ts", import.meta.url),
+  ),
+};
 
 /**
  * Vitest config for the Next.js app.

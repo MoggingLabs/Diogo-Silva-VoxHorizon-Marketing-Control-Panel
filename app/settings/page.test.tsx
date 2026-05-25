@@ -129,6 +129,6 @@ describe("SettingsPage", () => {
     const el = await SettingsPage();
     render(el);
     expect(screen.getByText("dev")).toBeInTheDocument();
-    expect(screen.getByText(/unknown — set NEXT_PUBLIC_BUILD_TIME/i)).toBeInTheDocument();
+    expect(screen.getByText(/unknown - set NEXT_PUBLIC_BUILD_TIME/i)).toBeInTheDocument();
   });
 });

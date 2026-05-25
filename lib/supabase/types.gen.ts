@@ -875,6 +875,517 @@ export type Database = {
         }
         Relationships: []
       }
+      client_profiles: {
+        Row: {
+          address: string | null
+          annual_revenue: string | null
+          appointment_availability: string | null
+          average_project_value: string | null
+          background: string | null
+          bbb_rating: string | null
+          booking_flow: string | null
+          brand_fonts: Json | null
+          business_address: string | null
+          business_hours: string | null
+          business_type: string | null
+          campaign_name: string | null
+          campaign_status: string | null
+          city: string | null
+          client_id: string
+          client_profile_doc_id: string | null
+          closebot_role: string | null
+          commercial_projects: number | null
+          company_email: string | null
+          company_size: string | null
+          contact_email: string | null
+          contact_phone: string | null
+          contact_primary: string | null
+          contact_role: string | null
+          contact_secondary: string | null
+          crm: string | null
+          daily_budget: number | null
+          deleted_at: string | null
+          drive_assets_folder_id: string | null
+          drive_creatives_folder_id: string | null
+          drive_docs_folder_id: string | null
+          drive_meeting_notes_folder_id: string | null
+          drive_performance_folder_id: string | null
+          drive_resources_folder_id: string | null
+          ein: string | null
+          family_owned: boolean | null
+          financing: string | null
+          funnel: Json | null
+          google_rating: number | null
+          google_reviews: string | null
+          integration: string | null
+          launch_date: string | null
+          legal_name: string | null
+          license_number: string | null
+          licensed_insured: boolean | null
+          logo_alt_drive_id: string | null
+          logo_drive_id: string | null
+          minimum_project_size: string | null
+          monthly_budget: number | null
+          needs_input: Json
+          owner_experience_years: number | null
+          owner_name: string | null
+          primary_city: string | null
+          primary_zip: string | null
+          projects_completed: string | null
+          raw_profile: Json
+          relaunch_date: string | null
+          residential_projects: number | null
+          sales_rep: string | null
+          stat_sheet_url: string | null
+          state: string | null
+          tagline: string | null
+          targeting: string | null
+          targeting_detail: string | null
+          targeting_type: string | null
+          timezone: string | null
+          tone: string | null
+          total_work_orders: number | null
+          updated_at: string
+          voice_note: string | null
+          warranty: string | null
+          warranty_details: Json | null
+          website: string | null
+          years_in_business: number | null
+        }
+        Insert: {
+          address?: string | null
+          annual_revenue?: string | null
+          appointment_availability?: string | null
+          average_project_value?: string | null
+          background?: string | null
+          bbb_rating?: string | null
+          booking_flow?: string | null
+          brand_fonts?: Json | null
+          business_address?: string | null
+          business_hours?: string | null
+          business_type?: string | null
+          campaign_name?: string | null
+          campaign_status?: string | null
+          city?: string | null
+          client_id: string
+          client_profile_doc_id?: string | null
+          closebot_role?: string | null
+          commercial_projects?: number | null
+          company_email?: string | null
+          company_size?: string | null
+          contact_email?: string | null
+          contact_phone?: string | null
+          contact_primary?: string | null
+          contact_role?: string | null
+          contact_secondary?: string | null
+          crm?: string | null
+          daily_budget?: number | null
+          deleted_at?: string | null
+          drive_assets_folder_id?: string | null
+          drive_creatives_folder_id?: string | null
+          drive_docs_folder_id?: string | null
+          drive_meeting_notes_folder_id?: string | null
+          drive_performance_folder_id?: string | null
+          drive_resources_folder_id?: string | null
+          ein?: string | null
+          family_owned?: boolean | null
+          financing?: string | null
+          funnel?: Json | null
+          google_rating?: number | null
+          google_reviews?: string | null
+          integration?: string | null
+          launch_date?: string | null
+          legal_name?: string | null
+          license_number?: string | null
+          licensed_insured?: boolean | null
+          logo_alt_drive_id?: string | null
+          logo_drive_id?: string | null
+          minimum_project_size?: string | null
+          monthly_budget?: number | null
+          needs_input?: Json
+          owner_experience_years?: number | null
+          owner_name?: string | null
+          primary_city?: string | null
+          primary_zip?: string | null
+          projects_completed?: string | null
+          raw_profile?: Json
+          relaunch_date?: string | null
+          residential_projects?: number | null
+          sales_rep?: string | null
+          stat_sheet_url?: string | null
+          state?: string | null
+          tagline?: string | null
+          targeting?: string | null
+          targeting_detail?: string | null
+          targeting_type?: string | null
+          timezone?: string | null
+          tone?: string | null
+          total_work_orders?: number | null
+          updated_at?: string
+          voice_note?: string | null
+          warranty?: string | null
+          warranty_details?: Json | null
+          website?: string | null
+          years_in_business?: number | null
+        }
+        Update: {
+          address?: string | null
+          annual_revenue?: string | null
+          appointment_availability?: string | null
+          average_project_value?: string | null
+          background?: string | null
+          bbb_rating?: string | null
+          booking_flow?: string | null
+          brand_fonts?: Json | null
+          business_address?: string | null
+          business_hours?: string | null
+          business_type?: string | null
+          campaign_name?: string | null
+          campaign_status?: string | null
+          city?: string | null
+          client_id?: string
+          client_profile_doc_id?: string | null
+          closebot_role?: string | null
+          commercial_projects?: number | null
+          company_email?: string | null
+          company_size?: string | null
+          contact_email?: string | null
+          contact_phone?: string | null
+          contact_primary?: string | null
+          contact_role?: string | null
+          contact_secondary?: string | null
+          crm?: string | null
+          daily_budget?: number | null
+          deleted_at?: string | null
+          drive_assets_folder_id?: string | null
+          drive_creatives_folder_id?: string | null
+          drive_docs_folder_id?: string | null
+          drive_meeting_notes_folder_id?: string | null
+          drive_performance_folder_id?: string | null
+          drive_resources_folder_id?: string | null
+          ein?: string | null
+          family_owned?: boolean | null
+          financing?: string | null
+          funnel?: Json | null
+          google_rating?: number | null
+          google_reviews?: string | null
+          integration?: string | null
+          launch_date?: string | null
+          legal_name?: string | null
+          license_number?: string | null
+          licensed_insured?: boolean | null
+          logo_alt_drive_id?: string | null
+          logo_drive_id?: string | null
+          minimum_project_size?: string | null
+          monthly_budget?: number | null
+          needs_input?: Json
+          owner_experience_years?: number | null
+          owner_name?: string | null
+          primary_city?: string | null
+          primary_zip?: string | null
+          projects_completed?: string | null
+          raw_profile?: Json
+          relaunch_date?: string | null
+          residential_projects?: number | null
+          sales_rep?: string | null
+          stat_sheet_url?: string | null
+          state?: string | null
+          tagline?: string | null
+          targeting?: string | null
+          targeting_detail?: string | null
+          targeting_type?: string | null
+          timezone?: string | null
+          tone?: string | null
+          total_work_orders?: number | null
+          updated_at?: string
+          voice_note?: string | null
+          warranty?: string | null
+          warranty_details?: Json | null
+          website?: string | null
+          years_in_business?: number | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_profiles_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: true
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_services: {
+        Row: {
+          client_id: string
+          created_at: string
+          deleted_at: string | null
+          id: string
+          service_name: string
+          sort_order: number
+        }
+        Insert: {
+          client_id: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          service_name: string
+          sort_order?: number
+        }
+        Update: {
+          client_id?: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          service_name?: string
+          sort_order?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_services_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_value_props: {
+        Row: {
+          client_id: string
+          created_at: string
+          deleted_at: string | null
+          id: string
+          kind: Database["public"]["Enums"]["client_value_prop_kind"]
+          prop_text: string
+          sort_order: number
+        }
+        Insert: {
+          client_id: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          kind: Database["public"]["Enums"]["client_value_prop_kind"]
+          prop_text: string
+          sort_order?: number
+        }
+        Update: {
+          client_id?: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          kind?: Database["public"]["Enums"]["client_value_prop_kind"]
+          prop_text?: string
+          sort_order?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_value_props_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_offers: {
+        Row: {
+          active: boolean
+          client_id: string
+          created_at: string
+          deleted_at: string | null
+          id: string
+          offer_text: string
+          sort_order: number
+        }
+        Insert: {
+          active?: boolean
+          client_id: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          offer_text: string
+          sort_order?: number
+        }
+        Update: {
+          active?: boolean
+          client_id?: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          offer_text?: string
+          sort_order?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_offers_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_offer_constraints: {
+        Row: {
+          client_id: string
+          constraint_text: string
+          created_at: string
+          deleted_at: string | null
+          id: string
+          sort_order: number
+        }
+        Insert: {
+          client_id: string
+          constraint_text: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          sort_order?: number
+        }
+        Update: {
+          client_id?: string
+          constraint_text?: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          sort_order?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_offer_constraints_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_assets: {
+        Row: {
+          client_id: string
+          created_at: string
+          deleted_at: string | null
+          formats: string | null
+          id: string
+          kind: Database["public"]["Enums"]["client_asset_kind"]
+          label: string | null
+          ref: string
+          sort_order: number
+          source: Database["public"]["Enums"]["client_asset_source"]
+        }
+        Insert: {
+          client_id: string
+          created_at?: string
+          deleted_at?: string | null
+          formats?: string | null
+          id?: string
+          kind: Database["public"]["Enums"]["client_asset_kind"]
+          label?: string | null
+          ref: string
+          sort_order?: number
+          source: Database["public"]["Enums"]["client_asset_source"]
+        }
+        Update: {
+          client_id?: string
+          created_at?: string
+          deleted_at?: string | null
+          formats?: string | null
+          id?: string
+          kind?: Database["public"]["Enums"]["client_asset_kind"]
+          label?: string | null
+          ref?: string
+          sort_order?: number
+          source?: Database["public"]["Enums"]["client_asset_source"]
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_assets_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_past_projects: {
+        Row: {
+          client_id: string
+          created_at: string
+          deleted_at: string | null
+          id: string
+          sort_order: number
+          url: string
+        }
+        Insert: {
+          client_id: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          sort_order?: number
+          url: string
+        }
+        Update: {
+          client_id?: string
+          created_at?: string
+          deleted_at?: string | null
+          id?: string
+          sort_order?: number
+          url?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_past_projects_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      client_integrations: {
+        Row: {
+          active: boolean
+          client_id: string
+          config: Json
+          created_at: string
+          deleted_at: string | null
+          external_id: string | null
+          id: string
+          provider: string
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          client_id: string
+          config?: Json
+          created_at?: string
+          deleted_at?: string | null
+          external_id?: string | null
+          id?: string
+          provider: string
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          client_id?: string
+          config?: Json
+          created_at?: string
+          deleted_at?: string | null
+          external_id?: string | null
+          id?: string
+          provider?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "client_integrations_client_id_fkey"
+            columns: ["client_id"]
+            isOneToOne: false
+            referencedRelation: "clients"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       copy_variants: {
         Row: {
           approved_at: string | null
@@ -1895,6 +2406,17 @@ export type Database = {
       chat_author: "user" | "ekko" | "system"
       chat_content_type: "text" | "tool_call" | "tool_result" | "system"
       chat_creative_type: "image" | "video"
+      client_asset_kind:
+        | "logo"
+        | "logo_alt"
+        | "facebook_banner"
+        | "review"
+        | "team_photo"
+        | "project_photo"
+        | "external"
+        | "existing_creative"
+      client_asset_source: "drive" | "local" | "url" | "filename" | "descriptor"
+      client_value_prop_kind: "usp" | "differentiator"
       creative_type: "image" | "video"
       hermes_task_status_enum:
         | "pending"
@@ -1940,7 +2462,12 @@ export type Database = {
         | "done"
         | "cancelled"
       ratio: "1x1" | "9x16" | "16x9" | "4x5" | "1.91x1"
-      service_type: "roofing" | "remodeling"
+      service_type:
+        | "roofing"
+        | "remodeling"
+        | "general_contracting"
+        | "construction"
+        | "pools"
       sync_status: "running" | "ok" | "error"
       video_brief_status:
         | "draft"
@@ -2169,6 +2696,18 @@ export const Constants = {
       chat_author: ["user", "ekko", "system"],
       chat_content_type: ["text", "tool_call", "tool_result", "system"],
       chat_creative_type: ["image", "video"],
+      client_asset_kind: [
+        "logo",
+        "logo_alt",
+        "facebook_banner",
+        "review",
+        "team_photo",
+        "project_photo",
+        "external",
+        "existing_creative",
+      ],
+      client_asset_source: ["drive", "local", "url", "filename", "descriptor"],
+      client_value_prop_kind: ["usp", "differentiator"],
       creative_type: ["image", "video"],
       hermes_task_status_enum: [
         "pending",
@@ -2219,7 +2758,13 @@ export const Constants = {
         "cancelled",
       ],
       ratio: ["1x1", "9x16", "16x9", "4x5", "1.91x1"],
-      service_type: ["roofing", "remodeling"],
+      service_type: [
+        "roofing",
+        "remodeling",
+        "general_contracting",
+        "construction",
+        "pools",
+      ],
       sync_status: ["running", "ok", "error"],
       video_brief_status: [
         "draft",

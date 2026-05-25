@@ -20,21 +20,21 @@ describe("MetricBadge", () => {
     const { container } = render(<MetricBadge verdict="kill" />);
 
     expect(screen.getByText("Kill")).toBeInTheDocument();
-    expect(container.querySelector(".bg-rose-500")).not.toBeNull();
+    expect(container.querySelector(".bg-destructive")).not.toBeNull();
   });
 
   it("renders the watch label and dot", () => {
     const { container } = render(<MetricBadge verdict="watch" />);
 
     expect(screen.getByText("Watch")).toBeInTheDocument();
-    expect(container.querySelector(".bg-amber-500")).not.toBeNull();
+    expect(container.querySelector(".bg-warning")).not.toBeNull();
   });
 
   it("renders the keep label and dot", () => {
     const { container } = render(<MetricBadge verdict="keep" />);
 
     expect(screen.getByText("Keep")).toBeInTheDocument();
-    expect(container.querySelector(".bg-emerald-500")).not.toBeNull();
+    expect(container.querySelector(".bg-success")).not.toBeNull();
   });
 
   it("uses the explicit reason as the tooltip when provided", () => {

@@ -36,7 +36,7 @@ import { vi } from "vitest";
 
 export type SupabaseMockResult<T = unknown> = {
   data: T | null;
-  error: { message: string } | null;
+  error: { message: string; code?: string } | null;
 };
 
 /**
