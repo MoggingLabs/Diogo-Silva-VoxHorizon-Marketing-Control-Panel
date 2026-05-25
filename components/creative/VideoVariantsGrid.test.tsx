@@ -76,7 +76,7 @@ function makeCreative(over: Partial<VideoCreative> = {}): VideoCreative {
     created_at: new Date(Date.now() - 60_000).toISOString(),
     updated_at: new Date().toISOString(),
     ...(over as object),
-  } as VideoCreative;
+  } as unknown as VideoCreative;
 }
 
 const briefStub: VideoBrief = {

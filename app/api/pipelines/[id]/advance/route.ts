@@ -8,6 +8,7 @@ import {
   canAdvance,
   nextStage,
 } from "@/lib/pipeline/transitions";
+import type { PipelineFormat } from "@/lib/pipeline/types";
 import {
   copyGateCleared,
   isCreativeInScope,
@@ -134,15 +135,46 @@ async function advanceFromFinalizeAssets(
   supabase: SupabaseClient,
   pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
 ): Promise<NextResponse> {
-  const { data: rows, error: readErr } = await supabase
-    .from("creatives")
-    .select("id, finalize_verified")
-    .eq("pipeline_id", pipeline.id)
-    .is("deleted_at", null);
-  if (readErr) {
-    return NextResponse.json({ error: readErr.message }, { status: 500 });
+  const tracks = activeTracksLocal(pipeline.format_choice as PipelineFormat);
+
+  const creatives: Array<{ id: string; finalize_verified: boolean | null }> = [];
+
+  // Image track: the in-scope (non-deleted) image creatives the finalize tools
+  // stamp. Read only when the image track is active so an image-only pipeline's
+  // query plan is byte-identical to before and a video-only pipeline doesn't
+  // run a no-op image read.
+  if (tracks.image) {
+    const { data: rows, error: readErr } = await supabase
+      .from("creatives")
+      .select("id, finalize_verified")
+      .eq("pipeline_id", pipeline.id)
+      .is("deleted_at", null);
+    if (readErr) {
+      return NextResponse.json({ error: readErr.message }, { status: 500 });
+    }
+    for (const r of (rows ?? []) as Array<{ id: string; finalize_verified: boolean | null }>) {
+      creatives.push(r);
+    }
   }
-  const creatives = (rows ?? []) as Array<{ id: string; finalize_verified: boolean | null }>;
+
+  // Video track: count the pipeline's in-scope video creatives' finalize state
+  // too (the operator's video finalize tools stamp video_creatives.finalize_verified,
+  // migration 0031). Video creatives join the pipeline via the pipeline's
+  // video_brief_id. Additive: image semantics are untouched.
+  if (tracks.video && pipeline.video_brief_id) {
+    const { data: vRows, error: vErr } = await supabase
+      .from("video_creatives")
+      .select("id, finalize_verified")
+      .eq("brief_id", pipeline.video_brief_id)
+      .is("deleted_at", null);
+    if (vErr) {
+      return NextResponse.json({ error: vErr.message }, { status: 500 });
+    }
+    for (const r of (vRows ?? []) as Array<{ id: string; finalize_verified: boolean | null }>) {
+      creatives.push(r);
+    }
+  }
+
   const total = creatives.length;
   const unverified = creatives.filter((c) => c.finalize_verified !== true).length;
   if (total === 0 || unverified > 0) {
@@ -285,7 +317,7 @@ async function advanceFromPerCreativeStage(
   // so gating copy on that rollup would STALL the stage permanently. Re-derive
   // the approved-copy gate here instead so the UI and the server agree.
   if (status === "copy") {
-    const copyGate = await computeCopyGate(supabase, pipeline.id);
+    const copyGate = await computeCopyGate(supabase, pipeline);
     if (!copyGate.ok) {
       return NextResponse.json({ error: copyGate.message }, { status: 500 });
     }
@@ -331,47 +363,97 @@ async function advanceFromPerCreativeStage(
 }
 
 /**
- * Re-derive the copy gate: ≥{@link MIN_APPROVED_COPY} approved `copy_variants`
- * per in-scope (non-killed, non-deleted) creative. Returns `{ cleared, total,
- * short }` so a 422 can name how many creatives are short on approved copy. A
- * read error surfaces (caller turns it into a 500).
+ * Re-derive the copy gate: ≥{@link MIN_APPROVED_COPY} approved copy variants per
+ * in-scope (non-killed, non-deleted) creative, counting BOTH tracks for a
+ * format=both / video pipeline:
+ *   - image creatives' approved `copy_variants`,
+ *   - video creatives' approved `video_copy_variants` (parity tables from
+ *     migration 0031; the video copy tool upserts them per creative/platform).
+ *
+ * Each track's tables are read only when that track is active, so an image-only
+ * pipeline's behaviour (and query plan) is byte-identical to before; a video or
+ * both pipeline additionally folds its video creatives into the same
+ * ≥MIN_APPROVED_COPY-per-in-scope-creative predicate. Image creatives may be
+ * `killed` (dropped from scope); video creatives are in scope unless soft-deleted
+ * (video_creative_status has no `killed` value). Returns `{ cleared, total, short }`
+ * so a 422 can name how many creatives are short on approved copy. A read error
+ * surfaces (caller turns it into a 500).
  */
 async function computeCopyGate(
   supabase: SupabaseClient,
-  pipelineId: string,
+  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
 ): Promise<
   { ok: true; cleared: boolean; total: number; short: number } | { ok: false; message: string }
 > {
-  const { data: creatives, error: cErr } = await supabase
-    .from("creatives")
-    .select("id, status")
-    .eq("pipeline_id", pipelineId)
-    .is("deleted_at", null);
-  if (cErr) {
-    return { ok: false, message: cErr.message };
-  }
-  const inScope = (creatives ?? []).filter((c) =>
-    isCreativeInScope(c as { status?: string | null }),
-  ) as Array<{ id: string }>;
+  const pipelineId = pipeline.id;
+  const tracks = activeTracksLocal(pipeline.format_choice as PipelineFormat);
 
-  const { data: variants, error: vErr } = await supabase
-    .from("copy_variants")
-    .select("creative_id, status")
-    .eq("pipeline_id", pipelineId)
-    .eq("status", "approved");
-  if (vErr) {
-    return { ok: false, message: vErr.message };
-  }
+  const inScopeIds: string[] = [];
   const approvedByCreative = new Map<string, number>();
-  for (const v of (variants ?? []) as Array<{ creative_id: string }>) {
-    approvedByCreative.set(v.creative_id, (approvedByCreative.get(v.creative_id) ?? 0) + 1);
+
+  // Image track (unchanged): in-scope image creatives + their approved copy.
+  if (tracks.image) {
+    const { data: creatives, error: cErr } = await supabase
+      .from("creatives")
+      .select("id, status")
+      .eq("pipeline_id", pipelineId)
+      .is("deleted_at", null);
+    if (cErr) {
+      return { ok: false, message: cErr.message };
+    }
+    for (const c of (creatives ?? []).filter((c) =>
+      isCreativeInScope(c as { status?: string | null }),
+    ) as Array<{ id: string }>) {
+      inScopeIds.push(c.id);
+    }
+
+    const { data: variants, error: vErr } = await supabase
+      .from("copy_variants")
+      .select("creative_id, status")
+      .eq("pipeline_id", pipelineId)
+      .eq("status", "approved");
+    if (vErr) {
+      return { ok: false, message: vErr.message };
+    }
+    for (const v of (variants ?? []) as Array<{ creative_id: string }>) {
+      approvedByCreative.set(v.creative_id, (approvedByCreative.get(v.creative_id) ?? 0) + 1);
+    }
   }
+
+  // Video track (additive): in-scope video creatives (joined via the pipeline's
+  // video_brief_id) + their approved video_copy_variants.
+  if (tracks.video && pipeline.video_brief_id) {
+    const { data: vCreatives, error: vcErr } = await supabase
+      .from("video_creatives")
+      .select("id, status")
+      .eq("brief_id", pipeline.video_brief_id)
+      .is("deleted_at", null);
+    if (vcErr) {
+      return { ok: false, message: vcErr.message };
+    }
+    const videoIds = (vCreatives ?? []).map((c) => (c as { id: string }).id);
+    for (const cid of videoIds) {
+      inScopeIds.push(cid);
+    }
+
+    if (videoIds.length > 0) {
+      const { data: vVariants, error: vvErr } = await supabase
+        .from("video_copy_variants")
+        .select("creative_id, status")
+        .in("creative_id", videoIds)
+        .eq("status", "approved");
+      if (vvErr) {
+        return { ok: false, message: vvErr.message };
+      }
+      for (const v of (vVariants ?? []) as Array<{ creative_id: string }>) {
+        approvedByCreative.set(v.creative_id, (approvedByCreative.get(v.creative_id) ?? 0) + 1);
+      }
+    }
+  }
+
   // Single-source copy-gate predicate (≥MIN_APPROVED_COPY approved per in-scope
   // creative) — the same one the launch checklist + StageCopy UI read.
-  const { cleared, total, short } = copyGateCleared(
-    inScope.map((c) => c.id),
-    approvedByCreative,
-  );
+  const { cleared, total, short } = copyGateCleared(inScopeIds, approvedByCreative);
   return { ok: true, cleared, total, short };
 }
 

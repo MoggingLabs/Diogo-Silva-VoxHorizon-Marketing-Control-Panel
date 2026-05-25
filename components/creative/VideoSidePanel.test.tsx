@@ -70,7 +70,7 @@ function makeCreative(over: Partial<VideoCreative> = {}): VideoCreative {
     created_at: "2026-05-17T11:00:00Z",
     updated_at: "2026-05-17T11:30:00Z",
     ...(over as object),
-  } as VideoCreative;
+  } as unknown as VideoCreative;
 }
 
 const briefStub: VideoBrief = {
