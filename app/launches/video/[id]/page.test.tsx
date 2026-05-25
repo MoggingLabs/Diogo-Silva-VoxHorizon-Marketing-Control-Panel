@@ -23,6 +23,17 @@ vi.mock("@/components/launch/LaunchTimeline", () => ({
     <div data-testid="timeline" data-count={initialEvents.length} />
   ),
 }));
+vi.mock("@/components/launch/LaunchPackageActions", () => ({
+  LaunchPackageActions: () => <div data-testid="launch-actions" />,
+}));
+vi.mock("@/components/launch/AdEntityGraph", () => ({
+  AdEntityGraph: ({ entities }: { entities: unknown[] }) => (
+    <div data-testid="ad-entities" data-count={entities.length} />
+  ),
+}));
+vi.mock("@/lib/ad-entity", () => ({
+  getAdEntitiesForLaunch: vi.fn(async () => [] as unknown[]),
+}));
 
 const notFoundSpy = vi.fn(() => {
   throw new Error("__NOT_FOUND__");

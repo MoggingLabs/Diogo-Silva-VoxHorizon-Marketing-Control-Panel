@@ -1,9 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
+import { AdEntityGraph } from "@/components/launch/AdEntityGraph";
+import { LaunchPackageActions } from "@/components/launch/LaunchPackageActions";
 import { LaunchTimeline } from "@/components/launch/LaunchTimeline";
 import { VideoLaunchApprovalGate } from "@/components/launch/VideoLaunchApprovalGate";
 import { VideoLaunchSummary } from "@/components/launch/VideoLaunchSummary";
+import { getAdEntitiesForLaunch } from "@/lib/ad-entity";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
 import {
   readVideoLaunchPayload,
@@ -64,6 +67,7 @@ export default async function VideoLaunchDetailPage({
     throw new Error("video launch payload failed schema validation");
   }
 
+  const adEntities = await getAdEntitiesForLaunch(launch.id);
   const [briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
     supabase
       .from("video_briefs")
@@ -125,22 +129,39 @@ export default async function VideoLaunchDetailPage({
     <main className="container mx-auto flex min-h-dvh max-w-5xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
       <header className="space-y-2">
         <p className="text-sm text-muted-foreground">
-          <Link href="/launches/video" className="underline-offset-4 hover:underline">
-            Video launches
+          <Link href="/launches" className="underline-offset-4 hover:underline">
+            Launches
           </Link>{" "}
           / <span className="break-all font-mono">{payload.brief_id_human}</span>
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Video launch — {payload.client?.name ?? brief.clients?.name ?? "—"}
-          </h1>
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[status] ?? STATUS_BADGE.posted}`}
-          >
-            {STATUS_LABEL[status] ?? status}
-          </span>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              Video launch — {payload.client?.name ?? brief.clients?.name ?? "—"}
+            </h1>
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[status] ?? STATUS_BADGE.posted}`}
+            >
+              {STATUS_LABEL[status] ?? status}
+            </span>
+          </div>
+          <div className="self-start">
+            <LaunchPackageActions
+              format="video"
+              launchId={launch.id}
+              decidedNotes={launch.decided_notes}
+              archived={launch.deleted_at !== null}
+            />
+          </div>
         </div>
       </header>
+
+      {launch.deleted_at ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+          This video launch package is archived and hidden from the active list. Restore it to bring
+          it back.
+        </div>
+      ) : null}
 
       {launch.decided_at ? (
         <section className="space-y-1 rounded-md border bg-muted/30 px-4 py-3">
@@ -167,6 +188,8 @@ export default async function VideoLaunchDetailPage({
       />
 
       {status === "posted" ? <VideoLaunchApprovalGate launchId={launch.id} /> : null}
+
+      <AdEntityGraph entities={adEntities} />
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Timeline</h2>

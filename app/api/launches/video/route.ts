@@ -204,19 +204,25 @@ export async function POST(req: NextRequest) {
   return NextResponse.json({ launch }, { status: finalOk ? 201 : 422 });
 }
 
-/** GET /api/launches/video — newest-first list. */
+/**
+ * GET /api/launches/video — newest-first list. Archived packages excluded by
+ * default; ``?archived=true`` lists ONLY the archived set (E5.1 / #595).
+ */
 export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
   const url = new URL(req.url);
   const briefId = url.searchParams.get("brief_id");
   const status = url.searchParams.get("status");
+  const archived = url.searchParams.get("archived") === "true";
 
   let query = supabase
     .from("video_launch_packages")
-    .select("id, brief_id, status, created_at, decided_at, decided_notes")
+    .select("id, brief_id, status, created_at, decided_at, decided_notes, payload, deleted_at")
     .order("created_at", { ascending: false })
     .limit(200);
 
+  if (archived) query = query.not("deleted_at", "is", null);
+  else query = query.is("deleted_at", null);
   if (briefId) query = query.eq("brief_id", briefId);
   if (status) query = query.eq("status", status);
 
