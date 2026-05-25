@@ -25,8 +25,9 @@ limit 1``) for the sentinel:
 To bump the floor when a new migration lands, update ``REQUIRED_MIGRATION`` +
 ``SENTINEL_TABLE`` together (the table the new migration introduces). The
 deploy-path gate in ``.github/workflows/deploy-stack.yml`` probes the SAME
-sentinel via psql BEFORE rolling images, so a behind DB fails the deploy instead
-of shipping a broken image. See ``docs/migrations.md`` for the expand/contract
+sentinel via the Supabase REST API (the same admin credentials this guard uses)
+BEFORE rolling images, so a behind DB fails the deploy instead of shipping a
+broken image. See ``docs/migrations.md`` for the expand/contract
 rule and ``docs/runbooks/rollback.md`` for the rollback contract.
 
 DESIGN. ``assert_schema_current`` raises :class:`SchemaBehindError` on a proven
@@ -55,8 +56,8 @@ log = structlog.get_logger(__name__)
 # and SENTINEL_TABLE is a table that migration creates. The deploy gate in
 # deploy-stack.yml hardcodes the SAME table name, so the in-app probe and the
 # pre-deploy probe agree by construction.
-REQUIRED_MIGRATION = "0033_video_render_tasks"
-SENTINEL_TABLE = "video_render_tasks"
+REQUIRED_MIGRATION = "0034_creative_identity_base"
+SENTINEL_TABLE = "creative"
 
 
 class SchemaBehindError(RuntimeError):
