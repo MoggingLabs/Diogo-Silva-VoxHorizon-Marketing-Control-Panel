@@ -149,24 +149,22 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # SQL lint (E0.5 / #436): sqlfluff over the forward-only migration chain.
-  # Postgres dialect, lint-only (never rewrites files in CI).
+  # Lint-only (never rewrites files in CI). BLOCKING.
   #
-  # ADVISORY (continue-on-error). The existing migrations predate any sqlfluff
-  # config, so the default rule set reports many cosmetic style findings, and
-  # sqlfluff's postgres parser does not fully understand a couple of valid,
-  # already-deployed constructs (for example the `ALTER FUNCTION ... SET
-  # search_path = ..., pg_temp` hardening in 0029), which it flags as a parse
-  # error. Making this a hard gate over existing valid SQL would keep the cheap
-  # gate permanently red. Adding a repo-root `.sqlfluff` config + baseline is
-  # the proper fix, but that is outside this PR's allowed scope (.github/** and
-  # docs/** only); it is tracked as a follow-up (see docs/ci.md). The
-  # AUTHORITATIVE SQL correctness gate is `migration-apply`, which runs the real
-  # SQL against a real Postgres and fails on real errors.
+  # Config lives in db/.sqlfluff (postgres dialect, raw templater, the cosmetic
+  # layout rules excluded so the gate flags REAL problems on new migrations, not
+  # the hand-aligned style the existing deployed files predate). The sqlfluff
+  # version is pinned so an upstream release cannot turn the gate red without a
+  # repo change. Two merged, deployed migrations use a valid
+  # `ALTER FUNCTION ... SET search_path = a, b` that sqlfluff's postgres parser
+  # cannot read; forward-only files are never edited, so they are listed in
+  # db/.sqlfluffignore. A NEW migration needing that construct should add an
+  # inline `-- noqa: PRS` on the line instead. See docs/ci.md.
+  # migration-apply remains the authoritative correctness gate (real Postgres).
   # ---------------------------------------------------------------------------
   sql-lint:
-    name: SQL lint (sqlfluff, advisory)
+    name: SQL lint (sqlfluff)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -175,8 +173,8 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Lint db/migrations (postgres dialect, advisory)
-        run: uvx sqlfluff lint db/migrations --dialect postgres
+      - name: Lint db/migrations (postgres dialect)
+        run: uvx --from "sqlfluff==4.2.1" sqlfluff lint db/migrations --config db/.sqlfluff
 
   # ===========================================================================
   # EXPENSIVE GATE (path-filtered via the `changes` job)

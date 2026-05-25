@@ -17,8 +17,8 @@ on the change-detection job, so they always produce a signal:
 - `web-checks` - TypeScript typecheck, ESLint, and Vitest unit tests with the
   >=90% coverage gate.
 - `workflow-lint` - actionlint over `.github/workflows`.
-- `sql-lint` - sqlfluff over `db/migrations` (postgres dialect, lint-only).
-  ADVISORY (`continue-on-error: true`) for now; see "SQL lint is advisory"
+- `sql-lint` - sqlfluff over `db/migrations` (postgres dialect, lint-only),
+  config-driven (`db/.sqlfluff`) and version-pinned. BLOCKING; see "SQL lint"
   below. The authoritative SQL correctness gate is `migration-apply`.
 
 ### Expensive gate (path-filtered)
@@ -48,26 +48,38 @@ expensive tier is degraded. Conversely, a build break or a flaky e2e never block
 the cheap checks from going green, because they are separate jobs with no shared
 dependency.
 
-## SQL lint is advisory
+## SQL lint
 
-`sql-lint` runs sqlfluff over `db/migrations` with the postgres dialect, but it
-is advisory (`continue-on-error: true`) and does not fail the gate. Two reasons:
+`sql-lint` runs sqlfluff over `db/migrations` and is a BLOCKING gate. It is
+driven by `db/.sqlfluff` and the sqlfluff version is pinned in the workflow
+(`uvx --from "sqlfluff==4.2.1" ...`) so an upstream release cannot turn the gate
+red without a repo change. The command is lint-only and never rewrites files.
 
-- The existing migrations predate any sqlfluff config, so the default rule set
-  reports many cosmetic style findings.
-- sqlfluff's postgres parser does not fully understand a couple of valid,
-  already-deployed constructs (for example the `ALTER FUNCTION ... SET
-  search_path = ..., pg_temp` hardening in `0029`), which it flags as a parse
-  error.
+`db/.sqlfluff` sets the postgres dialect and the `raw` templater, and excludes
+the purely cosmetic layout rules (spacing/indentation/line-length/aliasing/etc.)
+that the existing hand-aligned, already-deployed migrations predate. Excluding
+those rules (rather than auto-reformatting 40+ forward-only files) keeps the gate
+focused on REAL problems: parse errors and the correctness-relevant rules stay
+on. Run it locally exactly as CI does:
 
-Making sqlfluff a hard gate over existing valid SQL would keep the cheap gate
-permanently red. The proper fix is to add a repo-root `.sqlfluff` config plus a
-baseline so only new style violations fail, but that file lives outside this
-PR's allowed scope (`.github/**` and `docs/**` only) and is left as a follow-up.
+```bash
+uvx --from "sqlfluff==4.2.1" sqlfluff lint db/migrations --config db/.sqlfluff
+```
 
-The authoritative SQL correctness gate is the `migration-apply` job: it applies
-the real migration chain to a real Postgres and fails on any real error, which
-is the property that actually matters for a forward-only migration set.
+### The `ALTER FUNCTION ... SET search_path = a, b` parse gap
+
+sqlfluff's postgres dialect cannot parse a comma-separated value list in
+`ALTER FUNCTION ... SET <param> = <a>, <b>` (it reports a `PRS` parse error on
+the comma), even though the SQL is valid and deployed. Two merged migrations
+(`0011_enable_rls_lockdown.sql`, `0029_harden_rebuild_function_search_path.sql`)
+use it. Because forward-only migrations are never edited, they are listed in
+`db/.sqlfluffignore`. A NEW migration that needs this construct should add an
+inline `-- noqa: PRS` on the offending line instead of being added to the ignore
+file.
+
+The authoritative SQL correctness gate remains the `migration-apply` job: it
+applies the real migration chain to a real Postgres and fails on any real error,
+which is the property that actually matters for a forward-only migration set.
 
 ## The `integration` marker contract (epic #421)
 
@@ -117,8 +129,8 @@ pnpm test:coverage
 # workflow lint (downloads actionlint on demand via uvx)
 uvx actionlint
 
-# sql lint
-uvx sqlfluff lint db/migrations --dialect postgres
+# sql lint (pinned + config, exactly as CI runs it)
+uvx --from "sqlfluff==4.2.1" sqlfluff lint db/migrations --config db/.sqlfluff
 ```
 
 ### 2. Run the heavy checks that match your change
