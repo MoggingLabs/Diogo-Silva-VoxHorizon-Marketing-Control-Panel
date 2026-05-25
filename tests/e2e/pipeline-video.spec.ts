@@ -1,3 +1,5 @@
+import type { Page } from "@playwright/test";
+
 import { test, expect, getTestAdminClient } from "./_fixtures";
 import { mockWorkerIdeation } from "./_mocks/sse-harness";
 import {
@@ -453,8 +455,10 @@ test.describe("pipeline - video format", () => {
 
     expect(await readPipelineStatus(pipelineId)).toBe("done");
 
-    // Focused UI assertion: the Done stage renders.
-    await page.goto(`/pipeline/${pipelineId}`);
+    // Focused UI assertion: the Done stage renders. Navigate with
+    // domcontentloaded + a retry: a prior in-flight SPA navigation can abort the
+    // first goto (net::ERR_ABORTED) on this long-running flow.
+    await gotoWithRetry(page, `/pipeline/${pipelineId}`);
     await expect(page.getByText("Done", { exact: true }).first()).toBeVisible({ timeout: 15_000 });
   });
 });
@@ -485,6 +489,23 @@ async function managerPost(pipelineId: string, path: string, body: unknown): Pro
 /** POST the generic advance route (no body). */
 async function rawAdvance(pipelineId: string): Promise<ApiResult> {
   return managerPost(pipelineId, "advance", {});
+}
+
+/**
+ * Navigate with `domcontentloaded` + one retry. A prior in-flight SPA
+ * navigation can abort the first goto (net::ERR_ABORTED) on this long-running
+ * flow; the retry rides over that transient.
+ */
+async function gotoWithRetry(page: Page, url: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      return;
+    } catch (e) {
+      if (attempt === 1) throw e;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  }
 }
 
 /** Advance and assert the pipeline reached `want`. */
