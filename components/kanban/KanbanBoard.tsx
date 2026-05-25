@@ -101,7 +101,7 @@ export function KanbanBoard({
       {renderImageTrack ? (
         <KanbanTrack
           title="Image briefs"
-          accentClass="bg-violet-500"
+          accentClass="bg-primary"
           kind="image"
           briefs={imageBriefs}
           pipelineMap={imagePipelineMap}
@@ -110,7 +110,7 @@ export function KanbanBoard({
       {renderVideoTrack ? (
         <KanbanTrack
           title="Video briefs"
-          accentClass="bg-cyan-500"
+          accentClass="bg-accent"
           kind="video"
           briefs={videoBriefs}
           pipelineMap={videoPipelineMap}

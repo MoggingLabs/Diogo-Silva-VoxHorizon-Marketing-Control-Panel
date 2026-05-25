@@ -46,7 +46,7 @@ describe("FunnelSankey", () => {
     );
 
     expect(
-      screen.getByText(/No funnel data yet — waiting for the worker pull\./),
+      screen.getByText(/No funnel data yet - waiting for the worker pull\./),
     ).toBeInTheDocument();
   });
 

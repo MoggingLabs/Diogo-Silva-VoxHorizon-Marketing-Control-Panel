@@ -46,7 +46,7 @@ describe("KanbanColumn", () => {
   it("falls back to the default accent class when none is supplied", () => {
     const { container } = render(<KanbanColumn title="Live" count={1} />);
 
-    expect(container.querySelector(".bg-zinc-400")).not.toBeNull();
+    expect(container.querySelector(".bg-muted-foreground")).not.toBeNull();
   });
 
   it("renders children when content exists", () => {
