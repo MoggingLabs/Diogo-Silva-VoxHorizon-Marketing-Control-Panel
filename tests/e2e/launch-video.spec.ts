@@ -94,9 +94,10 @@ test.describe("video launch package", () => {
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
     // Click without notes — client-side validation should block + surface
-    // an alert (see VideoLaunchApprovalGate.tsx).
+    // the gate's own alert (scoped by testid: a bare getByRole("alert") also
+    // matches Next's __next-route-announcer__, a strict-mode violation).
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByRole("alert")).toContainText(/notes are required/i);
+    await expect(page.getByTestId("launch-decision-error")).toContainText(/notes are required/i);
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
     // With notes the launch transitions.
