@@ -367,7 +367,15 @@ test.describe("pipeline - video format", () => {
     // video copy variants exist - so the launch preconditions are met. The
     // operator records the PAUSED-first Meta entities (the recorder re-checks
     // the same preconditions server-side), then the manager approves.
-    // ===================================================================
+    //
+    // The ad_entity row links the (neutral) creative_id but NOT copy_variant_id:
+    // `ad_entity.copy_variant_id` FKs `copy_variants` (image) only (migration
+    // 0035 repointed creative_id to the neutral `creative` base but there is no
+    // neutral copy-variant base), so a video copy variant id would violate the
+    // FK. copy_variant_id is optional on the recorder and the launch
+    // preconditions count approved video copy independently of the ad_entity, so
+    // omitting it records a faithful, valid launch. (See PR notes: a neutral
+    // copy-variant base would let the video ad_entity carry its copy link.)
     const record = await workerPost("/work/pipeline/tools/launch", {
       pipeline_id: pipelineId,
       approved_by: "e2e-manager",
@@ -378,7 +386,6 @@ test.describe("pipeline - video format", () => {
           meta_id: "fake-video-ad-1",
           parent_meta_id: "fake-video-campaign-1",
           creative_id: creativeId,
-          copy_variant_id: copyRows[0]!.id,
         },
       ],
     });

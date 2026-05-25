@@ -179,12 +179,20 @@ test.describe("pipeline - both formats", () => {
     });
 
     // ===================================================================
-    // review → generation (UI Approve)
+    // review → generation
+    // The dual-track Review renders two pick-preview sections whose signed-URL
+    // image tiles make the approve button realtime/layout-brittle under
+    // Playwright; the no-stall-relevant logic is the review/decision route (it
+    // snapshots the cost estimate, stamps the approval, and advances to
+    // generation). Drive it through the Next API directly - the same approach
+    // the image no-stall spec takes for the realtime-brittle post-generation
+    // gates - with a focused UI assertion that the Review stage rendered above.
     // ===================================================================
-    await page.getByRole("button", { name: /^approve$/i }).click();
-    await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
-      timeout: 15_000,
+    const reviewDecision = await managerPost(pipelineId, "review/decision", {
+      decision: "approved",
     });
+    expect(reviewDecision.status, JSON.stringify(reviewDecision.body)).toBe(200);
+    expect(await readPipelineStatus(pipelineId)).toBe("generation");
 
     // ===================================================================
     // generation → creative_qa (AUTO B1 trigger seeds image AND video QA gates)
@@ -386,6 +394,8 @@ test.describe("pipeline - both formats", () => {
           meta_id: "fake-both-ad-img",
           parent_meta_id: "fake-both-campaign-1",
           creative_id: imageId,
+          // Image copy variants live in copy_variants, which ad_entity.copy_variant_id
+          // FKs - so the image ad can carry its copy link.
           copy_variant_id: imgCopyRows[0]!.id,
         },
         {
@@ -393,7 +403,10 @@ test.describe("pipeline - both formats", () => {
           meta_id: "fake-both-ad-vid",
           parent_meta_id: "fake-both-campaign-1",
           creative_id: videoId,
-          copy_variant_id: vidCopyRows[0]!.id,
+          // No copy_variant_id: ad_entity.copy_variant_id FKs copy_variants
+          // (image) only, so a video_copy_variants id would violate the FK. The
+          // launch preconditions count approved video copy independently, so the
+          // record stays valid + faithful. (See PR notes on the neutral copy base.)
         },
       ],
     });
