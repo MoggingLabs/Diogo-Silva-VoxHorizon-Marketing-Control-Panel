@@ -1,17 +1,11 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import {
-  countWithStatus,
-  type CopyField,
-  type CopyPlatform,
-  type CopyPlacement,
-} from "@/lib/copy/platform-limits";
-import {
   UpsertCopyInput,
   type CopyVariantInsert,
   type CopyVariantUpdate,
-  type UpsertCopyInputT,
 } from "@/lib/copy/schemas";
+import { buildCopyValidation } from "@/lib/copy/validation";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
 
@@ -76,7 +70,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   }
 
   // Per-field char-count validation against the destination platform limits.
-  const validation = buildValidation(input);
+  const validation = buildCopyValidation(input);
 
   const now = new Date().toISOString();
   const common = {
@@ -131,58 +125,4 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
   return NextResponse.json({ variant: inserted }, { status: 201 });
-}
-
-/**
- * Build the `validation` jsonb: per-field char-count status against the
- * platform's published limits. Stored so the launch validator can re-read it
- * without recomputing.
- */
-const LIMITED_PLATFORMS: ReadonlySet<string> = new Set(["meta", "google"]);
-const LIMITED_PLACEMENTS: ReadonlySet<string> = new Set([
-  "feed",
-  "stories",
-  "reels",
-  "rsa",
-  "pmax",
-]);
-
-function buildValidation(input: UpsertCopyInputT): Record<string, unknown> {
-  // Char limits are published for meta/google only (lib/copy/platform-limits).
-  // For other platforms (e.g. tiktok) we record the lengths without a cap.
-  if (!LIMITED_PLATFORMS.has(input.platform)) {
-    const result: Record<string, unknown> = { ok: true };
-    if (input.headline !== undefined) result.headline = { len: [...input.headline].length };
-    if (input.body !== undefined) result.primary_text = { len: [...input.body].length };
-    if (input.description !== undefined)
-      result.description = { len: [...input.description].length };
-    return result;
-  }
-
-  const platform = input.platform as CopyPlatform;
-  const placement =
-    input.placement && LIMITED_PLACEMENTS.has(input.placement)
-      ? (input.placement as CopyPlacement)
-      : undefined;
-
-  const fields: Array<[CopyField, string | undefined]> = [
-    ["headline", input.headline],
-    ["primary_text", input.body],
-    ["description", input.description],
-  ];
-  const result: Record<string, unknown> = {};
-  let ok = true;
-  for (const [field, value] of fields) {
-    if (value === undefined) continue;
-    const r = countWithStatus(value, field, platform, placement);
-    result[field] = {
-      len: r.len,
-      max: Number.isFinite(r.max) ? r.max : null,
-      status: r.status,
-      over: r.over,
-    };
-    if (r.status === "error") ok = false;
-  }
-  result.ok = ok;
-  return result;
 }
