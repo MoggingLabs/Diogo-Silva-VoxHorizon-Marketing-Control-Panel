@@ -39,6 +39,9 @@ export type Pipeline = {
   created_at: string;
   updated_at: string;
   advanced_at: Record<string, string> | null;
+  // Soft-archive tombstone (#609). Null = active; set = archived (hidden from
+  // the default list, restorable).
+  deleted_at: string | null;
 };
 
 export type PipelineEvent = {

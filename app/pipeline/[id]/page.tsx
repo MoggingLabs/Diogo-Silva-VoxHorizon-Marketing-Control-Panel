@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Bell } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { ArchivePipelineButton } from "@/components/pipeline/ArchivePipelineButton";
 import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
 import { MonitorDashboard } from "@/components/monitor/MonitorDashboard";
 import { OperatorNarration } from "@/components/pipeline/OperatorNarration";
@@ -138,7 +139,11 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
     pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
 
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
-  const isCancellable = pipeline.status !== "done" && pipeline.status !== "cancelled";
+  const isArchived = pipeline.deleted_at !== null;
+  // Cancel is the in-flight escape hatch; archive is the "remove from my view"
+  // soft-delete. An archived run is read-only chrome, so suppress cancel.
+  const isCancellable =
+    pipeline.status !== "done" && pipeline.status !== "cancelled" && !isArchived;
   // Spend approvals for this run surface in the global ApprovalQueue (header
   // bell) via the plugin→worker→dashboard flow. We also link straight to the
   // audit page filtered to this pipeline's operator session (the operator runs
@@ -179,9 +184,18 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
               {PIPELINE_FORMAT_LABEL[pipeline.format_choice]}
             </span>
           </div>
-          {isCancellable ? <CancelPipelineButton pipelineId={pipeline.id} /> : null}
+          <div className="flex flex-wrap items-center gap-2 self-start">
+            {isCancellable ? <CancelPipelineButton pipelineId={pipeline.id} /> : null}
+            <ArchivePipelineButton pipelineId={pipeline.id} archived={isArchived} />
+          </div>
         </div>
       </header>
+
+      {isArchived ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+          This pipeline is archived and hidden from the active list. Restore it to bring it back.
+        </div>
+      ) : null}
 
       {pipeline.status === "cancelled" ? (
         <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">

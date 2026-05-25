@@ -44,6 +44,13 @@ vi.mock("@/components/pipeline/PipelineDetailRealtime", () => ({
 vi.mock("@/components/pipeline/CancelPipelineButton", () => ({
   CancelPipelineButton: () => <button data-testid="cancel">cancel</button>,
 }));
+vi.mock("@/components/pipeline/ArchivePipelineButton", () => ({
+  ArchivePipelineButton: ({ archived }: { archived: boolean }) => (
+    <button data-testid="archive" data-archived={archived}>
+      {archived ? "restore" : "archive"}
+    </button>
+  ),
+}));
 vi.mock("@/components/pipeline/PhaseStepper", () => ({
   PhaseStepper: ({ current }: { current: string }) => (
     <div data-testid="stepper" data-current={current} />
@@ -122,6 +129,7 @@ function pipeline(over: Record<string, unknown>) {
     created_at: "2026-05-17",
     updated_at: "2026-05-17",
     advanced_at: null,
+    deleted_at: null,
     ...over,
   };
 }

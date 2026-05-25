@@ -2,12 +2,21 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useState } from "react";
-import { Factory } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Archive, ArchiveRestore, Factory, Loader2, MoreHorizontal } from "lucide-react";
+import { toast } from "sonner";
 
 import { EmptyState } from "@/components/EmptyState";
+import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useRealtimeStream } from "@/hooks/useRealtimeStream";
+import { archivePipeline, listPipelines, restorePipeline } from "@/lib/pipeline/client";
 import {
   PIPELINE_FORMAT_BADGE,
   PIPELINE_FORMAT_LABEL,
@@ -19,7 +28,7 @@ import {
 } from "@/lib/pipeline/types";
 import { cn } from "@/lib/utils";
 
-type StatusFilter = "all" | "in-flight" | "done" | "cancelled";
+type StatusFilter = "all" | "in-flight" | "done" | "cancelled" | "archived";
 type FormatFilter = "all" | PipelineFormat;
 
 const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
@@ -27,6 +36,7 @@ const STATUS_FILTERS: { value: StatusFilter; label: string }[] = [
   { value: "in-flight", label: "In flight" },
   { value: "done", label: "Done" },
   { value: "cancelled", label: "Cancelled" },
+  { value: "archived", label: "Archived" },
 ];
 
 const FORMAT_FILTERS: { value: FormatFilter; label: string }[] = [
@@ -56,6 +66,10 @@ function matchesStatusFilter(status: PipelineStatus, filter: StatusFilter): bool
       return status === "done";
     case "cancelled":
       return status === "cancelled";
+    case "archived":
+      // The archived view uses a separate fetched data set, not a status
+      // predicate, so every fetched row qualifies.
+      return true;
   }
 }
 
@@ -69,12 +83,15 @@ export type PipelineListProps = {
 };
 
 /**
- * Interactive table of pipelines. Renders the SSR-fetched initial set, then
- * subscribes to the `pipelines` realtime channel so new rows / status
- * transitions surface without a manual refresh.
+ * Interactive table of pipelines. Renders the SSR-fetched initial set (active
+ * rows only), then subscribes to the `pipelines` realtime channel so new rows
+ * / status transitions surface without a manual refresh.
  *
- * Status + format chips filter the visible rows in-memory; we don't refetch
- * on chip changes because the v1 dataset is small.
+ * Status + format chips filter the visible rows in-memory; the "Archived" chip
+ * is special: archived rows are excluded from the default API list (migration
+ * 0048 `deleted_at`), so selecting it fetches the archived set on demand and
+ * swaps in the Restore action per row. The active view exposes a per-row
+ * Archive action (soft-delete, confirmed + reversible).
  */
 export function PipelineList({ initialPipelines, clientNames }: PipelineListProps) {
   const router = useRouter();
@@ -82,9 +99,40 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [formatFilter, setFormatFilter] = useState<FormatFilter>("all");
 
+  // Archived rows are fetched lazily the first time the operator opens the
+  // Archived view (and re-fetched after a restore so the list stays accurate).
+  const [archived, setArchived] = useState<Pipeline[]>([]);
+  const [archivedLoading, setArchivedLoading] = useState(false);
+  const [archivedError, setArchivedError] = useState<string | null>(null);
+
+  // Confirm-archive dialog state: holds the row being archived.
+  const [pendingArchive, setPendingArchive] = useState<Pipeline | null>(null);
+  // Per-row restore in-flight guard (keyed by pipeline id).
+  const [restoringId, setRestoringId] = useState<string | null>(null);
+
+  const isArchivedView = statusFilter === "archived";
+
   useEffect(() => {
     setPipelines(initialPipelines);
   }, [initialPipelines]);
+
+  const loadArchived = useCallback(async () => {
+    setArchivedLoading(true);
+    setArchivedError(null);
+    try {
+      const res = await listPipelines({ limit: 200, archived: true });
+      setArchived(res.pipelines);
+    } catch (err) {
+      setArchivedError(err instanceof Error ? err.message : "Failed to load archived pipelines.");
+    } finally {
+      setArchivedLoading(false);
+    }
+  }, []);
+
+  // Fetch the archived set the first time (or whenever) the Archived view opens.
+  useEffect(() => {
+    if (isArchivedView) void loadArchived();
+  }, [isArchivedView, loadArchived]);
 
   useRealtimeStream(
     useMemo(
@@ -101,13 +149,41 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
     ),
   );
 
+  const source = isArchivedView ? archived : pipelines;
+
   const filtered = useMemo(() => {
-    return pipelines.filter((p) => {
+    return source.filter((p) => {
       if (!matchesStatusFilter(p.status, statusFilter)) return false;
       if (formatFilter !== "all" && p.format_choice !== formatFilter) return false;
       return true;
     });
-  }, [pipelines, statusFilter, formatFilter]);
+  }, [source, statusFilter, formatFilter]);
+
+  const onArchive = useCallback(async () => {
+    if (!pendingArchive) return;
+    const target = pendingArchive;
+    await archivePipeline(target.id);
+    // Drop the row from the active list immediately; the realtime refresh
+    // reconciles the SSR set on the next round trip.
+    setPipelines((prev) => prev.filter((p) => p.id !== target.id));
+  }, [pendingArchive]);
+
+  const onRestore = useCallback(
+    async (target: Pipeline) => {
+      setRestoringId(target.id);
+      try {
+        await restorePipeline(target.id);
+        setArchived((prev) => prev.filter((p) => p.id !== target.id));
+        toast.success("Pipeline restored");
+        router.refresh();
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Could not restore pipeline");
+      } finally {
+        setRestoringId(null);
+      }
+    },
+    [router],
+  );
 
   return (
     <div className="flex flex-col gap-5">
@@ -131,8 +207,25 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
         </Button>
       </div>
 
-      {filtered.length === 0 ? (
-        pipelines.length === 0 ? (
+      {isArchivedView && archivedError ? (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {archivedError}
+        </div>
+      ) : null}
+
+      {isArchivedView && archivedLoading ? (
+        <div className="flex items-center gap-2 rounded-md border px-3 py-6 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+          Loading archived pipelines…
+        </div>
+      ) : filtered.length === 0 ? (
+        isArchivedView ? (
+          <EmptyState
+            icon={<Archive className="h-8 w-8" aria-hidden="true" />}
+            title="No archived pipelines"
+            description="Pipelines you archive show up here. You can restore them at any time."
+          />
+        ) : source.length === 0 ? (
           <EmptyState
             icon={<Factory className="h-8 w-8" aria-hidden="true" />}
             title="No pipelines yet"
@@ -148,7 +241,7 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
         )
       ) : (
         <div className="overflow-x-auto rounded-md border">
-          <table className="w-full min-w-[720px] text-sm">
+          <table className="w-full min-w-[760px] text-sm">
             <thead className="bg-muted/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
               <tr>
                 <th className="px-3 py-2 font-medium">Client</th>
@@ -156,6 +249,9 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
                 <th className="px-3 py-2 font-medium">Stage</th>
                 <th className="px-3 py-2 font-medium">Created</th>
                 <th className="px-3 py-2 font-medium">Last activity</th>
+                <th className="px-3 py-2 text-right font-medium">
+                  <span className="sr-only">Actions</span>
+                </th>
               </tr>
             </thead>
             <tbody>
@@ -197,6 +293,46 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
                     <td className="px-3 py-2 text-muted-foreground">
                       {formatDate(lastActivity(p))}
                     </td>
+                    <td className="px-3 py-2 text-right">
+                      {isArchivedView ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="gap-1.5"
+                          disabled={restoringId === p.id}
+                          onClick={() => void onRestore(p)}
+                          aria-label="Restore pipeline"
+                        >
+                          {restoringId === p.id ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                          ) : (
+                            <ArchiveRestore className="h-3.5 w-3.5" aria-hidden="true" />
+                          )}
+                          Restore
+                        </Button>
+                      ) : (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-8 w-8 p-0"
+                              aria-label="Pipeline actions"
+                            >
+                              <MoreHorizontal className="h-4 w-4" aria-hidden="true" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onSelect={() => setPendingArchive(p)}>
+                              <Archive className="h-4 w-4" aria-hidden="true" />
+                              Archive
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
@@ -204,6 +340,16 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
           </table>
         </div>
       )}
+
+      <ConfirmArchive
+        open={pendingArchive !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingArchive(null);
+        }}
+        resourceName="pipeline"
+        onConfirm={onArchive}
+        successMessage="Pipeline archived"
+      />
     </div>
   );
 }

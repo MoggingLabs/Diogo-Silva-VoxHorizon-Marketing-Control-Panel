@@ -16,6 +16,8 @@ export type ListPipelinesFilters = {
   client_id?: string;
   limit?: number;
   cursor?: string;
+  /** When true, list ONLY archived (soft-deleted) pipelines (#609). */
+  archived?: boolean;
 };
 
 export type ListPipelinesResult = {
@@ -133,6 +135,7 @@ export async function listPipelines(
   if (filters.client_id) params.set("client_id", filters.client_id);
   if (typeof filters.limit === "number") params.set("limit", String(filters.limit));
   if (filters.cursor) params.set("cursor", filters.cursor);
+  if (filters.archived) params.set("archived", "true");
 
   const qs = params.toString();
   const url = `${resolveBaseUrl()}/api/pipelines${qs ? `?${qs}` : ""}`;
@@ -249,6 +252,49 @@ export async function cancelPipeline(id: string): Promise<{ pipeline: Pipeline }
     const body = await res.text().catch(() => "");
     throw new Error(
       `POST /api/pipelines/${id}/cancel failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+  return readJson<{ pipeline: Pipeline }>(res);
+}
+
+/**
+ * Archive (soft-delete) a pipeline. Sets `deleted_at` so the run drops out of
+ * the active list but stays restorable and keeps its timeline (#609). The
+ * pipeline is the orchestration root, so this is never a hard delete.
+ *
+ * Throws on 4xx/5xx with the inline error body. A 404 (missing) and a 409
+ * (already archived) both surface their message so the UI can toast it.
+ */
+export async function archivePipeline(id: string): Promise<{ pipeline: Pipeline }> {
+  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `DELETE /api/pipelines/${id} failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
+    );
+  }
+  return readJson<{ pipeline: Pipeline }>(res);
+}
+
+/**
+ * Restore an archived pipeline: clears `deleted_at` so it returns to the
+ * active list (#609). Mirror of `archivePipeline`. Throws on 4xx/5xx (a 409
+ * means the row was not archived).
+ */
+export async function restorePipeline(id: string): Promise<{ pipeline: Pipeline }> {
+  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}/restore`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/${id}/restore failed (${res.status}): ${
+        body.slice(0, 200) || res.statusText
+      }`,
     );
   }
   return readJson<{ pipeline: Pipeline }>(res);
