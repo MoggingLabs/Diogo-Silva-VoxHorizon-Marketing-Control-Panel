@@ -1,0 +1,20 @@
+# sqlfluff config for the forward-only migration chain (db/migrations/*.sql).
+# Consumed by the CI "SQL lint" job and the manual fallback in docs/ci.md.
+#
+# Intent: the lint flags REAL problems (parse errors, dangerous constructs) on
+# NEW migrations, not formatting taste. The existing migrations are hand-aligned,
+# already deployed, and forward-only (never edited), so the purely cosmetic
+# layout/style rules they predate are excluded rather than auto-reformatted.
+[sqlfluff]
+dialect = postgres
+# raw (not the default jinja) templater: these are plain .sql files with no
+# templating; raw also avoids jinja mis-reading future `%`, `{`, or `::` usage.
+templater = raw
+max_line_length = 120
+# The exact set of cosmetic codes the hand-aligned DDL triggers. Kept minimal
+# and explicit (not whole rule families) so every correctness-relevant rule and
+# all parse checking stay on. Revisit if the migration style is ever normalized.
+#   LT01 spacing  LT02 indentation  LT03 trailing operator  LT05 long line
+#   LT09 select-target layout  AL01 table aliasing  ST09 join order
+#   RF04 keyword-as-identifier  RF06 quoted identifiers ("pgcrypto"/"pg_trgm")
+exclude_rules = LT01, LT02, LT03, LT05, LT09, AL01, ST09, RF04, RF06

@@ -1,0 +1,10 @@
+# sqlfluff cannot parse `ALTER FUNCTION ... SET <param> = <a>, <b>` (a valid
+# Postgres comma-separated value list) in its postgres dialect; it reports a PRS
+# parse error on the comma. These two migrations are merged, deployed, and
+# forward-only (never edited), so they are ignored whole rather than annotated.
+#
+# NEW migrations that need this construct should instead add an inline
+# `-- noqa: PRS` on the offending line (an edit to a not-yet-frozen file), not be
+# added here. See docs/ci.md.
+0011_enable_rls_lockdown.sql
+0029_harden_rebuild_function_search_path.sql
