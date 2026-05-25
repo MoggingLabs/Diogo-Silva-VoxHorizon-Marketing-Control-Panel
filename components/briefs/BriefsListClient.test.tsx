@@ -19,8 +19,8 @@ vi.mock("next/navigation", () => ({
   useSearchParams: () => currentParams,
 }));
 
-const archiveBrief = vi.fn(async (_format: string, _id: string) => {});
-const restoreBrief = vi.fn(async (_format: string, _id: string) => {});
+const archiveBrief = vi.fn();
+const restoreBrief = vi.fn();
 vi.mock("@/lib/briefs-client", () => ({
   archiveBrief: (format: string, id: string) => archiveBrief(format, id),
   restoreBrief: (format: string, id: string) => restoreBrief(format, id),

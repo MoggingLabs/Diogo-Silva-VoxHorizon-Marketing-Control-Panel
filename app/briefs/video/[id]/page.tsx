@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { VideoApprovalGate } from "@/components/brief/VideoApprovalGate";
 import { VideoBriefTimeline } from "@/components/brief/VideoBriefTimeline";
+import { VideoBriefDetailActions } from "@/components/briefs/VideoBriefDetailActions";
 import { createClient } from "@/lib/supabase/server";
 import {
   ScriptOutline,
@@ -66,8 +67,10 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
 
   const brief = briefRes.data as VideoBrief & {
     clients: { name: string; slug: string } | null;
+    deleted_at: string | null;
   };
   const events = eventsRes.data ?? [];
+  const archived = Boolean(brief.deleted_at);
 
   // Defensive parse: the column is jsonb so it may not match the zod shape
   // on legacy rows. Fall back to undefined and show a friendly note.
@@ -81,17 +84,25 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
         <Link href="/briefs/video" className="text-sm text-muted-foreground hover:text-foreground">
           ← Video briefs
         </Link>
-        <div className="flex flex-wrap items-baseline justify-between gap-2">
-          <h1 className="break-all font-mono text-2xl font-semibold tracking-tight sm:text-3xl">
-            {brief.brief_id_human}
-          </h1>
-          <span
-            className={`rounded-full px-3 py-1 text-xs font-medium ${
-              STATUS_LABEL_CLASSES[brief.status] ?? "bg-secondary text-secondary-foreground"
-            }`}
-          >
-            {brief.status}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="break-all font-mono text-2xl font-semibold tracking-tight sm:text-3xl">
+              {brief.brief_id_human}
+            </h1>
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                STATUS_LABEL_CLASSES[brief.status] ?? "bg-secondary text-secondary-foreground"
+              }`}
+            >
+              {brief.status}
+            </span>
+            {archived ? (
+              <span className="rounded-full bg-muted px-3 py-1 text-xs font-medium text-muted-foreground">
+                Archived
+              </span>
+            ) : null}
+          </div>
+          <VideoBriefDetailActions brief={brief} archived={archived} />
         </div>
         <p className="text-sm text-muted-foreground">
           {brief.clients?.name ?? "—"} ·{" "}
@@ -100,6 +111,12 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
           <span className="break-all font-mono">{brief.voice_id ?? "—"}</span>
         </p>
       </header>
+
+      {archived ? (
+        <div className="rounded-md border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+          This brief is archived. Restore it to edit or post it.
+        </div>
+      ) : null}
 
       {/* Decision banner --------------------------------------------------- */}
       {brief.decided_at && (
@@ -116,7 +133,7 @@ export default async function VideoBriefDetailPage({ params }: PageProps) {
       )}
 
       {/* Approval gate ----------------------------------------------------- */}
-      {brief.status === "posted" && (
+      {brief.status === "posted" && !archived && (
         <section>
           <VideoApprovalGate videoBriefId={brief.id} />
         </section>

@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 
 import { ApprovalGate } from "@/components/brief/ApprovalGate";
 import { BriefTimeline } from "@/components/brief/BriefTimeline";
+import { BriefDetailActions } from "@/components/briefs/BriefDetailActions";
 import { readBriefPayload, type Brief, type BriefStatusT, type EventRow } from "@/lib/briefs";
 import { createClient } from "@/lib/supabase/server";
 
@@ -58,9 +59,10 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
   }
   if (!briefRes.data) notFound();
 
-  const brief = briefRes.data as Brief;
+  const brief = briefRes.data as Brief & { deleted_at: string | null };
   const events = (eventsRes.data ?? []) as EventRow[];
   const payload = readBriefPayload(brief);
+  const archived = Boolean(brief.deleted_at);
 
   return (
     <main className="container mx-auto flex min-h-dvh max-w-4xl flex-col gap-6 px-4 py-6 sm:px-6 sm:py-12">
@@ -71,17 +73,31 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
           </Link>{" "}
           / <span className="break-all font-mono">{brief.brief_id_human}</span>
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            {payload?.market ?? "Untitled brief"}
-          </h1>
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[brief.status]}`}
-          >
-            {STATUS_LABEL[brief.status]}
-          </span>
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              {payload?.market ?? "Untitled brief"}
+            </h1>
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[brief.status]}`}
+            >
+              {STATUS_LABEL[brief.status]}
+            </span>
+            {archived ? (
+              <span className="inline-flex items-center rounded-full bg-muted px-2.5 py-0.5 text-xs text-muted-foreground">
+                Archived
+              </span>
+            ) : null}
+          </div>
+          <BriefDetailActions brief={brief} archived={archived} />
         </div>
       </header>
+
+      {archived ? (
+        <div className="rounded-md border border-border bg-muted/40 px-4 py-3 text-sm text-muted-foreground">
+          This brief is archived. Restore it to edit or post it.
+        </div>
+      ) : null}
 
       <section className="grid gap-x-8 gap-y-3 sm:grid-cols-2">
         <Field label="Service" value={payload?.service ?? "—"} className="capitalize" />
@@ -186,7 +202,7 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
         </section>
       ) : null}
 
-      {brief.status === "posted" ? <ApprovalGate briefId={brief.id} /> : null}
+      {brief.status === "posted" && !archived ? <ApprovalGate briefId={brief.id} /> : null}
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Timeline</h2>
