@@ -66,6 +66,10 @@ htmlcov/
 build/
 *.tar.gz
 
+# Generated e2e MP4 fixture (synthesised by the CI e2e job with ffmpeg; never
+# committed, the worker probes the freshly-generated clip).
+tests/e2e/_assets/video-fixture.mp4
+
 # Local plan / scratch
 .plans/
 .scratch/

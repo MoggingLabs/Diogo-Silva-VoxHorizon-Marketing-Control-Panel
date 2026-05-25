@@ -444,6 +444,31 @@ jobs:
       - name: Install Node deps
         run: pnpm install --frozen-lockfile
 
+      # ffmpeg/ffprobe: generate the MP4 fixture (below) AND let the worker
+      # ffprobe it at the QA + spec gates. The worker image ships ffmpeg in
+      # prod; here the worker runs from source on the runner, so install it.
+      # Cheap (~seconds) and harmless for the image-only spec, so we run it for
+      # every e2e matrix job rather than gating on the spec name.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      # The video QA + spec gates need a REAL probeable MP4 in Supabase Storage.
+      # There is no fixture in the repo + no local ffmpeg at author time, so we
+      # synthesise a 9:16 H.264 + AAC ~4s clip here. The e2e harness
+      # (workflow-driver.readVideoFixtureBytes) reads this exact path and uploads
+      # the bytes to the `creatives` bucket; the worker downloads + ffprobes them.
+      - name: Generate video fixture (ffmpeg)
+        run: |
+          set -euo pipefail
+          mkdir -p tests/e2e/_assets
+          ffmpeg -y \
+            -f lavfi -i testsrc=size=144x256:rate=15:duration=4 \
+            -f lavfi -i sine=frequency=440:duration=4 \
+            -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest \
+            tests/e2e/_assets/video-fixture.mp4
+          ffprobe -v error -show_entries stream=codec_name,width,height -of default=noprint_wrappers=1 \
+            tests/e2e/_assets/video-fixture.mp4
+
       - name: Install uv (worker toolchain)
         uses: astral-sh/setup-uv@v3
         with:
