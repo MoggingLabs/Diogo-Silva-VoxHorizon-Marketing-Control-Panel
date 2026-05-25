@@ -75,10 +75,12 @@ describe("KanbanCard", () => {
     expect(screen.getByText("VID")).toBeInTheDocument();
   });
 
-  it("renders each known status pill label", () => {
+  it("renders each known status pill label via the canonical StatusBadge", () => {
     const statuses = ["draft", "posted", "approved", "approved_with_changes", "rejected"] as const;
     for (const status of statuses) {
       const { unmount } = render(<KanbanCard kind="image" brief={img({ status })} />);
+      // `approved_with_changes` keeps its short card label; the rest use the
+      // StatusBadge's humanized label.
       const labelMap: Record<string, string> = {
         draft: "Draft",
         posted: "Posted",
@@ -91,10 +93,10 @@ describe("KanbanCard", () => {
     }
   });
 
-  it("falls back to raw status when not in the pill map", () => {
+  it("humanizes an unknown status through the StatusBadge fallback", () => {
     render(<KanbanCard kind="image" brief={img({ status: "exotic-status" as never })} />);
 
-    expect(screen.getByText("exotic-status")).toBeInTheDocument();
+    expect(screen.getByText("Exotic status")).toBeInTheDocument();
   });
 
   it("links to /pipeline/[id] when pipelineId is provided", () => {
