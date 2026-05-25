@@ -103,6 +103,13 @@ test.describe("pipeline - both formats", () => {
     page,
     clientId,
   }) => {
+    // The both flow runs TWO creatives (image + video) through all 12 gates -
+    // ~double the sequential worker/manager round-trips of a single-track run,
+    // plus the MP4 upload + ffprobe - so it legitimately exceeds the default
+    // 120s test budget. Give it headroom (it is not a hang; the per-step polls
+    // still bound each stage).
+    test.setTimeout(240_000);
+
     const admin = getTestAdminClient();
     await assertWorkerHealthy();
 
