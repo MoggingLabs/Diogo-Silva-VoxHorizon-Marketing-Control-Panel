@@ -420,6 +420,8 @@ jobs:
             allow_failure: false
           - spec: pipeline-archive.spec.ts
             allow_failure: false
+          - spec: briefs-crud.spec.ts
+            allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
