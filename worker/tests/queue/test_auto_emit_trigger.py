@@ -41,12 +41,19 @@ def _seed_pipeline(cur) -> str:
 
 
 def _events(cur, pipeline_id: str) -> list[dict]:
+    """Read the pipeline_events for a pipeline, ordered by insertion (seq asc).
+
+    ``created_at`` is tx-time (every event in one transaction stamps the same
+    timestamp), and ``id`` is a v4 UUID (not chronological). Migration 0050
+    adds the ``seq bigserial`` column for exactly this case -- the only
+    deterministic monotonic order across same-tx inserts.
+    """
     cur.execute(
         """
-        select kind, payload, stage
+        select kind, payload, stage, seq
           from pipeline_events
          where pipeline_id=%s
-         order by created_at asc, id asc
+         order by seq asc
         """,
         (pipeline_id,),
     )
