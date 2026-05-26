@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
 
 import { MetricBadge } from "./MetricBadge";
 import {
@@ -247,16 +248,21 @@ export function PerfTable({ rows, format }: PerfTableProps) {
                     type="button"
                     onClick={() => clickHeader(col.id)}
                     className={cn(
-                      "inline-flex items-center gap-1 hover:text-foreground",
+                      "-mx-1 inline-flex items-center gap-1 rounded px-1 py-0.5 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                      col.align === "right" && "flex-row-reverse",
                       isActive && "text-foreground",
                     )}
                   >
                     {col.label}
                     {isActive ? (
-                      <span aria-hidden="true" className="text-xs">
-                        {sortDir === "asc" ? "↑" : "↓"}
-                      </span>
-                    ) : null}
+                      sortDir === "asc" ? (
+                        <ArrowUp className="h-3 w-3" aria-hidden="true" />
+                      ) : (
+                        <ArrowDown className="h-3 w-3" aria-hidden="true" />
+                      )
+                    ) : (
+                      <ChevronsUpDown className="h-3 w-3 opacity-40" aria-hidden="true" />
+                    )}
                   </button>
                 </th>
               );

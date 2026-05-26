@@ -12,12 +12,12 @@ import { describe, expect, it } from "vitest";
 import { MetricTile } from "./MetricTile";
 
 describe("MetricTile", () => {
-  it("renders the label, locale-formatted value, and the dash delta placeholder when delta is null", () => {
+  it("renders the label, locale-formatted value, and the delta placeholder when delta is null", () => {
     render(<MetricTile label="In Brief" value={12345} delta={null} />);
 
     expect(screen.getByText("In Brief")).toBeInTheDocument();
     expect(screen.getByText("12,345")).toBeInTheDocument();
-    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("No change data")).toBeInTheDocument();
   });
 
   it("renders a positive delta with a + prefix", () => {
@@ -66,8 +66,8 @@ describe("MetricTile", () => {
   it("falls back to the default accent class when none is supplied", () => {
     const { container } = render(<MetricTile label="Live" value={1} />);
 
-    // Default accent: bg-zinc-400
-    expect(container.querySelector(".bg-zinc-400")).not.toBeNull();
+    // Default accent: the neutral muted-foreground token.
+    expect(container.querySelector(".bg-muted-foreground")).not.toBeNull();
   });
 
   it("applies a custom accent class when provided", () => {

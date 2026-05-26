@@ -25,8 +25,26 @@ export async function GET(req: NextRequest) {
   const briefId = url.searchParams.get("brief_id");
   const idsParam = url.searchParams.get("ids");
   const withOutline = url.searchParams.get("with_outline") === "1";
+  const archived = url.searchParams.get("archived") === "true";
 
   const supabase = createAdminClient();
+
+  // Whole-set listing for the unified Creatives grid (M4 / #593): no brief_id /
+  // ids means "list every video creative". Supports the archive view via
+  // `?archived=true` (mirrors the image route). Newest-first, capped at 1000.
+  if (!briefId && idsParam === null) {
+    let query = supabase
+      .from("video_creatives")
+      .select("*")
+      .order("created_at", { ascending: false })
+      .limit(1000);
+    query = archived ? query.not("deleted_at", "is", null) : query.is("deleted_at", null);
+    const { data, error } = await query;
+    if (error) {
+      return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+    return NextResponse.json({ creatives: data ?? [] });
+  }
 
   if (briefId) {
     const { data, error } = await supabase
