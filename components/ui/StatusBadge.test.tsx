@@ -28,8 +28,38 @@ describe("resolveStatus", () => {
     ["queued", "info"],
     ["archived", "muted"],
     ["skipped", "muted"],
+    // M8: pipeline lifecycle stages + format chips.
+    ["configuration", "info"],
+    ["ideation", "info"],
+    ["generation", "info"],
+    ["creative_qa", "warning"],
+    ["compliance_review", "warning"],
+    ["copy", "info"],
+    ["spec_validation", "warning"],
+    ["variant_plan", "warning"],
+    ["finalize_assets", "info"],
+    ["launch_handoff", "warning"],
+    ["monitor", "info"],
+    ["image", "info"],
+    ["video", "info"],
+    ["both", "success"],
+    // M8: monitor verdicts (traffic-light: keep / watch / kill).
+    ["keep", "success"],
+    ["watch", "warning"],
+    ["kill", "destructive"],
   ] as const)("maps %s -> %s", (status, semantic) => {
     expect(resolveStatus(status).semantic).toBe(semantic);
+  });
+
+  it("uses the curated pipeline labels (Spec validation, Variant plan, etc.)", () => {
+    expect(resolveStatus("spec_validation").label).toBe("Spec validation");
+    expect(resolveStatus("variant_plan").label).toBe("Variant plan");
+    expect(resolveStatus("launch_handoff").label).toBe("Launch");
+    expect(resolveStatus("both").label).toBe("Image + Video");
+  });
+
+  it("spins the generation badge (in-flight state)", () => {
+    expect(resolveStatus("generation").spin).toBe(true);
   });
 
   it("normalizes casing and separators", () => {
