@@ -4,7 +4,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // test project can import the module under test.
 vi.mock("server-only", () => ({}));
 
-import { dispatchOperator, isOperatorDriven, operatorInstruction } from "./dispatch";
+import {
+  dispatchOperator,
+  isOperatorDriven,
+  operatorInstruction,
+  type OperatorStage,
+} from "./dispatch";
 import { spyOnFetch } from "@/tests/unit/helpers/worker-mock";
 
 const ORIG_ENV = { ...process.env };
@@ -41,6 +46,24 @@ describe("operatorInstruction", () => {
 
   it("tells the operator to stand by during review", () => {
     expect(operatorInstruction("review", PIPELINE).toLowerCase()).toContain("stand by");
+  });
+
+  it("returns a pipeline-scoped, on-topic instruction for every downstream gate stage", () => {
+    const cases: Array<[OperatorStage, RegExp]> = [
+      ["creative_qa", /qa/i],
+      ["compliance_review", /ruleset|block/i],
+      ["copy", /copy/i],
+      ["spec_validation", /spec|crop/i],
+      ["variant_plan", /matrix|a\/b/i],
+      ["finalize_assets", /finalize|drive/i],
+      ["launch_handoff", /launch|paused/i],
+      ["monitor", /monitor|lead/i],
+    ];
+    for (const [stage, keyword] of cases) {
+      const out = operatorInstruction(stage, PIPELINE);
+      expect(out).toContain(PIPELINE);
+      expect(out).toMatch(keyword);
+    }
   });
 });
 

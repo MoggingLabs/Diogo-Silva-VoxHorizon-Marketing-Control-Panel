@@ -34,6 +34,19 @@ export const VideoLaunchDecisionInput = z
   );
 export type VideoLaunchDecisionInputT = z.infer<typeof VideoLaunchDecisionInput>;
 
+/**
+ * PATCH /api/launches/video/:id body — operator package edit (E5.1 / #595).
+ * Mirrors ``LaunchPackageUpdateInput`` on the image side: the editable surface
+ * is the operator annotation only; the decision flows through the decision
+ * route and the ad_entity graph is worker/Meta-owned.
+ */
+export const VideoLaunchPackageUpdateInput = z
+  .object({
+    decided_notes: z.string().max(5000).nullable().optional(),
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: "nothing to update" });
+export type VideoLaunchPackageUpdateInputT = z.infer<typeof VideoLaunchPackageUpdateInput>;
+
 // ---------------------------------------------------------------------------
 // Status state machine
 // ---------------------------------------------------------------------------

@@ -14,13 +14,20 @@ const getReviewBundle = vi.fn(async () => ({
   signedUrls: {},
 }));
 const getCopyVariants = vi.fn(async () => []);
-const getVariantPlan = vi.fn(async () => null);
 const getClientCplTarget = vi.fn(async () => null);
 vi.mock("@/lib/review/fetch", () => ({
   getReviewBundle: (...a: unknown[]) => getReviewBundle(...(a as [])),
   getCopyVariants: (...a: unknown[]) => getCopyVariants(...(a as [])),
-  getVariantPlan: (...a: unknown[]) => getVariantPlan(...(a as [])),
   getClientCplTarget: (...a: unknown[]) => getClientCplTarget(...(a as [])),
+}));
+const getVariantPlanEditorData = vi.fn(async () => ({
+  plan: null,
+  cells: [],
+  creatives: [],
+  copyVariants: [],
+}));
+vi.mock("@/lib/variant-plan/fetch", () => ({
+  getVariantPlanEditorData: (...a: unknown[]) => getVariantPlanEditorData(...(a as [])),
 }));
 const getMonitorRows = vi.fn(async () => []);
 vi.mock("@/lib/monitor/fetch", () => ({
@@ -66,6 +73,9 @@ vi.mock("@/components/pipeline/StageCopy", () => ({
 }));
 vi.mock("@/components/pipeline/StageVariantPlan", () => ({
   StageVariantPlan: () => <div data-testid="stage" data-stage="variant_plan" />,
+}));
+vi.mock("@/components/pipeline/VariantPlanEditor", () => ({
+  VariantPlanEditor: () => <div data-testid="variant-plan-editor" />,
 }));
 vi.mock("@/components/launch/LaunchGate", () => ({
   LaunchGate: () => <div data-testid="stage" data-stage="launch_handoff" />,
