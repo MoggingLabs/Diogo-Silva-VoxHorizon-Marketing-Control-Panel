@@ -148,8 +148,7 @@ const STATUS_MAP: Record<string, StatusSpec> = {
   // Pipeline format chips share the badge surface so the operator reads the
   // same chip styling across the pipeline list, the detail header, and the
   // dashboard kanban kind pill. Image / Video / Both map to neutral-info /
-  // info / success — semantically "image=default", "video=accent",
-  // "both=both, blessed".
+  // info / success: image=default, video=accent, both=both-and-blessed.
   image: { semantic: "info", icon: ImageIcon, label: "Image" },
   video: { semantic: "info", icon: VideoIcon, label: "Video" },
   both: { semantic: "success", icon: Sparkles, label: "Image + Video" },
