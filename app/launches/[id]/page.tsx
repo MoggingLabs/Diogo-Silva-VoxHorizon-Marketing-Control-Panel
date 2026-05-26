@@ -2,8 +2,11 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { ApprovalGate } from "@/components/brief/ApprovalGate";
+import { AdEntityGraph } from "@/components/launch/AdEntityGraph";
+import { LaunchPackageActions } from "@/components/launch/LaunchPackageActions";
 import { LaunchSummary } from "@/components/launch/LaunchSummary";
 import { LaunchTimeline } from "@/components/launch/LaunchTimeline";
+import { getAdEntitiesForLaunch } from "@/lib/ad-entity";
 import type { Brief } from "@/lib/briefs";
 import { type Creative, getSignedUrl } from "@/lib/creatives";
 import { readLaunchPayload, type LaunchPackage, type LaunchStatusT } from "@/lib/launches";
@@ -57,7 +60,9 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ i
     throw new Error("launch payload failed schema validation");
   }
 
-  // Fetch the brief + creatives + copy variants in parallel.
+  // Fetch the brief + creatives + copy variants + recorded ad entities in
+  // parallel.
+  const adEntities = await getAdEntitiesForLaunch(launch.id);
   const [briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
     supabase.from("briefs").select("*").eq("id", launch.brief_id).maybeSingle(),
     payload.creative_ids.length
@@ -108,17 +113,34 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ i
           </Link>{" "}
           / <span className="break-all font-mono">{payload.brief_id_human}</span>
         </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
-            Launch package — {payload.client?.name ?? "—"}
-          </h1>
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[status] ?? STATUS_BADGE.posted}`}
-          >
-            {STATUS_LABEL[status] ?? status}
-          </span>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">
+              Launch package — {payload.client?.name ?? "—"}
+            </h1>
+            <span
+              className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs ${STATUS_BADGE[status] ?? STATUS_BADGE.posted}`}
+            >
+              {STATUS_LABEL[status] ?? status}
+            </span>
+          </div>
+          <div className="self-start">
+            <LaunchPackageActions
+              format="image"
+              launchId={launch.id}
+              decidedNotes={launch.decided_notes}
+              archived={launch.deleted_at !== null}
+            />
+          </div>
         </div>
       </header>
+
+      {launch.deleted_at ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+          This launch package is archived and hidden from the active list. Restore it to bring it
+          back.
+        </div>
+      ) : null}
 
       {launch.decided_at ? (
         <section className="space-y-1 rounded-md border bg-muted/30 px-4 py-3">
@@ -151,6 +173,8 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ i
           endpoint={`/api/launches/${launch.id}/decision`}
         />
       ) : null}
+
+      <AdEntityGraph entities={adEntities} />
 
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">Timeline</h2>

@@ -62,6 +62,23 @@ export const LaunchDecisionInput = z
   );
 export type LaunchDecisionInputT = z.infer<typeof LaunchDecisionInput>;
 
+/**
+ * PATCH /api/launches/:id body — the operator package edit (E5.1 / #595).
+ *
+ * Launch packages are SAFE artifacts the operator can edit (the plan's "full
+ * edit + soft-archive"), but the launch DECISION still flows through the
+ * decision route (which re-derives the gate). So the editable surface here is
+ * intentionally limited to the operator's free-form annotation
+ * (``decided_notes``) — never ``status`` (that is the decision gate) and never
+ * the ad_entity graph (worker/Meta-owned). At least one field must be present.
+ */
+export const LaunchPackageUpdateInput = z
+  .object({
+    decided_notes: z.string().max(5000).nullable().optional(),
+  })
+  .refine((d) => Object.keys(d).length > 0, { message: "nothing to update" });
+export type LaunchPackageUpdateInputT = z.infer<typeof LaunchPackageUpdateInput>;
+
 // ---------------------------------------------------------------------------
 // Status state machine
 // ---------------------------------------------------------------------------

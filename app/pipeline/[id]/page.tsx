@@ -19,15 +19,13 @@ import { StageIdeation } from "@/components/pipeline/StageIdeation";
 import { StagePlaceholder } from "@/components/pipeline/StagePlaceholder";
 import { StageReview } from "@/components/pipeline/StageReview";
 import { StageVariantPlan } from "@/components/pipeline/StageVariantPlan";
+import { VariantPlanEditor } from "@/components/pipeline/VariantPlanEditor";
 import { LaunchGate } from "@/components/launch/LaunchGate";
 import { getMonitorRows } from "@/lib/monitor/fetch";
 import { getPipeline } from "@/lib/pipeline/client";
-import {
-  getClientCplTarget,
-  getCopyVariants,
-  getReviewBundle,
-  getVariantPlan,
-} from "@/lib/review/fetch";
+import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/review/fetch";
+import { getVariantPlanEditorData } from "@/lib/variant-plan/fetch";
+import type { VariantTestVariable } from "@/lib/variant-plan/schemas";
 import {
   PIPELINE_FORMAT_BADGE,
   PIPELINE_FORMAT_LABEL,
@@ -133,7 +131,8 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   // The copy stage lists a CopyComposer per creative; reviewBundle (fetched for
   // the PER_CREATIVE set, which includes "copy") carries the creatives.
   const copyVariants = pipeline.status === "copy" ? await getCopyVariants(pipeline.id) : [];
-  const variantPlan = pipeline.status === "variant_plan" ? await getVariantPlan(pipeline.id) : null;
+  const variantPlanData =
+    pipeline.status === "variant_plan" ? await getVariantPlanEditorData(pipeline.id) : null;
   const monitorRows = pipeline.status === "monitor" ? await getMonitorRows(pipeline.id) : [];
   const cplTarget =
     pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
@@ -258,12 +257,33 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
                 variants={copyVariants}
               />
             ) : pipeline.status === "variant_plan" ? (
-              <StageVariantPlan
-                pipelineId={pipeline.id}
-                testVariable={variantPlan?.test_variable ?? null}
-                hypothesis={variantPlan?.hypothesis ?? null}
-                cells={variantPlan?.cells ?? []}
-              />
+              <div className="flex flex-col gap-6">
+                <VariantPlanEditor
+                  pipelineId={pipeline.id}
+                  planExists={variantPlanData?.plan !== null && variantPlanData?.plan !== undefined}
+                  locked={variantPlanData?.plan?.status === "approved"}
+                  testVariable={
+                    (variantPlanData?.plan?.test_variable as VariantTestVariable | undefined) ??
+                    null
+                  }
+                  hypothesis={variantPlanData?.plan?.hypothesis ?? null}
+                  initialCells={variantPlanData?.cells ?? []}
+                  creatives={variantPlanData?.creatives ?? []}
+                  copyVariants={variantPlanData?.copyVariants ?? []}
+                />
+                <StageVariantPlan
+                  pipelineId={pipeline.id}
+                  testVariable={variantPlanData?.plan?.test_variable ?? null}
+                  hypothesis={variantPlanData?.plan?.hypothesis ?? null}
+                  cells={(variantPlanData?.cells ?? []).map((c) => ({
+                    id: c.id,
+                    cell_index: c.cell_index,
+                    label: c.label,
+                    creative_id: c.creative_id,
+                    copy_variant_id: c.copy_variant_id,
+                  }))}
+                />
+              </div>
             ) : pipeline.status === "launch_handoff" && reviewBundle ? (
               <LaunchGate
                 pipelineId={pipeline.id}

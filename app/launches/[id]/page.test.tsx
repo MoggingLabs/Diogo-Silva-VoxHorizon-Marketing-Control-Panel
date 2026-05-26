@@ -31,6 +31,18 @@ vi.mock("@/components/launch/LaunchTimeline", () => ({
 vi.mock("@/components/brief/ApprovalGate", () => ({
   ApprovalGate: () => <div data-testid="approval-gate" />,
 }));
+vi.mock("@/components/launch/LaunchPackageActions", () => ({
+  LaunchPackageActions: () => <div data-testid="launch-actions" />,
+}));
+vi.mock("@/components/launch/AdEntityGraph", () => ({
+  AdEntityGraph: ({ entities }: { entities: unknown[] }) => (
+    <div data-testid="ad-entities" data-count={entities.length} />
+  ),
+}));
+const getAdEntitiesForLaunchMock = vi.fn(async () => [] as unknown[]);
+vi.mock("@/lib/ad-entity", () => ({
+  getAdEntitiesForLaunch: () => getAdEntitiesForLaunchMock(),
+}));
 
 const notFoundSpy = vi.fn(() => {
   throw new Error("__NOT_FOUND__");

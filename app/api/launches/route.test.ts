@@ -612,6 +612,16 @@ describe("GET /api/launches", () => {
     expect(res.status).toBe(200);
   });
 
+  it("archived=true lists the archived set (200)", async () => {
+    currentSupabase = mockClient({
+      launch_packages: { select: { data: [{ id: "lp-arch" }], error: null } },
+    });
+    const res = await GET(req("http://localhost/api/launches?archived=true"));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.launches).toHaveLength(1);
+  });
+
   it("500 on supabase error", async () => {
     currentSupabase = mockClient({
       launch_packages: { select: { data: null, error: { message: "x" } } },

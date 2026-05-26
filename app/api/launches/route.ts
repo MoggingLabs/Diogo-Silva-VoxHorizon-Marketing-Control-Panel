@@ -334,20 +334,25 @@ export async function POST(req: NextRequest) {
  * GET /api/launches
  *
  * Lightweight list endpoint — newest first. Filters: ``?brief_id=<uuid>``,
- * ``?status=<status>``.
+ * ``?status=<status>``. Archived (soft-deleted) packages are excluded by
+ * default; pass ``?archived=true`` to list ONLY the archived set (E5.1 / #595),
+ * matching the pipeline-list archived-view convention.
  */
 export async function GET(req: NextRequest) {
   const supabase = createAdminClient();
   const url = new URL(req.url);
   const briefId = url.searchParams.get("brief_id");
   const status = url.searchParams.get("status");
+  const archived = url.searchParams.get("archived") === "true";
 
   let query = supabase
     .from("launch_packages")
-    .select("id, brief_id, status, created_at, decided_at, decided_notes")
+    .select("id, brief_id, status, created_at, decided_at, decided_notes, payload, deleted_at")
     .order("created_at", { ascending: false })
     .limit(200);
 
+  if (archived) query = query.not("deleted_at", "is", null);
+  else query = query.is("deleted_at", null);
   if (briefId) query = query.eq("brief_id", briefId);
   if (status) query = query.eq("status", status);
 
