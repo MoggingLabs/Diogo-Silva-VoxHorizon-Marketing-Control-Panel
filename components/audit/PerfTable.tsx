@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
+import { ArrowDown, ArrowUp, ChevronsUpDown, BarChart3 } from "lucide-react";
+
+import { EmptyState } from "@/components/EmptyState";
 
 import { MetricBadge } from "./MetricBadge";
 import {
@@ -218,10 +220,11 @@ export function PerfTable({ rows, format }: PerfTableProps) {
 
   if (rows.length === 0) {
     return (
-      <div className="rounded-lg border border-border bg-card p-6 text-sm text-muted-foreground shadow-sm">
-        No performance rows yet for this filter. Adjust the format tab or window, or wait for the
-        next audit pull.
-      </div>
+      <EmptyState
+        icon={<BarChart3 className="h-8 w-8" aria-hidden="true" />}
+        title="No performance rows match this view"
+        description="Adjust the format tab or window, or wait for the next audit pull."
+      />
     );
   }
 

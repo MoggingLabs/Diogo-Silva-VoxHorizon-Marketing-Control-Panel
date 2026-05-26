@@ -61,7 +61,7 @@ export function ApprovalModeBanner() {
         data-mode="AUTO_APPROVE"
         className={cn(
           "flex items-start justify-between gap-3 rounded-md border px-3 py-2 text-sm",
-          "border-amber-300 bg-amber-50 text-amber-900",
+          "border-warning/40 bg-warning/10 text-warning",
         )}
       >
         <div className="flex items-start gap-2">
@@ -74,7 +74,7 @@ export function ApprovalModeBanner() {
               Every sensitive tool is being allowed without your review.{" "}
               <Link
                 href={"/settings" as Route}
-                className="underline underline-offset-2 hover:text-amber-950"
+                className="underline underline-offset-2 hover:text-warning/80"
               >
                 Change in Settings
               </Link>
@@ -86,7 +86,7 @@ export function ApprovalModeBanner() {
           type="button"
           onClick={dismiss}
           aria-label="Dismiss banner for this session"
-          className="rounded-md p-1 text-amber-900 hover:bg-amber-100"
+          className="rounded-md p-1 text-warning hover:bg-warning/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/40"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>
@@ -102,7 +102,7 @@ export function ApprovalModeBanner() {
         data-mode="HALT"
         className={cn(
           "flex items-start justify-between gap-3 rounded-md border px-3 py-2 text-sm",
-          "border-rose-300 bg-rose-50 text-rose-900",
+          "border-destructive/40 bg-destructive/10 text-destructive",
         )}
       >
         <div className="flex items-start gap-2">
@@ -113,7 +113,7 @@ export function ApprovalModeBanner() {
               Ekko cannot run any sensitive tools right now.{" "}
               <Link
                 href={"/settings" as Route}
-                className="underline underline-offset-2 hover:text-rose-950"
+                className="underline underline-offset-2 hover:text-destructive/80"
               >
                 Re-enable in Settings
               </Link>
@@ -125,7 +125,7 @@ export function ApprovalModeBanner() {
           type="button"
           onClick={dismiss}
           aria-label="Dismiss banner for this session"
-          className="rounded-md p-1 text-rose-900 hover:bg-rose-100"
+          className="rounded-md p-1 text-destructive hover:bg-destructive/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/40"
         >
           <X className="h-4 w-4" aria-hidden="true" />
         </button>

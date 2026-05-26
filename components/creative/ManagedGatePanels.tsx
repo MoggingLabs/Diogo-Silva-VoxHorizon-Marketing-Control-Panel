@@ -257,7 +257,7 @@ function SpecPanel({
               </div>
               {openId === r.id ? (
                 <div
-                  className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/20"
+                  className="space-y-2 rounded-md border border-warning/40 bg-warning/10 p-2"
                   data-testid="spec-override-form"
                 >
                   <div className="space-y-1">
@@ -400,7 +400,7 @@ function CompliancePanel({
       )}
       {open ? (
         <div
-          className="mt-2 space-y-2 rounded-md border border-amber-300 bg-amber-50 p-2 dark:border-amber-800 dark:bg-amber-950/20"
+          className="mt-2 space-y-2 rounded-md border border-warning/40 bg-warning/10 p-2"
           data-testid="compliance-override-form"
         >
           <Label htmlFor="compliance-note" className="text-[11px]">
@@ -467,7 +467,7 @@ function GateRow({ status, primary, note }: { status: string; primary: string; n
     <div className="flex items-center justify-between gap-2 rounded-md border bg-card px-2 py-1 text-xs">
       <span className="truncate">{primary}</span>
       <span className="flex shrink-0 items-center gap-1.5">
-        {note ? <span className="text-[10px] text-amber-600">{note}</span> : null}
+        {note ? <span className="text-[10px] text-warning">{note}</span> : null}
         <StatusBadge status={status} />
       </span>
     </div>

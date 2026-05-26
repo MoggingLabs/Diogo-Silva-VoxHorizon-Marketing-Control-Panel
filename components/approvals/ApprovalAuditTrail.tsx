@@ -35,9 +35,9 @@ const DECISION_LABEL: Record<ApprovalDecision, string> = {
 };
 
 const DECISION_CLASS: Record<ApprovalDecision, string> = {
-  approved: "text-emerald-600 dark:text-emerald-300",
-  rejected: "text-red-600 dark:text-red-300",
-  approved_with_caveat: "text-amber-600 dark:text-amber-300",
+  approved: "text-success",
+  rejected: "text-destructive",
+  approved_with_caveat: "text-warning",
 };
 
 export function ApprovalAuditTrail({

@@ -38,7 +38,7 @@ export function ApprovalModeBadge() {
         aria-label="Approvals halted — click to re-enable"
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2 text-[11px] font-semibold transition-colors",
-          "bg-rose-100 text-rose-900 ring-1 ring-rose-300 hover:bg-rose-200",
+          "bg-destructive/15 text-destructive ring-1 ring-inset ring-destructive/40 hover:bg-destructive/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-destructive/50",
         )}
       >
         <span aria-hidden="true">●</span>
@@ -57,7 +57,7 @@ export function ApprovalModeBadge() {
         aria-label={`Auto-approve mode active, ${ttl} remaining — click to change`}
         className={cn(
           "inline-flex h-7 items-center gap-1 rounded-full px-2 text-[11px] font-semibold transition-colors",
-          "bg-amber-100 text-amber-900 ring-1 ring-amber-300 hover:bg-amber-200",
+          "bg-warning/15 text-warning ring-1 ring-inset ring-warning/40 hover:bg-warning/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-warning/50",
         )}
       >
         <span aria-hidden="true">⏱</span>

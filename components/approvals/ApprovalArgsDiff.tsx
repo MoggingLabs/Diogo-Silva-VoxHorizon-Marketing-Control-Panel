@@ -25,9 +25,10 @@ export type ApprovalArgsDiffProps = {
 
 const KIND_CLASS: Record<ArgKind, string> = {
   plain: "text-foreground",
-  path: "bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-100 rounded px-1",
-  url: "bg-sky-100 text-sky-900 dark:bg-sky-900/40 dark:text-sky-100 rounded px-1",
-  money: "bg-red-100 text-red-900 dark:bg-red-900/40 dark:text-red-100 rounded px-1 font-semibold",
+  path: "bg-warning/15 text-warning ring-1 ring-inset ring-warning/30 rounded px-1",
+  url: "bg-info/15 text-info ring-1 ring-inset ring-info/30 rounded px-1",
+  money:
+    "bg-destructive/15 text-destructive ring-1 ring-inset ring-destructive/30 rounded px-1 font-semibold",
 };
 
 const KIND_TITLE: Record<ArgKind, string> = {
