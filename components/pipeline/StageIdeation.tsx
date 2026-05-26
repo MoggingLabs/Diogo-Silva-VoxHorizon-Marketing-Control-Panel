@@ -400,9 +400,9 @@ function ImagePickCard({ creative, signedUrl, picked, onToggle }: ImagePickCardP
       onClick={onToggle}
       className={cn(
         "group relative flex flex-col gap-2 overflow-hidden rounded-md border bg-card text-left shadow-sm",
-        "transition-all hover:border-zinc-300 hover:shadow-md",
+        "transition-all hover:border-ring/40 hover:shadow-md",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        picked ? "border-emerald-400 ring-2 ring-emerald-300" : "border-border",
+        picked ? "border-success ring-2 ring-success/40" : "border-border",
       )}
     >
       <div className="relative aspect-square w-full overflow-hidden bg-muted/40">
@@ -647,9 +647,9 @@ function VideoPickCard({ creative, scriptExcerpt, picked, onToggle }: VideoPickC
       onClick={onToggle}
       className={cn(
         "group relative flex flex-col gap-2 overflow-hidden rounded-md border bg-card p-3 text-left shadow-sm",
-        "transition-all hover:border-zinc-300 hover:shadow-md",
+        "transition-all hover:border-ring/40 hover:shadow-md",
         "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-        picked ? "border-emerald-400 ring-2 ring-emerald-300" : "border-border",
+        picked ? "border-success ring-2 ring-success/40" : "border-border",
       )}
     >
       <div className="absolute right-2 top-2">
@@ -683,8 +683,8 @@ function PickIndicator({ picked }: { picked: boolean }) {
       className={cn(
         "absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-full border shadow",
         picked
-          ? "border-emerald-500 bg-emerald-500 text-white"
-          : "border-zinc-300 bg-white/90 text-transparent",
+          ? "border-success bg-success text-success-foreground"
+          : "border-border bg-background/90 text-transparent",
       )}
     >
       <Check className="h-4 w-4" />

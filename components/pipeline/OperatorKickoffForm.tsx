@@ -108,7 +108,7 @@ export function OperatorKickoffForm() {
       className="flex flex-col gap-4 rounded-lg border border-border bg-card px-5 py-5 shadow-sm sm:px-6"
     >
       <div className="flex items-center gap-2">
-        <Bot aria-hidden="true" className="h-5 w-5 text-sky-600 dark:text-sky-400" />
+        <Bot aria-hidden="true" className="h-5 w-5 text-info" />
         <h2 className="text-lg font-semibold tracking-tight">Hire the operator</h2>
       </div>
       <p className="text-sm text-muted-foreground">

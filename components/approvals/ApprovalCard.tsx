@@ -48,9 +48,9 @@ const RISK_ICON = {
 } as const;
 
 const RISK_CLASS = {
-  spend: "text-red-600 dark:text-red-300",
-  "external-write": "text-amber-600 dark:text-amber-300",
-  filesystem: "text-yellow-600 dark:text-yellow-200",
+  spend: "text-destructive",
+  "external-write": "text-warning",
+  filesystem: "text-warning/80",
   unknown: "text-muted-foreground",
 } as const;
 
@@ -159,17 +159,17 @@ export function ApprovalCard({
           </span>
           <span className="flex shrink-0 items-center gap-1">
             {summary.kinds.money > 0 ? (
-              <span className="inline-flex items-center gap-0.5 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:bg-red-900/40 dark:text-red-200">
+              <span className="inline-flex items-center gap-0.5 rounded bg-destructive/15 px-1.5 py-0.5 text-[10px] font-medium text-destructive ring-1 ring-inset ring-destructive/30">
                 <AlertCircle className="h-3 w-3" aria-hidden="true" />${summary.kinds.money}
               </span>
             ) : null}
             {summary.kinds.path > 0 ? (
-              <span className="inline-flex items-center gap-0.5 rounded bg-yellow-100 px-1.5 py-0.5 text-[10px] font-medium text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-100">
+              <span className="inline-flex items-center gap-0.5 rounded bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning ring-1 ring-inset ring-warning/30">
                 {summary.kinds.path} path
               </span>
             ) : null}
             {summary.kinds.url > 0 ? (
-              <span className="inline-flex items-center gap-0.5 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-medium text-sky-800 dark:bg-sky-900/40 dark:text-sky-100">
+              <span className="inline-flex items-center gap-0.5 rounded bg-info/15 px-1.5 py-0.5 text-[10px] font-medium text-info ring-1 ring-inset ring-info/30">
                 {summary.kinds.url} url
               </span>
             ) : null}

@@ -195,7 +195,7 @@ export function OperatorBriefReview({ pipeline }: OperatorBriefReviewProps) {
                 {angles.map((angle) => (
                   <li
                     key={angle}
-                    className="inline-flex items-center rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-900 dark:bg-sky-950/40 dark:text-sky-200"
+                    className="inline-flex items-center rounded-full bg-info/15 px-2.5 py-0.5 text-xs font-medium text-info ring-1 ring-inset ring-info/30"
                   >
                     {angle}
                   </li>
@@ -208,24 +208,18 @@ export function OperatorBriefReview({ pipeline }: OperatorBriefReviewProps) {
           {mustAvoid.length > 0 ? (
             <section
               aria-label="Do-not-say rules"
-              className="flex flex-col gap-2 rounded-md border border-amber-300 bg-amber-50 px-4 py-3 dark:border-amber-900/60 dark:bg-amber-950/30"
+              className="flex flex-col gap-2 rounded-md border border-warning/40 bg-warning/10 px-4 py-3"
             >
               <div className="flex items-center gap-2">
-                <AlertTriangle
-                  aria-hidden="true"
-                  className="h-4 w-4 text-amber-700 dark:text-amber-400"
-                />
-                <h3 className="text-xs font-semibold uppercase tracking-wide text-amber-900 dark:text-amber-200">
+                <AlertTriangle aria-hidden="true" className="h-4 w-4 text-warning" />
+                <h3 className="text-xs font-semibold uppercase tracking-wide text-warning">
                   Do not say (compliance)
                 </h3>
               </div>
               <ul className="flex flex-col gap-1">
                 {mustAvoid.map((rule) => (
-                  <li
-                    key={rule}
-                    className="flex items-start gap-2 text-sm text-amber-900 dark:text-amber-100"
-                  >
-                    <span aria-hidden="true" className="mt-1 text-amber-600 dark:text-amber-400">
+                  <li key={rule} className="flex items-start gap-2 text-sm text-warning">
+                    <span aria-hidden="true" className="mt-1 text-warning">
                       •
                     </span>
                     <span>{rule}</span>

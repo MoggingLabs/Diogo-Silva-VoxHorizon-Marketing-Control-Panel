@@ -247,7 +247,7 @@ export function EkkoDraftModal({
       <DialogContent className="max-w-2xl gap-3 sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Sparkles className="h-4 w-4 text-violet-600" aria-hidden="true" />
+            <Sparkles className="h-4 w-4 text-accent" aria-hidden="true" />
             Let Ekko draft this
           </DialogTitle>
           <DialogDescription>
@@ -259,7 +259,7 @@ export function EkkoDraftModal({
         {proposedAt ? (
           <div
             role="status"
-            className="rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-900"
+            className="rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm text-success"
           >
             Draft delivered — close this dialog to review and edit the form.
           </div>
@@ -280,13 +280,13 @@ export function EkkoDraftModal({
                 </li>
               ) : (
                 <li key={m.id} className="mr-auto max-w-[88%] space-y-1">
-                  <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-violet-700">
+                  <p className="px-1 text-[10px] font-semibold uppercase tracking-wide text-accent">
                     Ekko
                   </p>
                   <div
                     className={cn(
                       "rounded-md border bg-card px-3 py-1.5 text-sm text-foreground shadow-sm",
-                      m.streaming ? "border-violet-300" : "border-border",
+                      m.streaming ? "border-accent/40" : "border-border",
                     )}
                   >
                     {m.text ? (

@@ -47,7 +47,10 @@ describe("PerfTable", () => {
   it("renders the empty-state copy when no rows", () => {
     render(<PerfTable rows={[]} format="combined" />);
 
-    expect(screen.getByText(/No performance rows yet for this filter/i)).toBeInTheDocument();
+    // M8 routed the empty case through the shared <EmptyState /> primitive so
+    // the audit list reads the same as every other empty list in the app; the
+    // title is the durable assertion.
+    expect(screen.getByText(/No performance rows match this view/i)).toBeInTheDocument();
   });
 
   it("renders one row per AuditRow with all image columns", () => {

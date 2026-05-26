@@ -23,22 +23,29 @@ describe("ApprovalArgsDiff", () => {
     expect(paths).toEqual(["a", "b"]);
   });
 
-  it("renders a yellow-class span for path values", () => {
+  it("renders a path-highlighted span for path values", () => {
     render(<ApprovalArgsDiff args={{ p: "/var/log" }} />);
-    const highlight = screen.getByText("/var/log");
-    expect(highlight.className).toMatch(/yellow/);
+    // Locate by the kind-tagged data-testid so the assertion survives a
+    // palette change (M8 swapped the literal yellow/sky/red classes for
+    // semantic warning/info/destructive tokens that read correctly in dark
+    // mode). The rendered text + role / testid is the durable contract.
+    const highlight = screen.getByTestId("leaf-value-path");
+    expect(highlight).toHaveTextContent("/var/log");
+    expect(highlight.className).toMatch(/warning/);
   });
 
-  it("renders a sky-class span for URL values", () => {
+  it("renders a URL-highlighted span for URL values", () => {
     render(<ApprovalArgsDiff args={{ u: "https://example.com" }} />);
-    const highlight = screen.getByText("https://example.com");
-    expect(highlight.className).toMatch(/sky/);
+    const highlight = screen.getByTestId("leaf-value-url");
+    expect(highlight).toHaveTextContent("https://example.com");
+    expect(highlight.className).toMatch(/info/);
   });
 
-  it("renders a red-class span for money values", () => {
+  it("renders a money-highlighted span for money values", () => {
     render(<ApprovalArgsDiff args={{ cost: 200 }} />);
-    const highlight = screen.getByText("200");
-    expect(highlight.className).toMatch(/red/);
+    const highlight = screen.getByTestId("leaf-value-money");
+    expect(highlight).toHaveTextContent("200");
+    expect(highlight.className).toMatch(/destructive/);
   });
 
   it("nested objects appear with dot-path keys", () => {
@@ -58,7 +65,8 @@ describe("ApprovalArgsDiff", () => {
     render(<ApprovalArgsDiff args={{ note: "hello" }} />);
     const highlight = screen.getByText("hello");
     expect(highlight.className).toMatch(/foreground/);
-    expect(highlight.className).not.toMatch(/yellow/);
+    // No path / url / money tinting on a plain string.
+    expect(highlight.className).not.toMatch(/warning|info|destructive/);
   });
 
   it("never uses dangerouslySetInnerHTML even for script-like strings", () => {

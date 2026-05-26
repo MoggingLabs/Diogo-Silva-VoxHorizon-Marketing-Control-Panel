@@ -6,19 +6,17 @@ import { Info, TrendingUp, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EditableValue } from "@/components/ui/EditableValue";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import {
   classify,
   summarizeKpis,
   realCpl,
   PERF_IMAGE_TABLE,
-  VERDICT_LABEL,
-  VERDICT_TONE,
   DEFAULT_THRESHOLDS,
   type DecisionThresholds,
   type PerfRowWithId,
   type Verdict,
 } from "@/lib/monitor/thresholds";
-import { cn } from "@/lib/utils";
 
 /**
  * MonitorDashboard (#362, P4.7): KPI cards + per-campaign threshold pills + a
@@ -77,7 +75,7 @@ export function MonitorDashboard({ pipelineId, rows, cplTarget }: MonitorDashboa
       <div
         role="note"
         data-testid="ghl-truth-banner"
-        className="flex items-start gap-2 rounded-md border border-sky-300 bg-sky-50 px-4 py-2 text-sm text-sky-900 dark:border-sky-800 dark:bg-sky-950/30 dark:text-sky-200"
+        className="flex items-start gap-2 rounded-md border border-info/40 bg-info/10 px-4 py-2 text-sm text-info"
       >
         <Info aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
         <p>
@@ -153,16 +151,11 @@ export function MonitorDashboard({ pipelineId, rows, cplTarget }: MonitorDashboa
                     </td>
                     <td className="px-3 py-2">{cpl === null ? "—" : money(cpl)}</td>
                     <td className="px-3 py-2">
-                      <span
+                      <StatusBadge
+                        status={verdict}
                         data-testid={`verdict-${row.campaign_id}`}
                         data-verdict={verdict}
-                        className={cn(
-                          "inline-flex rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
-                          VERDICT_TONE[verdict],
-                        )}
-                      >
-                        {VERDICT_LABEL[verdict]}
-                      </span>
+                      />
                     </td>
                   </tr>
                 );
@@ -196,10 +189,10 @@ export function MonitorDashboard({ pipelineId, rows, cplTarget }: MonitorDashboa
         </Button>
         <Button
           type="button"
+          variant="success"
           data-testid="scale-button"
           disabled={busy !== null}
           onClick={() => decide("scale")}
-          className="bg-emerald-600 text-white hover:bg-emerald-700"
         >
           <TrendingUp aria-hidden="true" className="size-4" />
           {busy === "scale" ? "Scaling…" : "Scale"}

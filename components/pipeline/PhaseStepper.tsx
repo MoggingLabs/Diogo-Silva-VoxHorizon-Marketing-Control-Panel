@@ -64,8 +64,8 @@ export function PhaseStepper({ current, className }: PhaseStepperProps) {
               <span
                 className={cn(
                   "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 text-xs font-semibold",
-                  state === "past" && "border-emerald-500 bg-emerald-500 text-white",
-                  state === "active" && "border-sky-500 bg-sky-500 text-white",
+                  state === "past" && "border-success bg-success text-success-foreground",
+                  state === "active" && "border-info bg-info text-info-foreground",
                   state === "future" && "border-border bg-background text-muted-foreground",
                 )}
               >
@@ -101,7 +101,7 @@ export function PhaseStepper({ current, className }: PhaseStepperProps) {
                       highlight
                         ? stage === "cancelled"
                           ? "bg-destructive/10 text-destructive ring-destructive/30"
-                          : "bg-sky-100 text-sky-900 ring-sky-300 dark:bg-sky-950/40 dark:text-sky-200 dark:ring-sky-800"
+                          : "bg-info/15 text-info ring-info/40"
                         : "bg-muted text-muted-foreground ring-border",
                     )}
                   >
