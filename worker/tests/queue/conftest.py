@@ -7,16 +7,12 @@ machine, the auto-emit trigger, and the cancel-propagation trigger only
 exist as live SQL artifacts; the in-memory ``FakeSupabase`` double cannot
 exercise them.
 
-Pytest only auto-collects conftests from a test's own directory + ancestors,
-not from siblings. To reuse the integration tier's fixtures (single source
-of truth for the migration-apply lifecycle, session-scoped) we register
-that conftest as a PLUGIN via ``pytest_plugins`` -- pytest then loads its
-fixtures ONCE and shares them across both selections, so a combined
-``pytest -m integration`` run that walks both directories applies the
-migrations exactly once. (A naive re-import via ``from tests.integration
-.conftest import migrated_db`` would create a DUPLICATE session-scoped
-fixture and apply migrations twice, which fails on ``type already exists``
-the second time.)
+The plugin registration that makes those fixtures visible here happens at
+the TOP-LEVEL ``tests/conftest.py`` (recent pytest forbids non-top-level
+``pytest_plugins`` declarations). This conftest just auto-applies the
+``integration`` marker for any test in this directory and relaxes the
+coverage floor for an ``-m integration`` selection, mirroring the same
+hooks the integration tier's conftest exposes for ITS directory.
 """
 
 from __future__ import annotations
@@ -24,14 +20,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
-
-# Load the integration tier's conftest as a plugin so its session-scoped
-# ``migrated_db`` / ``pg_dsn`` / ``db_conn`` fixtures are registered ONCE and
-# shared with the queue tests. Pytest's plugin-loader deduplicates by module
-# path so this is safe even when ``-m integration`` also collects the
-# integration directory directly.
-pytest_plugins = ["tests.integration.conftest"]
 
 
 def pytest_collection_modifyitems(
