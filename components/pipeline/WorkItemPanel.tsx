@@ -236,30 +236,6 @@ function RetryChain({ workItem }: { workItem: WorkItem }) {
   );
 }
 
-/**
- * Auto-hiding wrapper around <WorkItemPanel /> for stages that already have a
- * primary surface and only want to surface dispatcher state when work is
- * actually in flight (silent-failure PR-3). The wrapper consults
- * `useActiveWorkItem` and renders the full panel ONLY when there is an active
- * work_item for the pipeline; otherwise it returns null so the surrounding
- * stage layout is unchanged on the happy path.
- *
- * Use this seam in stages whose own UI is already the primary visual (ideation,
- * review, generation). The configuration stage's operator-driven branch uses
- * the panel directly (it IS the waiting state), not this wrapper.
- */
-export function WorkItemPanelSlot({
-  pipelineId,
-  className,
-}: {
-  pipelineId: string;
-  className?: string;
-}) {
-  const { activeWorkItem } = useActiveWorkItem(pipelineId);
-  if (!activeWorkItem) return null;
-  return <WorkItemPanel pipelineId={pipelineId} className={className} />;
-}
-
 function ActionRow({ workItem, pipelineId }: { workItem: WorkItem | null; pipelineId: string }) {
   const canRedispatch = workItem !== null && TERMINAL.has(workItem.status);
   // The redispatch route ships in PR-2b. Always render the button disabled here

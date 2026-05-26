@@ -5,7 +5,6 @@ import { useRouter } from "next/navigation";
 import { Check, ImageOff, Loader2, Sparkles } from "lucide-react";
 
 import { StageShell } from "./StageShell";
-import { WorkItemPanelSlot } from "./WorkItemPanel";
 import { activeTracks, type PipelineTrack } from "@/lib/pipeline/tracks";
 import { updatePicks } from "@/lib/pipeline/client";
 import type { Pipeline } from "@/lib/pipeline/types";
@@ -191,11 +190,6 @@ export function StageIdeation({ pipeline, imageBriefId, videoBriefId }: StageIde
               />
             ) : null}
           </div>
-          {/* Silent-failure PR-3: surface live dispatcher state when an
-              operator_dispatch / worker_ideation work_item is in flight. The
-              slot auto-hides when nothing is queued, so the happy-path layout
-              is unchanged. */}
-          <WorkItemPanelSlot pipelineId={pipeline.id} />
         </div>
       }
     />
