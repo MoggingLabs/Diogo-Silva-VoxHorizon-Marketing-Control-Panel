@@ -154,7 +154,7 @@ def _install_signal_handlers(daemon: Daemon) -> None:
             continue
         try:
             loop.add_signal_handler(sig, daemon.request_stop)
-        except (NotImplementedError, RuntimeError):
+        except (NotImplementedError, RuntimeError):  # pragma: no cover - platform-dependent fallback
             # Windows or already-running tests — fall back to whatever the
             # outer harness does (KeyboardInterrupt, etc.).
             continue
