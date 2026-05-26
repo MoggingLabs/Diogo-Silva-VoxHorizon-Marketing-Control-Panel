@@ -6,15 +6,16 @@ import { Info, TrendingUp, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { EditableValue } from "@/components/ui/EditableValue";
-import { PERF_IMAGE_TABLE, type PerfRowWithId } from "@/lib/monitor/fetch";
 import {
   classify,
   summarizeKpis,
   realCpl,
+  PERF_IMAGE_TABLE,
   VERDICT_LABEL,
   VERDICT_TONE,
   DEFAULT_THRESHOLDS,
   type DecisionThresholds,
+  type PerfRowWithId,
   type Verdict,
 } from "@/lib/monitor/thresholds";
 import { cn } from "@/lib/utils";

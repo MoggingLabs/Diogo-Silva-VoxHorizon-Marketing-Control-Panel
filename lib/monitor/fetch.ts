@@ -1,18 +1,13 @@
 import "server-only";
 
-import type { PerfRow } from "@/lib/monitor/thresholds";
+import { PERF_IMAGE_TABLE, type PerfRowWithId } from "@/lib/monitor/thresholds";
 import { createAdminClient } from "@/lib/supabase/admin";
 
-/** Table the perf overlay edits target (the overrides key `table_name`). */
-export const PERF_IMAGE_TABLE = "campaign_perf_image" as const;
-
-/**
- * A perf row carrying its source `id` so the operator-correction overlay can be
- * keyed on `(campaign_perf_image, id, field)`. The numeric fields already
- * reflect any operator override (the overlay is applied at read time — the
- * source row is never mutated, per the derived/worker-owned guardrail).
- */
-export type PerfRowWithId = PerfRow & { id: string };
+// Re-export the client-importable helpers for back-compat with callers that
+// already imported them from this module. The constants/types themselves live
+// in `lib/monitor/thresholds.ts` so the client `MonitorDashboard` can reach
+// them without dragging this server-only module into the client bundle.
+export { PERF_IMAGE_TABLE, type PerfRowWithId } from "@/lib/monitor/thresholds";
 
 /**
  * Server-side fetch for the MonitorDashboard (#362). Pulls the image perf rows

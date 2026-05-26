@@ -32,6 +32,22 @@ export type PerfRow = {
 };
 
 /**
+ * Same as `PerfRow`, plus the source row `id` so the operator-correction
+ * overlay can be keyed on `(campaign_perf_image, id, field)`. Lives here (not
+ * in `lib/monitor/fetch.ts`) because the client-side `MonitorDashboard`
+ * imports it — `fetch.ts` is `server-only` and can't be reached from a
+ * `"use client"` component.
+ */
+export type PerfRowWithId = PerfRow & { id: string };
+
+/**
+ * The Supabase table the perf overlay edits target (the `overrides.table_name`
+ * key). Constant lives here so the client `MonitorDashboard` can pass it to
+ * `EditableValue` without importing from the server-only fetch module.
+ */
+export const PERF_IMAGE_TABLE = "campaign_perf_image" as const;
+
+/**
  * Decision thresholds. Defaults are the agency's published roofing/remodeling
  * monitor rules; a client's `cpl_target` overrides the CPL bands at call time.
  *   - CPL ≤ target          → keep
