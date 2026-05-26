@@ -67,8 +67,11 @@ export default async function VideoLaunchDetailPage({
     throw new Error("video launch payload failed schema validation");
   }
 
-  const adEntities = await getAdEntitiesForLaunch(launch.id);
-  const [briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
+  // Parallel batch: the ad-entity graph is independent of the brief / creatives
+  // / copy / events queries, so it should not take its own serial round-trip
+  // (~140ms to us-east) ahead of them.
+  const [adEntities, briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
+    getAdEntitiesForLaunch(launch.id),
     supabase
       .from("video_briefs")
       .select("*, clients(name, slug)")
