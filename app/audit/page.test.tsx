@@ -22,6 +22,13 @@ vi.mock("@/components/audit/FunnelSankey", () => ({
 vi.mock("@/components/audit/PerfTable", () => ({
   PerfTable: ({ rows }: { rows: unknown[] }) => <div data-testid="perf" data-rows={rows.length} />,
 }));
+// Silent-failure PR-2a: stub the new tile so existing tests don't need to
+// configure work_item mock data per case.
+vi.mock("@/components/audit/WorkItemFailuresTile", () => ({
+  WorkItemFailuresTile: ({ rows }: { rows: unknown[] }) => (
+    <div data-testid="work-item-failures-stub" data-rows={rows.length} />
+  ),
+}));
 
 import AuditPage from "./page";
 
@@ -156,5 +163,45 @@ describe("AuditPage", () => {
     const sevenLink = screen.getByRole("link", { name: /^7d$/ });
     expect(sevenLink).toHaveAttribute("aria-current", "page");
     expect(screen.getByRole("link", { name: /^30d$/ })).toHaveAttribute("href", "/audit");
+  });
+
+  it("loads work_item failures and passes them into the tile (silent-failure PR-2a)", async () => {
+    currentSupabase = mockSupabaseClient({
+      campaign_perf_image: { select: { data: [], error: null } },
+      campaign_perf_video: { select: { data: [], error: null } },
+      work_item: {
+        select: {
+          data: [
+            {
+              id: "wi-1",
+              kind: "operator_dispatch",
+              pipeline_id: "p1",
+              status: "failed",
+              error_kind: "auth_expired",
+              error_detail: { msg: "auth refresh failed" },
+              attempt: 2,
+              created_at: "2026-05-26T12:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+    });
+    const el = await AuditPage({ searchParams: Promise.resolve({}) });
+    render(el);
+    expect(screen.getByTestId("work-item-failures-stub")).toHaveAttribute("data-rows", "1");
+  });
+
+  it("renders an empty failures tile when the work_item query errors", async () => {
+    currentSupabase = mockSupabaseClient({
+      campaign_perf_image: { select: { data: [], error: null } },
+      campaign_perf_video: { select: { data: [], error: null } },
+      work_item: { select: { data: null, error: { message: "boom" } } },
+    });
+    const el = await AuditPage({ searchParams: Promise.resolve({}) });
+    render(el);
+    // Failure loader swallows the error and returns []; the tile renders with
+    // data-rows="0" and itself renders nothing in production.
+    expect(screen.getByTestId("work-item-failures-stub")).toHaveAttribute("data-rows", "0");
   });
 });

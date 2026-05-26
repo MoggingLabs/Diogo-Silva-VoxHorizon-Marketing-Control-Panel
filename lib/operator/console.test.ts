@@ -178,4 +178,104 @@ describe("getOperatorRuns", () => {
     const runs = await getOperatorRuns();
     expect(runs[0]!.events).toHaveLength(30);
   });
+
+  it("surfaces the active work_item status as dispatchStatus (silent-failure PR-2a)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          data: [
+            {
+              id: "op1",
+              status: "generation",
+              format_choice: "image",
+              client_id: "c1",
+              config_draft: { operator_driven: true },
+              created_at: "2026-05-26T00:00:00Z",
+              updated_at: "2026-05-26T01:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+      clients: { select: { data: [{ id: "c1", name: "Acme" }], error: null } },
+      pipeline_events: { select: { data: [], error: null } },
+      work_item: {
+        select: {
+          data: [
+            // Newest-first; the first row dominates UNLESS an earlier active
+            // row overrides. Here the newest row is also active, so use it.
+            {
+              pipeline_id: "op1",
+              status: "running",
+              created_at: "2026-05-26T01:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+    });
+    const runs = await getOperatorRuns();
+    expect(runs[0]!.dispatchStatus).toBe("running");
+  });
+
+  it("prefers an active work_item over a newer terminal one", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          data: [
+            {
+              id: "op1",
+              status: "generation",
+              format_choice: "image",
+              client_id: null,
+              config_draft: { operator_driven: true },
+              created_at: "2026-05-26T00:00:00Z",
+              updated_at: "2026-05-26T01:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+      pipeline_events: { select: { data: [], error: null } },
+      work_item: {
+        select: {
+          data: [
+            // Newest row: terminal. We expect the loader to keep this as the
+            // initial pick, but then upgrade to the active row below.
+            { pipeline_id: "op1", status: "completed", created_at: "2026-05-26T01:00:00Z" },
+            // Older row that is still active -> wins.
+            { pipeline_id: "op1", status: "queued", created_at: "2026-05-26T00:30:00Z" },
+          ],
+          error: null,
+        },
+      },
+    });
+    const runs = await getOperatorRuns();
+    expect(runs[0]!.dispatchStatus).toBe("queued");
+  });
+
+  it("returns dispatchStatus=null when no work_item exists for the pipeline", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          data: [
+            {
+              id: "op1",
+              status: "configuration",
+              format_choice: "image",
+              client_id: null,
+              config_draft: { operator_driven: true },
+              created_at: "2026-05-26T00:00:00Z",
+              updated_at: "2026-05-26T01:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+      pipeline_events: { select: { data: [], error: null } },
+      work_item: { select: { data: [], error: null } },
+    });
+    const runs = await getOperatorRuns();
+    expect(runs[0]!.dispatchStatus).toBeNull();
+  });
 });

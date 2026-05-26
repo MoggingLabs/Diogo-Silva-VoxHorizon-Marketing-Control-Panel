@@ -160,6 +160,41 @@ const STATUS_MAP: Record<string, StatusSpec> = {
   keep: { semantic: "success", icon: CheckCircle2, label: "Keep" },
   watch: { semantic: "warning", icon: AlertTriangle, label: "Watch" },
   kill: { semantic: "destructive", icon: TrendingDown, label: "Kill" },
+
+  // Silent-failure PR-2a: the seven `work_item_status` values. The dashboard's
+  // WorkItemPanel reads these straight from `work_item.status`; the canonical
+  // semantic palette keeps the new surface visually consistent with every
+  // other status pill in the app.
+  //   queued    -> info     (waiting in the queue, neutral-positive)
+  //   claimed   -> info     (consumer grabbed it, about to run)
+  //   running   -> warning  (in-flight, attention-color, spinner)
+  //   completed -> success  (terminal-good)
+  //   failed    -> destructive (terminal-bad, error_kind surfaced separately)
+  //   timed_out -> destructive (terminal-bad, heartbeat lapsed)
+  //   cancelled -> muted    (terminal-neutral, operator-initiated stop)
+  // `queued`, `running`, `completed`, `failed`, `cancelled` already map above;
+  // we add `claimed` and `timed_out` here, and re-pin the explicit labels.
+  claimed: { semantic: "info", icon: Clock, label: "Claimed" },
+  timed_out: { semantic: "destructive", icon: AlertTriangle, label: "Timed out" },
+
+  // The five `work_item_consumers.status` values for the DaemonHealthBadge.
+  //   starting -> info     (daemon booting, self-test in progress)
+  //   live     -> success  (drain loop running, heartbeating)
+  //   degraded -> warning  (running but ambiguous health signal)
+  //   stopped  -> muted    (clean SIGTERM shutdown, intentional)
+  //   down     -> destructive (startup_check failed or crashed)
+  // `live` and `down` overlap names already used above (live=running channel,
+  // down is new); the underlying STATUS_MAP key takes priority on normalize.
+  starting: { semantic: "info", icon: Loader2, label: "Starting", spin: true },
+  degraded: { semantic: "warning", icon: AlertTriangle, label: "Degraded" },
+  stopped: { semantic: "muted", icon: CircleDashed, label: "Stopped" },
+  down: { semantic: "destructive", icon: XCircle, label: "Down" },
+
+  // A render of the WorkItemPanel with no active work_item shows the "no-row"
+  // pill so the surface is never blank — distinguishes "queue is idle" from
+  // "loading" or "error". The lookup normalises hyphen -> underscore, so the
+  // key is `no_row` even though callers pass `"no-row"`.
+  no_row: { semantic: "muted", icon: CircleDashed, label: "Idle" },
 };
 
 function normalize(status: string): string {

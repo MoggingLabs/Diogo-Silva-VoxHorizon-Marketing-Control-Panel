@@ -3,6 +3,10 @@ import { FormatTabs } from "@/components/audit/FormatTabs";
 import { FunnelSankey } from "@/components/audit/FunnelSankey";
 import { PerfTable } from "@/components/audit/PerfTable";
 import {
+  WorkItemFailuresTile,
+  type WorkItemFailureRow,
+} from "@/components/audit/WorkItemFailuresTile";
+import {
   AUDIT_WINDOW_VALUES,
   aggregateFunnel,
   imageRowToAuditRow,
@@ -59,7 +63,11 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
   const format = parseAuditFormat(pickFirst(params.format));
   const window = parseAuditWindow(pickFirst(params.window));
 
-  const { rows, errors } = await loadAuditRows(format, window);
+  const [auditData, workItemFailures] = await Promise.all([
+    loadAuditRows(format, window),
+    loadWorkItemFailures(),
+  ]);
+  const { rows, errors } = auditData;
   const funnelTotals = aggregateFunnel(rows);
 
   return (
@@ -77,6 +85,11 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
           <FormatTabs value={format} />
         </div>
       </header>
+
+      {/* Silent-failure PR-2a: dead-letter view across every work_item kind.
+          Renders nothing when there are no failures (an empty board is a
+          healthy one), so it slots cleanly above the campaign audit tiles. */}
+      <WorkItemFailuresTile rows={workItemFailures} />
 
       {errors.length > 0 ? (
         <div
@@ -103,6 +116,34 @@ export default async function AuditPage({ searchParams }: { searchParams: Search
       )}
     </main>
   );
+}
+
+/**
+ * Silent-failure PR-2a: fetch the most-recent failed/timed_out work_item rows
+ * for the dead-letter tile. Capped at 50 so a noisy stack doesn't blow up the
+ * audit page — the tile slices to the top 5 per error_kind group anyway.
+ */
+async function loadWorkItemFailures(): Promise<WorkItemFailureRow[]> {
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("work_item")
+    .select("id, kind, pipeline_id, status, error_kind, error_detail, attempt, created_at")
+    .in("status", ["failed", "timed_out"])
+    .order("created_at", { ascending: false })
+    .limit(50);
+  if (error) {
+    return [];
+  }
+  return (data ?? []).map((r) => ({
+    id: r.id,
+    kind: r.kind,
+    pipeline_id: r.pipeline_id,
+    status: r.status as "failed" | "timed_out",
+    error_kind: r.error_kind,
+    error_detail: (r.error_detail ?? null) as { msg?: string } | null,
+    attempt: r.attempt,
+    created_at: r.created_at,
+  }));
 }
 
 // ---------------------------------------------------------------------------

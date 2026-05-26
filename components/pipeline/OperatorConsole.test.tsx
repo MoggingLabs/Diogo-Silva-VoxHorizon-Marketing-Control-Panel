@@ -28,6 +28,13 @@ vi.mock("@/components/pipeline/OperatorNarration", () => ({
   ),
 }));
 
+// Silent-failure PR-2a: the OperatorConsole now mounts a DaemonHealthBadge at
+// the top. Stub it so this test stays focused on the runs list / kickoff
+// behaviour (DaemonHealthBadge has its own test file).
+vi.mock("@/components/pipeline/DaemonHealthBadge", () => ({
+  DaemonHealthBadge: () => <div data-testid="daemon-health-badge-stub" />,
+}));
+
 import { OperatorConsole } from "./OperatorConsole";
 import type { OperatorRun } from "@/lib/operator/console";
 
@@ -41,6 +48,7 @@ function run(overrides: Partial<OperatorRun> = {}): OperatorRun {
     created_at: "2026-05-26T00:00:00Z",
     updated_at: "2026-05-26T01:00:00Z",
     events: [],
+    dispatchStatus: null,
     ...overrides,
   };
 }
@@ -102,5 +110,32 @@ describe("OperatorConsole", () => {
     expect(screen.queryByTestId("kickoff-form")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /hire the operator/i }));
     expect(screen.getByTestId("kickoff-form")).toBeInTheDocument();
+  });
+
+  it("mounts a DaemonHealthBadge at the top (silent-failure PR-2a)", () => {
+    render(<OperatorConsole initialRuns={[run()]} />);
+    expect(screen.getByTestId("operator-console-daemon")).toBeInTheDocument();
+    expect(screen.getByTestId("daemon-health-badge-stub")).toBeInTheDocument();
+  });
+
+  it("renders a mini dispatch pill per run when dispatchStatus is set", () => {
+    render(<OperatorConsole initialRuns={[run({ id: "p1", dispatchStatus: "running" })]} />);
+    const pill = screen.getByTestId("operator-run-p1-dispatch");
+    expect(pill).toBeInTheDocument();
+    expect(pill).toHaveTextContent(/running/i);
+  });
+
+  it("renders the idle dispatch pill when there is no work_item", () => {
+    render(<OperatorConsole initialRuns={[run({ id: "p1", dispatchStatus: null })]} />);
+    const pill = screen.getByTestId("operator-run-p1-dispatch");
+    expect(pill).toBeInTheDocument();
+    expect(pill).toHaveTextContent(/idle/i);
+  });
+
+  it("subscribes to BOTH pipelines and work_item realtime channels", () => {
+    render(<OperatorConsole initialRuns={[run()]} />);
+    const tables = new Set(realtime.listeners.map((l) => l.table));
+    expect(tables.has("pipelines")).toBe(true);
+    expect(tables.has("work_item")).toBe(true);
   });
 });

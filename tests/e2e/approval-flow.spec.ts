@@ -34,11 +34,11 @@ async function seedApproval(opts: {
   const expiresAt = new Date(Date.now() + (opts.expiresInMs ?? 5 * 60_000)).toISOString();
   const session = `${TEST_SESSION_PREFIX}-${id.slice(0, 8)}`;
   // The generated types may not include the `approvals` table yet (Wave 22
-  // regenerates them); cast through `unknown` so the seed still type-checks
-  // under the e2e tsconfig.
-  const fromApprovals = (admin.from as unknown as (t: string) => ReturnType<typeof admin.from>)(
-    "approvals",
-  );
+  // regenerates them). Use a permissive `any`-based cast so this stays robust
+  // to view additions in `types.gen.ts` (which would otherwise narrow the
+  // `ReturnType<typeof admin.from>` to a union with `never`-ish columns).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fromApprovals = (admin.from as unknown as (t: string) => any)("approvals");
   const { error } = await fromApprovals.insert({
     id,
     ekko_session_id: session,
@@ -57,17 +57,23 @@ async function seedApproval(opts: {
 
 async function deleteApproval(id: string): Promise<void> {
   const admin = getTestAdminClient();
-  const fromApprovals = (admin.from as unknown as (t: string) => ReturnType<typeof admin.from>)(
-    "approvals",
-  );
+  // The generated types may not include the `approvals` table yet (Wave 22
+  // regenerates them). Use a permissive `any`-based cast so this stays robust
+  // to view additions in `types.gen.ts` (which would otherwise narrow the
+  // `ReturnType<typeof admin.from>` to a union with `never`-ish columns).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fromApprovals = (admin.from as unknown as (t: string) => any)("approvals");
   await fromApprovals.delete().eq("id", id);
 }
 
 async function fetchApproval(id: string): Promise<Record<string, unknown> | null> {
   const admin = getTestAdminClient();
-  const fromApprovals = (admin.from as unknown as (t: string) => ReturnType<typeof admin.from>)(
-    "approvals",
-  );
+  // The generated types may not include the `approvals` table yet (Wave 22
+  // regenerates them). Use a permissive `any`-based cast so this stays robust
+  // to view additions in `types.gen.ts` (which would otherwise narrow the
+  // `ReturnType<typeof admin.from>` to a union with `never`-ish columns).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fromApprovals = (admin.from as unknown as (t: string) => any)("approvals");
   const { data } = await fromApprovals.select("*").eq("id", id).maybeSingle();
   return data as Record<string, unknown> | null;
 }
