@@ -478,6 +478,14 @@ alter table pipeline_events
 create index if not exists pipeline_events_pipeline_id_seq_idx
   on pipeline_events (pipeline_id, seq desc);
 
+-- The implicit sequence Postgres mints for ``bigserial`` needs USAGE on
+-- the new sequence so service_role's INSERT path can allocate the next
+-- seq value. Without this grant, an INSERT under ``set role service_role``
+-- raises ``permission denied for sequence pipeline_events_seq_seq``.
+-- service_role is the only role that INSERTs pipeline_events (Next routes +
+-- the auto-emit trigger), so this is the only grant the column needs.
+grant usage, select on sequence pipeline_events_seq_seq to service_role;
+
 create or replace function compute_pipeline_status(p_pipeline_id uuid)
   returns pipeline_status_enum
   language sql stable
