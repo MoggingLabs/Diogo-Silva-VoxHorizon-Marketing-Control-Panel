@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { Archive, ArchiveRestore } from "lucide-react";
 import { toast } from "sonner";
 
+import { BulkExportButton } from "@/components/shared/BulkExportButton";
 import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import {
   DataTable,
@@ -15,6 +16,7 @@ import {
 } from "@/components/shared/DataTable";
 import { ResourceShell, type BulkAction } from "@/components/shared/ResourceShell";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import type { CsvColumn } from "@/lib/export/csv";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   archiveLaunch,
@@ -268,12 +270,33 @@ export function LaunchesManager({ initialImage, initialVideo }: LaunchesManagerP
     ];
   }, [isArchivedView]);
 
+  const exportColumns = React.useMemo<CsvColumn<LaunchRowView>[]>(
+    () => [
+      { header: "Brief", value: (r) => r.briefHuman },
+      { header: "Client", value: (r) => r.clientName },
+      { header: "Status", value: (r) => r.status },
+      { header: "Format", value: () => format },
+      { header: "Created", value: (r) => r.created_at },
+    ],
+    [format],
+  );
+  const exportRows = React.useMemo(() => {
+    if (selectedIds.length === 0) return rows;
+    const set = new Set(selectedIds);
+    return rows.filter((r) => set.has(r.id));
+  }, [selectedIds, rows]);
+
   return (
     <ResourceShell
       title="Launches"
       description="Image and video launch packages. Open a package to review the bundle and decide."
       selectedCount={isArchivedView ? 0 : selectedIds.length}
       bulkActions={bulkActions}
+      bulkExtra={
+        isArchivedView ? undefined : (
+          <BulkExportButton rows={exportRows} columns={exportColumns} filenameBase="launches" />
+        )
+      }
       onClearSelection={() => setSelectedIds([])}
       headerActions={
         <div className="flex items-center gap-2">
@@ -313,6 +336,8 @@ export function LaunchesManager({ initialImage, initialVideo }: LaunchesManagerP
         selectable={!isArchivedView}
         selectedIds={isArchivedView ? [] : selectedIds}
         onSelectionChange={setSelectedIds}
+        keyboardNav
+        onEditRow={(r) => router.push(detailHref(r))}
         emptyMessage={
           isArchivedView
             ? "No archived launches. Archived packages show up here."

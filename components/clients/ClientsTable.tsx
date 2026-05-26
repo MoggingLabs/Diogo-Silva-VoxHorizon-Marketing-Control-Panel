@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { Archive, ArchiveRestore, Pencil } from "lucide-react";
 import { toast } from "sonner";
 
+import { BulkExportButton } from "@/components/shared/BulkExportButton";
 import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import {
   DataTable,
@@ -14,6 +15,7 @@ import {
 } from "@/components/shared/DataTable";
 import { ResourceShell } from "@/components/shared/ResourceShell";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import type { CsvColumn } from "@/lib/export/csv";
 import { archiveClient, restoreClient } from "@/lib/clients/api";
 import {
   CLIENT_STATUS_OPTIONS,
@@ -132,6 +134,23 @@ export function ClientsTable({
     setSelected([]);
   }
 
+  // CSV/JSON export columns for the current selection (or all rows when none).
+  const exportColumns = React.useMemo<CsvColumn<Row>[]>(
+    () => [
+      { header: "Name", value: (r) => r.name },
+      { header: "Slug", value: (r) => r.slug },
+      { header: "Service", value: (r) => SERVICE_TYPE_LABEL[r.service_type] ?? r.service_type },
+      { header: "Status", value: (r) => statusOf(r) },
+      { header: "Created", value: (r) => r.created_at },
+    ],
+    [],
+  );
+  const exportRows = React.useMemo(() => {
+    if (selected.length === 0) return initialClients;
+    const set = new Set(selected);
+    return initialClients.filter((r) => set.has(r.id));
+  }, [selected, initialClients]);
+
   return (
     <>
       <ResourceShell
@@ -139,6 +158,7 @@ export function ClientsTable({
         description="Onboard, edit, and retire the clients the pipeline produces ads for."
         newLabel="New client"
         onNew={() => router.push("/clients/new")}
+        newShortcut
         selectedCount={selected.length}
         onClearSelection={() => setSelected([])}
         bulkActions={[
@@ -149,6 +169,14 @@ export function ClientsTable({
             onClick: () => setBulkOpen(true),
           },
         ]}
+        bulkExtra={
+          <BulkExportButton
+            rows={exportRows}
+            columns={exportColumns}
+            filenameBase="clients"
+            label="Export selected"
+          />
+        }
       >
         {loadError ? (
           <div className="mb-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
@@ -170,6 +198,8 @@ export function ClientsTable({
           selectable
           selectedIds={selected}
           onSelectionChange={setSelected}
+          keyboardNav
+          onEditRow={(r) => router.push(`/clients/${r.id}`)}
           emptyMessage="No clients yet. Create your first client to get started."
           pageSize={20}
         />

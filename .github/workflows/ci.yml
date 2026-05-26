@@ -393,6 +393,8 @@ jobs:
   #   - clients-crud.spec.ts       (clients CRUD           - #591/#592)
   #   - creatives-manage.spec.ts   (creative CRUD manage   - #593/#594)
   #   - briefs-crud.spec.ts        (briefs CRUD            - #590/#591)
+  #   - global-search.spec.ts      (cmd-k live search      - M7 efficiency)
+  #   - bulk-archive.spec.ts       (bulk archive on briefs - M7 efficiency)
   #
   # Local-only secrets: the printed service_role key + a dummy worker bearer.
   # NEVER a cloud project / real key. Path-filtered to web + worker + db + e2e.
@@ -431,6 +433,10 @@ jobs:
           - spec: creatives-manage.spec.ts
             allow_failure: false
           - spec: briefs-crud.spec.ts
+            allow_failure: false
+          - spec: global-search.spec.ts
+            allow_failure: false
+          - spec: bulk-archive.spec.ts
             allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).

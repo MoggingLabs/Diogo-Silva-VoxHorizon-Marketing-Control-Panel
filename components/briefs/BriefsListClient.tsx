@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { Archive, ArchiveRestore, ClipboardList, Eye, FileVideo, Plus } from "lucide-react";
 import { toast } from "sonner";
 
+import { BulkExportButton } from "@/components/shared/BulkExportButton";
 import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import {
   DataTable,
@@ -15,6 +16,7 @@ import {
   type DataTableRowAction,
 } from "@/components/shared/DataTable";
 import { ResourceShell } from "@/components/shared/ResourceShell";
+import type { CsvColumn } from "@/lib/export/csv";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -88,6 +90,24 @@ export function BriefsListClient({ rows, archived }: BriefsListClientProps) {
     () => selectedIds.filter((id) => visibleRows.some((r) => r.id === id)),
     [selectedIds, visibleRows],
   );
+
+  // Export the selected visible rows (or all visible when nothing is selected).
+  const exportColumns = React.useMemo<CsvColumn<UnifiedBriefRow>[]>(
+    () => [
+      { header: "Brief", value: (r) => r.briefIdHuman },
+      { header: "Format", value: (r) => r.format },
+      { header: "Client", value: (r) => r.clientName ?? "" },
+      { header: "Service / market", value: (r) => r.serviceMarket },
+      { header: "Status", value: (r) => r.status },
+      { header: "Created", value: (r) => r.createdAt },
+    ],
+    [],
+  );
+  const exportRows = React.useMemo(() => {
+    if (visibleSelection.length === 0) return visibleRows;
+    const set = new Set(visibleSelection);
+    return visibleRows.filter((r) => set.has(r.id));
+  }, [visibleSelection, visibleRows]);
 
   async function runArchiveRestore(targetIds: string[]) {
     setWorking(true);
@@ -229,6 +249,9 @@ export function BriefsListClient({ rows, archived }: BriefsListClientProps) {
               onClick: () => setBulkOpen(true),
             },
       ]}
+      bulkExtra={
+        <BulkExportButton rows={exportRows} columns={exportColumns} filenameBase="briefs" />
+      }
       headerActions={
         <div className="flex items-center gap-2">
           <Tabs value={tab} onValueChange={(v) => setTab(v as FormatTab)}>
@@ -281,6 +304,8 @@ export function BriefsListClient({ rows, archived }: BriefsListClientProps) {
         selectable={!working}
         selectedIds={selectedIds}
         onSelectionChange={setSelectedIds}
+        keyboardNav
+        onEditRow={(row) => router.push(row.href as Route)}
         emptyMessage={archived ? "No archived briefs." : "No briefs yet."}
       />
 

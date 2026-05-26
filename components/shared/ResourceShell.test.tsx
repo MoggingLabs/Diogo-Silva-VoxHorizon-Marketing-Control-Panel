@@ -76,4 +76,82 @@ describe("ResourceShell", () => {
     await user.click(screen.getByRole("button", { name: "Clear" }));
     expect(onClear).toHaveBeenCalled();
   });
+
+  it("renders bulkExtra in the bulk bar even with no bulkActions", () => {
+    render(
+      <ResourceShell
+        title="Clients"
+        selectedCount={1}
+        bulkExtra={<button type="button">Export</button>}
+      >
+        <div />
+      </ResourceShell>,
+    );
+    expect(screen.getByRole("region", { name: /bulk actions/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Export" })).toBeInTheDocument();
+  });
+
+  describe("the `n` keyboard shortcut", () => {
+    it("triggers onNew when newShortcut is on", async () => {
+      const user = userEvent.setup();
+      const onNew = vi.fn();
+      render(
+        <ResourceShell title="Clients" newLabel="New client" onNew={onNew} newShortcut>
+          <div />
+        </ResourceShell>,
+      );
+      await user.keyboard("n");
+      expect(onNew).toHaveBeenCalledTimes(1);
+    });
+
+    it("does nothing when newShortcut is off", async () => {
+      const user = userEvent.setup();
+      const onNew = vi.fn();
+      render(
+        <ResourceShell title="Clients" onNew={onNew}>
+          <div />
+        </ResourceShell>,
+      );
+      await user.keyboard("n");
+      expect(onNew).not.toHaveBeenCalled();
+    });
+
+    it("ignores `n` while typing in an input", async () => {
+      const user = userEvent.setup();
+      const onNew = vi.fn();
+      render(
+        <ResourceShell title="Clients" onNew={onNew} newShortcut>
+          <input aria-label="field" />
+        </ResourceShell>,
+      );
+      await user.click(screen.getByLabelText("field"));
+      await user.keyboard("n");
+      expect(onNew).not.toHaveBeenCalled();
+    });
+
+    it("ignores `n` when a modifier is held (e.g. cmd-n)", async () => {
+      const user = userEvent.setup();
+      const onNew = vi.fn();
+      render(
+        <ResourceShell title="Clients" onNew={onNew} newShortcut>
+          <div />
+        </ResourceShell>,
+      );
+      await user.keyboard("{Meta>}n{/Meta}");
+      expect(onNew).not.toHaveBeenCalled();
+    });
+
+    it("does not attach the listener when onNew is absent", async () => {
+      const user = userEvent.setup();
+      // Should not throw even though newShortcut is on with no handler.
+      render(
+        <ResourceShell title="Clients" newShortcut>
+          <div />
+        </ResourceShell>,
+      );
+      await user.keyboard("n");
+      // Nothing to assert beyond "no crash"; the guard returns early.
+      expect(screen.getByRole("heading", { name: "Clients" })).toBeInTheDocument();
+    });
+  });
 });
