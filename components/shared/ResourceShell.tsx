@@ -4,6 +4,7 @@ import * as React from "react";
 import { Plus } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { hasModifier, isTypingTarget } from "@/lib/keyboard";
 import { cn } from "@/lib/utils";
 
 export type BulkAction = {
@@ -22,6 +23,12 @@ export type ResourceShellProps = {
   /** "New <resource>" primary action. Omit to hide the button. */
   newLabel?: string;
   onNew?: () => void;
+  /**
+   * Enable the global `n` shortcut to trigger `onNew` (Makeover M7 keyboard
+   * nav). Ignored when `onNew` is absent or focus is in a text input, so it
+   * never hijacks typing. Off by default to stay unobtrusive.
+   */
+  newShortcut?: boolean;
 
   /** Extra header controls (e.g. format tabs, export) to the left of New. */
   headerActions?: React.ReactNode;
@@ -32,6 +39,12 @@ export type ResourceShellProps = {
    */
   selectedCount?: number;
   bulkActions?: BulkAction[];
+  /**
+   * Extra custom controls rendered in the bulk bar alongside the buttons (e.g.
+   * the `BulkExportButton` dropdown, which can't be expressed as a plain
+   * `BulkAction`). Shown whenever the bulk bar is visible.
+   */
+  bulkExtra?: React.ReactNode;
   onClearSelection?: () => void;
 
   /** The DataTable (or any content) for this resource. */
@@ -51,13 +64,29 @@ export function ResourceShell({
   description,
   newLabel,
   onNew,
+  newShortcut = false,
   headerActions,
   selectedCount = 0,
   bulkActions = [],
+  bulkExtra,
   onClearSelection,
   children,
   className,
 }: ResourceShellProps) {
+  // `n` opens the "New" flow. Guarded so it never fires while typing, with a
+  // modifier held, or when there's no New action to trigger.
+  React.useEffect(() => {
+    if (!newShortcut || !onNew) return;
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "n" && e.key !== "N") return;
+      if (hasModifier(e) || isTypingTarget(e.target)) return;
+      e.preventDefault();
+      onNew?.();
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [newShortcut, onNew]);
+
   return (
     <main className={cn("mx-auto w-full max-w-7xl px-4 py-6 sm:px-6", className)}>
       <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
@@ -76,7 +105,7 @@ export function ResourceShell({
         </div>
       </div>
 
-      {selectedCount > 0 && bulkActions.length > 0 ? (
+      {selectedCount > 0 && (bulkActions.length > 0 || bulkExtra) ? (
         <div
           className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2"
           role="region"
@@ -95,6 +124,7 @@ export function ResourceShell({
                 <span>{action.label}</span>
               </Button>
             ))}
+            {bulkExtra}
           </div>
           {onClearSelection ? (
             <Button size="sm" variant="ghost" className="ml-auto" onClick={onClearSelection}>

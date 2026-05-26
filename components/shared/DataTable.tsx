@@ -123,6 +123,20 @@ export type DataTableProps<T> = {
   /** Optional row click handler (e.g. open detail). */
   onRowClick?: (row: T) => void;
 
+  /**
+   * Enable in-table keyboard navigation: ArrowUp/ArrowDown move a focused row,
+   * Home/End jump to first/last, Enter or `e` triggers `onEditRow` (falling
+   * back to `onRowClick`), Space toggles selection (when `selectable`), and
+   * Escape clears focus. Unobtrusive: off unless opted in, and it only acts
+   * while focus is inside the table body.
+   */
+  keyboardNav?: boolean;
+  /**
+   * Action for the focused row on Enter / `e` (the "edit" affordance). Falls
+   * back to `onRowClick` when omitted.
+   */
+  onEditRow?: (row: T) => void;
+
   className?: string;
 };
 
@@ -188,6 +202,8 @@ export function DataTable<T>({
   onStateChange,
   pageSize = 20,
   onRowClick,
+  keyboardNav = false,
+  onEditRow,
   className,
 }: DataTableProps<T>) {
   const router = useRouter();
@@ -375,6 +391,86 @@ export function DataTable<T>({
     [selection, setSelection],
   );
 
+  // ---- Keyboard navigation (opt-in) -----------------------------------
+  const [focusedIndex, setFocusedIndex] = React.useState<number | null>(null);
+  const rowRefs = React.useRef<(HTMLTableRowElement | null)[]>([]);
+
+  // Keep the focused index in range as the page rows change (filter/sort/page).
+  React.useEffect(() => {
+    setFocusedIndex((prev) => {
+      if (prev === null) return null;
+      if (pageRows.length === 0) return null;
+      return Math.min(prev, pageRows.length - 1);
+    });
+  }, [pageRows.length]);
+
+  const focusRowAt = React.useCallback((index: number) => {
+    setFocusedIndex(index);
+    // Move DOM focus so screen readers + the roving tabindex follow along.
+    rowRefs.current[index]?.focus();
+  }, []);
+
+  const editRow = React.useCallback(
+    (row: T) => {
+      if (onEditRow) onEditRow(row);
+      else if (onRowClick) onRowClick(row);
+    },
+    [onEditRow, onRowClick],
+  );
+
+  const onBodyKeyDown = React.useCallback(
+    (e: React.KeyboardEvent<HTMLTableSectionElement>) => {
+      if (!keyboardNav || pageRows.length === 0) return;
+      const cur = focusedIndex ?? -1;
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          // From "no focus" (cur = -1) the first ArrowDown lands on row 0.
+          focusRowAt(cur < 0 ? 0 : Math.min(cur + 1, pageRows.length - 1));
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          focusRowAt(cur < 0 ? 0 : Math.max(cur - 1, 0));
+          break;
+        case "Home":
+          e.preventDefault();
+          focusRowAt(0);
+          break;
+        case "End":
+          e.preventDefault();
+          focusRowAt(pageRows.length - 1);
+          break;
+        case "Enter":
+        case "e":
+        case "E": {
+          if (cur < 0) return;
+          const row = pageRows[cur];
+          if (row) {
+            e.preventDefault();
+            editRow(row);
+          }
+          break;
+        }
+        case " ": {
+          if (!selectable || cur < 0) return;
+          const row = pageRows[cur];
+          if (row) {
+            e.preventDefault();
+            toggleRow(getRowId(row));
+          }
+          break;
+        }
+        case "Escape":
+          if (focusedIndex !== null) {
+            e.preventDefault();
+            setFocusedIndex(null);
+          }
+          break;
+      }
+    },
+    [keyboardNav, pageRows, focusedIndex, focusRowAt, editRow, selectable, toggleRow, getRowId],
+  );
+
   const hasActions = rowActions.length > 0;
   const colSpan = columns.length + (selectable ? 1 : 0) + (hasActions ? 1 : 0);
 
@@ -472,7 +568,7 @@ export function DataTable<T>({
               {hasActions && <TableHead className="sr-only w-10 text-right">Actions</TableHead>}
             </TableRow>
           </TableHeader>
-          <TableBody>
+          <TableBody onKeyDown={keyboardNav ? onBodyKeyDown : undefined}>
             {loading ? (
               <TableRow className="hover:bg-transparent">
                 <TableCell colSpan={colSpan} className="h-32">
@@ -495,15 +591,35 @@ export function DataTable<T>({
                 </TableCell>
               </TableRow>
             ) : (
-              pageRows.map((row) => {
+              pageRows.map((row, rowIndex) => {
                 const id = getRowId(row);
                 const isSelected = selection.includes(id);
+                const isFocused = keyboardNav && focusedIndex === rowIndex;
                 return (
                   <TableRow
                     key={id}
+                    ref={
+                      keyboardNav
+                        ? (el) => {
+                            rowRefs.current[rowIndex] = el;
+                          }
+                        : undefined
+                    }
                     data-state={isSelected ? "selected" : undefined}
-                    className={cn(onRowClick && "cursor-pointer")}
+                    data-focused={isFocused ? "true" : undefined}
+                    tabIndex={
+                      keyboardNav
+                        ? isFocused || (focusedIndex === null && rowIndex === 0)
+                          ? 0
+                          : -1
+                        : undefined
+                    }
+                    className={cn(
+                      onRowClick && "cursor-pointer",
+                      isFocused && "bg-accent/15 outline outline-2 -outline-offset-2 outline-ring",
+                    )}
                     onClick={onRowClick ? () => onRowClick(row) : undefined}
+                    onFocus={keyboardNav ? () => setFocusedIndex(rowIndex) : undefined}
                   >
                     {selectable && (
                       <TableCell onClick={(e) => e.stopPropagation()}>

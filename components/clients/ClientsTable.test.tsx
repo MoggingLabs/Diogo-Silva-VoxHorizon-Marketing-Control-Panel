@@ -141,4 +141,48 @@ describe("ClientsTable", () => {
     await userEvent.click(await screen.findByRole("menuitem", { name: /edit/i }));
     expect(push).toHaveBeenCalledWith("/clients/c1");
   });
+
+  it("exports the selected clients as CSV with the right columns", async () => {
+    const RealBlob = globalThis.Blob;
+    const captured: { content: string; type: string }[] = [];
+    vi.stubGlobal(
+      "Blob",
+      class MockBlob {
+        content: string;
+        type: string;
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          this.content = parts.map(String).join("");
+          this.type = options?.type ?? "";
+          captured.push({ content: this.content, type: this.type });
+        }
+      },
+    );
+    const createUrl = vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    try {
+      render(<ClientsTable initialClients={ROWS} loadError={null} />);
+      const checkboxes = screen.getAllByRole("checkbox");
+      // Select the active row only (skip header select-all + the archived row).
+      await userEvent.click(checkboxes[1]!);
+      await userEvent.click(screen.getByRole("button", { name: /export selected/i }));
+      await userEvent.click(await screen.findByText("Export as CSV"));
+
+      expect(clickSpy).toHaveBeenCalled();
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.type).toContain("text/csv");
+      const lines = captured[0]!.content.split("\r\n");
+      expect(lines[0]).toBe("Name,Slug,Service,Status,Created");
+      // Only the selected row appears; status reflects archive state.
+      expect(lines[1]).toContain("Acme Roofing");
+      expect(lines[1]).toContain("active");
+      expect(lines).toHaveLength(2);
+    } finally {
+      vi.unstubAllGlobals();
+      createUrl.mockRestore();
+      clickSpy.mockRestore();
+      globalThis.Blob = RealBlob;
+    }
+  });
 });

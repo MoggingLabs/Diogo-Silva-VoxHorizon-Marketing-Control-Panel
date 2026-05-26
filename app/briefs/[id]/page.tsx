@@ -44,7 +44,7 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
   const supabase = await createClient();
 
   const [briefRes, eventsRes] = await Promise.all([
-    supabase.from("briefs").select("*").eq("id", id).maybeSingle(),
+    supabase.from("briefs").select("*, clients(name, slug)").eq("id", id).maybeSingle(),
     supabase
       .from("events")
       .select("*")
@@ -59,7 +59,10 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
   }
   if (!briefRes.data) notFound();
 
-  const brief = briefRes.data as Brief & { deleted_at: string | null };
+  const brief = briefRes.data as Brief & {
+    deleted_at: string | null;
+    clients: { name: string; slug: string } | null;
+  };
   const events = (eventsRes.data ?? []) as EventRow[];
   const payload = readBriefPayload(brief);
   const archived = Boolean(brief.deleted_at);
@@ -100,6 +103,7 @@ export default async function BriefDetailPage({ params }: { params: Promise<{ id
       ) : null}
 
       <section className="grid gap-x-8 gap-y-3 sm:grid-cols-2">
+        <Field label="Client" value={brief.clients?.name ?? "—"} />
         <Field label="Service" value={payload?.service ?? "—"} className="capitalize" />
         <Field
           label="Total budget"

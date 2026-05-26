@@ -157,4 +157,49 @@ describe("LaunchesManager", () => {
     await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
     await waitFor(() => expect(archiveLaunch).toHaveBeenCalledTimes(2));
   });
+
+  it("exports the active launches as CSV from the bulk bar", async () => {
+    const RealBlob = globalThis.Blob;
+    const captured: { content: string; type: string }[] = [];
+    vi.stubGlobal(
+      "Blob",
+      class MockBlob {
+        content: string;
+        type: string;
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          this.content = parts.map(String).join("");
+          this.type = options?.type ?? "";
+          captured.push({ content: this.content, type: this.type });
+        }
+      },
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+    try {
+      const user = userEvent.setup();
+      render(
+        <LaunchesManager
+          initialImage={[
+            row({ id: "l1", payload: { brief_id_human: "br-1", client: { name: "Acme" } } }),
+          ]}
+          initialVideo={[]}
+        />,
+      );
+      await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+      const bar = screen.getByRole("region", { name: /bulk actions/i });
+      await user.click(within(bar).getByRole("button", { name: /^export$/i }));
+      await user.click(await screen.findByText("Export as CSV"));
+      expect(captured).toHaveLength(1);
+      const lines = captured[0]!.content.split("\r\n");
+      expect(lines[0]).toBe("Brief,Client,Status,Format,Created");
+      expect(lines[1]).toContain("br-1");
+      expect(lines[1]).toContain("Acme");
+      expect(lines[1]).toContain("image");
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      globalThis.Blob = RealBlob;
+    }
+  });
 });

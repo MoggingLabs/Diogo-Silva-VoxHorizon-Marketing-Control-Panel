@@ -193,4 +193,50 @@ describe("BriefsListClient", () => {
     await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith("archive failed"));
   });
+
+  it("exports the selected visible briefs as JSON with the right shape", async () => {
+    const RealBlob = globalThis.Blob;
+    const captured: { content: string; type: string }[] = [];
+    vi.stubGlobal(
+      "Blob",
+      class MockBlob {
+        content: string;
+        type: string;
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          this.content = parts.map(String).join("");
+          this.type = options?.type ?? "";
+          captured.push({ content: this.content, type: this.type });
+        }
+      },
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    try {
+      const user = userEvent.setup();
+      render(<BriefsListClient rows={ROWS} archived={false} />);
+      // Select all visible rows.
+      await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+      await user.click(screen.getByRole("button", { name: /^export$/i }));
+      await user.click(await screen.findByText("Export as JSON"));
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]!.type).toContain("application/json");
+      const parsed = JSON.parse(captured[0]!.content);
+      expect(parsed).toEqual([
+        expect.objectContaining({
+          Brief: "img-1",
+          Format: "image",
+          Client: "Acme Co",
+          Status: "draft",
+        }),
+        expect.objectContaining({ Brief: "vid-1", Format: "video", Status: "posted" }),
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      globalThis.Blob = RealBlob;
+    }
+  });
 });

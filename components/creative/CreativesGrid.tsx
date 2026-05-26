@@ -17,6 +17,7 @@ import {
 import { toast } from "sonner";
 
 import { EmptyState } from "@/components/EmptyState";
+import { BulkExportButton } from "@/components/shared/BulkExportButton";
 import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import {
   DataTable,
@@ -25,6 +26,7 @@ import {
 } from "@/components/shared/DataTable";
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
+import type { CsvColumn } from "@/lib/export/csv";
 import { archiveCreative, restoreCreative } from "@/lib/creatives-client";
 import type { CreativeRow } from "@/lib/creatives-rows";
 import { cn } from "@/lib/utils";
@@ -218,6 +220,18 @@ export function CreativesGrid({ initialRows }: CreativesGridProps) {
     [],
   );
 
+  const exportColumns = React.useMemo<CsvColumn<CreativeRow>[]>(
+    () => [
+      { header: "Brief", value: (r) => r.brief_label },
+      { header: "Concept", value: (r) => r.concept ?? "" },
+      { header: "Format", value: (r) => r.kind },
+      { header: "Status", value: (r) => r.status },
+      { header: "Version", value: (r) => r.version },
+      { header: "Created", value: (r) => r.created_at },
+    ],
+    [],
+  );
+
   const rowActions: DataTableRowAction<CreativeRow>[] = React.useMemo(() => {
     if (archivedView) {
       return [
@@ -267,6 +281,12 @@ export function CreativesGrid({ initialRows }: CreativesGridProps) {
         </div>
 
         <div className="flex items-center gap-2">
+          <BulkExportButton
+            rows={rows}
+            columns={exportColumns}
+            filenameBase="creatives"
+            disabled={rows.length === 0}
+          />
           <Button
             type="button"
             variant={archivedView ? "default" : "outline"}

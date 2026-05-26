@@ -6,7 +6,8 @@
  * uncontrolled), per-row action menu, URL-state sync (sort/search/page/filter),
  * the `parseTableState` helper, server mode, and row-click.
  */
-import { render, screen, within } from "@testing-library/react";
+import * as React from "react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -194,6 +195,24 @@ describe("DataTable selection", () => {
     await user.click(screen.getByLabelText(/select all rows on this page/i));
     expect(onSelectionChange).toHaveBeenCalledWith(["1", "2", "3"]);
   });
+
+  it("toggles select-all back off when every page row is already selected", async () => {
+    const user = userEvent.setup();
+    const onSelectionChange = vi.fn();
+    render(
+      <DataTable
+        columns={COLUMNS}
+        data={ROWS}
+        getRowId={(r) => r.id}
+        selectable
+        selectedIds={["1", "2", "3"]}
+        onSelectionChange={onSelectionChange}
+      />,
+    );
+    await user.click(screen.getByLabelText(/select all rows on this page/i));
+    // Header was 'all selected' so clicking deselects every page row.
+    expect(onSelectionChange).toHaveBeenCalledWith([]);
+  });
 });
 
 describe("DataTable row actions + row click", () => {
@@ -277,6 +296,44 @@ describe("DataTable URL writers", () => {
     // going back to page 1 drops the page param entirely
     expect(replace.mock.calls.at(-1)?.[0]).not.toContain("page=");
   });
+
+  it("writes ?page=N when paging forward past page 1", async () => {
+    const user = userEvent.setup();
+    const many: Row[] = Array.from({ length: 25 }, (_, i) => ({
+      id: String(i),
+      name: `Row ${i}`,
+      status: "active",
+      score: i,
+    }));
+    render(<DataTable columns={COLUMNS} data={many} getRowId={(r) => r.id} pageSize={20} />);
+    await user.click(screen.getByRole("button", { name: /next page/i }));
+    expect(replace.mock.calls.at(-1)?.[0]).toContain("page=2");
+  });
+
+  it("clears the filter when 'All' is reselected (drops f_<id>)", async () => {
+    const user = userEvent.setup();
+    currentParams = new URLSearchParams("f_status=active");
+    render(
+      <DataTable
+        columns={COLUMNS}
+        data={ROWS}
+        getRowId={(r) => r.id}
+        filters={[
+          {
+            id: "status",
+            label: "Status",
+            options: [
+              { value: "active", label: "Active" },
+              { value: "draft", label: "Draft" },
+            ],
+          },
+        ]}
+      />,
+    );
+    await user.click(screen.getByLabelText("Status"));
+    await user.click(await screen.findByRole("option", { name: /all status/i }));
+    expect(replace.mock.calls.at(-1)?.[0]).not.toContain("f_status=");
+  });
 });
 
 describe("DataTable edge cases", () => {
@@ -320,6 +377,181 @@ describe("DataTable edge cases", () => {
     await user.click(screen.getAllByRole("button", { name: /row actions/i })[0]!);
     const item = await screen.findByRole("menuitem", { name: "Edit" });
     expect(item).toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("DataTable keyboard navigation", () => {
+  function renderKbd(extra: Partial<React.ComponentProps<typeof DataTable<Row>>> = {}) {
+    render(
+      <DataTable columns={COLUMNS} data={ROWS} getRowId={(r) => r.id} keyboardNav {...extra} />,
+    );
+    // The tbody owns the keydown handler. fireEvent dispatches straight to it,
+    // which is the reliable way to drive a handler on a non-focusable element.
+    return screen.getAllByRole("rowgroup")[1]!; // [0] thead, [1] tbody
+  }
+
+  function focusedText(): string | undefined {
+    const focused = screen
+      .getAllByRole("row")
+      .find((r) => r.getAttribute("data-focused") === "true");
+    return focused
+      ? (within(focused).getAllByRole("cell")[0]?.textContent ?? undefined)
+      : undefined;
+  }
+
+  it("moves row focus with ArrowDown / ArrowUp", () => {
+    const body = renderKbd();
+    fireEvent.keyDown(body, { key: "ArrowDown" }); // first lands on row 0
+    expect(focusedText()).toBe("Charlie");
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    expect(focusedText()).toBe("Alpha");
+    fireEvent.keyDown(body, { key: "ArrowUp" });
+    expect(focusedText()).toBe("Charlie");
+  });
+
+  it("jumps to first/last with Home/End and clamps at the edges", () => {
+    const body = renderKbd();
+    fireEvent.keyDown(body, { key: "End" });
+    expect(focusedText()).toBe("Bravo");
+    fireEvent.keyDown(body, { key: "ArrowDown" }); // clamps at last
+    expect(focusedText()).toBe("Bravo");
+    fireEvent.keyDown(body, { key: "Home" });
+    expect(focusedText()).toBe("Charlie");
+    fireEvent.keyDown(body, { key: "ArrowUp" }); // clamps at first
+    expect(focusedText()).toBe("Charlie");
+  });
+
+  it("triggers onEditRow with Enter and with 'e'", () => {
+    const onEditRow = vi.fn();
+    const body = renderKbd({ onEditRow });
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "Enter" });
+    expect(onEditRow).toHaveBeenCalledWith(ROWS[0]);
+    onEditRow.mockClear();
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "e" });
+    expect(onEditRow).toHaveBeenCalledWith(ROWS[1]);
+  });
+
+  it("does nothing on Enter/e when no row is focused", () => {
+    const onEditRow = vi.fn();
+    const body = renderKbd({ onEditRow });
+    fireEvent.keyDown(body, { key: "e" });
+    fireEvent.keyDown(body, { key: "Enter" });
+    expect(onEditRow).not.toHaveBeenCalled();
+  });
+
+  it("falls back to onRowClick when onEditRow is absent", () => {
+    const onRowClick = vi.fn();
+    const body = renderKbd({ onRowClick });
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "Enter" });
+    expect(onRowClick).toHaveBeenCalledWith(ROWS[0]);
+  });
+
+  it("toggles selection with Space when selectable", () => {
+    const onSelectionChange = vi.fn();
+    const body = renderKbd({ selectable: true, selectedIds: [], onSelectionChange });
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: " " });
+    expect(onSelectionChange).toHaveBeenCalledWith(["1"]);
+  });
+
+  it("does not toggle selection with Space when not selectable", () => {
+    const onSelectionChange = vi.fn();
+    const body = renderKbd({ selectable: false, onSelectionChange });
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: " " });
+    expect(onSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it("ignores Space when selectable but no row is focused", () => {
+    const onSelectionChange = vi.fn();
+    const body = renderKbd({ selectable: true, selectedIds: [], onSelectionChange });
+    fireEvent.keyDown(body, { key: " " });
+    expect(onSelectionChange).not.toHaveBeenCalled();
+  });
+
+  it("clears focus on Escape", () => {
+    const body = renderKbd();
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    expect(focusedText()).toBe("Charlie");
+    fireEvent.keyDown(body, { key: "Escape" });
+    expect(focusedText()).toBeUndefined();
+  });
+
+  it("Escape with no focus is a no-op (does not prevent default)", () => {
+    const body = renderKbd();
+    // No row focused yet; Escape should simply do nothing.
+    fireEvent.keyDown(body, { key: "Escape" });
+    expect(focusedText()).toBeUndefined();
+  });
+
+  it("ignores an unhandled key", () => {
+    const onEditRow = vi.fn();
+    const body = renderKbd({ onEditRow });
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "x" });
+    expect(onEditRow).not.toHaveBeenCalled();
+    expect(focusedText()).toBe("Charlie");
+  });
+
+  it("does not attach the handler when keyboardNav is off", () => {
+    const onEditRow = vi.fn();
+    render(
+      <DataTable columns={COLUMNS} data={ROWS} getRowId={(r) => r.id} onEditRow={onEditRow} />,
+    );
+    const body = screen.getAllByRole("rowgroup")[1]!;
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "Enter" });
+    expect(onEditRow).not.toHaveBeenCalled();
+    expect(focusedText()).toBeUndefined();
+  });
+
+  it("does nothing on keydown when there are no rows", () => {
+    const onEditRow = vi.fn();
+    render(
+      <DataTable
+        columns={COLUMNS}
+        data={[]}
+        getRowId={(r) => r.id}
+        keyboardNav
+        onEditRow={onEditRow}
+      />,
+    );
+    const body = screen.getAllByRole("rowgroup")[1]!;
+    fireEvent.keyDown(body, { key: "ArrowDown" });
+    fireEvent.keyDown(body, { key: "Enter" });
+    fireEvent.keyDown(body, { key: "Escape" });
+    expect(onEditRow).not.toHaveBeenCalled();
+  });
+
+  it("clamps the focused index when the page set shrinks", () => {
+    function Wrap({ data }: { data: Row[] }) {
+      return <DataTable columns={COLUMNS} data={data} getRowId={(r) => r.id} keyboardNav />;
+    }
+    const { rerender } = render(<Wrap data={ROWS} />);
+    const body = screen.getAllByRole("rowgroup")[1]!;
+    fireEvent.keyDown(body, { key: "End" });
+    expect(focusedText()).toBe("Bravo"); // index 2
+    // Shrink the data so the previously-focused index is out of range; the
+    // effect clamps to the new last row.
+    rerender(<Wrap data={[ROWS[0]!]} />);
+    expect(focusedText()).toBe("Charlie");
+    // Now drain the data entirely; focus clears.
+    rerender(<Wrap data={[]} />);
+    expect(focusedText()).toBeUndefined();
+  });
+
+  it("updates the focused index when a row receives focus (onFocus)", () => {
+    const onEditRow = vi.fn();
+    renderKbd({ onEditRow });
+    const rows = screen.getAllByRole("row");
+    // Focus the third data row directly (rows[3] => data row index 2 = Bravo).
+    fireEvent.focus(rows[3]!);
+    const body = screen.getAllByRole("rowgroup")[1]!;
+    fireEvent.keyDown(body, { key: "Enter" });
+    expect(onEditRow).toHaveBeenCalledWith(ROWS[2]);
   });
 });
 
