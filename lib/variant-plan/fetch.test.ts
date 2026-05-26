@@ -104,4 +104,17 @@ describe("getVariantPlanEditorData", () => {
     expect(data.plan).toBeNull();
     expect(data.cells).toEqual([]);
   });
+
+  it("coalesces null query results to empty arrays", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: { select: { data: null, error: null } },
+      creatives: { select: { data: null, error: null } },
+      copy_variants: { select: { data: null, error: null } },
+    });
+    const data = await getVariantPlanEditorData("p1");
+    expect(data.cells).toEqual([]);
+    expect(data.creatives).toEqual([]);
+    expect(data.copyVariants).toEqual([]);
+  });
 });

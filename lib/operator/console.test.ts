@@ -29,6 +29,40 @@ describe("getOperatorRuns", () => {
     expect(await getOperatorRuns()).toEqual([]);
   });
 
+  it("returns [] when the pipelines query yields null data", async () => {
+    currentSupabase = mockClient({
+      pipelines: { select: { data: null, error: null } },
+    });
+    expect(await getOperatorRuns()).toEqual([]);
+  });
+
+  it("tolerates a null clients lookup and an unresolved client name", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          data: [
+            {
+              id: "op1",
+              status: "generation",
+              format_choice: "image",
+              client_id: "missing", // present -> triggers the lookup
+              config_draft: { operator_driven: true },
+              created_at: "2026-05-26T00:00:00Z",
+              updated_at: "2026-05-26T01:00:00Z",
+            },
+          ],
+          error: null,
+        },
+      },
+      // null clients data -> the `clients ?? []` guard; name stays unresolved.
+      clients: { select: { data: null, error: null } },
+      pipeline_events: { select: { data: [], error: null } },
+    });
+    const runs = await getOperatorRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0]!.clientName).toBeNull();
+  });
+
   it("keeps only operator-driven runs and drops manual ones", async () => {
     currentSupabase = mockClient({
       pipelines: {
