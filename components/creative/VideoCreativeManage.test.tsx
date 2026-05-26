@@ -34,6 +34,26 @@ vi.mock("@/components/creative/VideoDecisionButtons", () => ({
 vi.mock("@/components/creative/VideoIterationThread", () => ({
   VideoIterationThread: () => <div data-testid="video-thread" />,
 }));
+// ManagedGatePanels is covered by its own test; mock it here so the video
+// manage tests stay focused on the page shell.
+vi.mock("@/components/creative/ManagedGatePanels", () => ({
+  ManagedGatePanels: ({
+    creativeId,
+    pipelineId,
+    surface,
+  }: {
+    creativeId: string;
+    pipelineId: string | null;
+    surface: string;
+  }) => (
+    <div
+      data-testid="managed-gate-panels"
+      data-creative={creativeId}
+      data-pipeline={pipelineId ?? ""}
+      data-surface={surface}
+    />
+  ),
+}));
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -144,7 +164,7 @@ describe("VideoCreativeManage", () => {
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("video", "v1"));
   });
 
-  it("renders copy variants + gate panels with a pipeline review link", () => {
+  it("renders copy variants + the managed gate panels (video surface) with a pipeline link", () => {
     render(
       <VideoCreativeManage
         creative={creative()}
@@ -159,29 +179,33 @@ describe("VideoCreativeManage", () => {
       />,
     );
     expect(screen.getByText("Hook")).toBeInTheDocument();
-    expect(screen.getByText("Attempt 2")).toBeInTheDocument();
+    const panels = screen.getByTestId("managed-gate-panels");
+    expect(panels).toHaveAttribute("data-creative", "v1");
+    expect(panels).toHaveAttribute("data-pipeline", "pp1");
+    expect(panels).toHaveAttribute("data-surface", "video");
+    expect(screen.getByText("compose")).toBeInTheDocument();
     const links = screen.getAllByRole("link", { name: /pipeline/i });
     expect(links.some((a) => a.getAttribute("href") === "/pipeline/pp1")).toBe(true);
   });
 
-  it("renders placeholder + empty gates + no pipeline link when unrendered/unlinked", () => {
+  it("renders placeholder + null pipeline + no pipeline link when unrendered/unlinked", () => {
     render(
       <VideoCreativeManage
         creative={creative({ pipeline_id: null, captioned_path: null, composed_path: null })}
         {...baseProps}
         brief={null}
         signedUrl={null}
+        stageState={[]}
       />,
     );
     expect(screen.getByText(/No rendered video yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/No QA results/i)).toBeInTheDocument();
+    expect(screen.getByTestId("managed-gate-panels")).toHaveAttribute("data-pipeline", "");
+    expect(screen.getByText(/No gate state/i)).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: /review in pipeline/i })).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/mutate only through their decision\/override routes/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/flow through the decision routes only/i)).toBeInTheDocument();
   });
 
-  it("renders a bare copy variant + bare gate rows (falsy optional fields)", () => {
+  it("renders a bare copy variant + bare stage-state row (falsy optional fields)", () => {
     render(
       <VideoCreativeManage
         creative={creative({ duration_actual_s: null, asset_name: null })}

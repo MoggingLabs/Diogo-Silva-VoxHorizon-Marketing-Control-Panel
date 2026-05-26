@@ -393,6 +393,7 @@ jobs:
   #   - clients-crud.spec.ts       (clients CRUD           - #591/#592)
   #   - creatives-manage.spec.ts   (creative CRUD manage   - #593/#594)
   #   - briefs-crud.spec.ts        (briefs CRUD            - #590/#591)
+  #   - protected-actions.spec.ts  (M6 protected surfaces  - #M6)
   #
   # Local-only secrets: the printed service_role key + a dummy worker bearer.
   # NEVER a cloud project / real key. Path-filtered to web + worker + db + e2e.
@@ -431,6 +432,8 @@ jobs:
           - spec: creatives-manage.spec.ts
             allow_failure: false
           - spec: briefs-crud.spec.ts
+            allow_failure: false
+          - spec: protected-actions.spec.ts
             allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).

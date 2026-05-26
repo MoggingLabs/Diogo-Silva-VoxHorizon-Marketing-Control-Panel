@@ -39,6 +39,26 @@ vi.mock("@/components/creative/DecisionButtons", () => ({
 vi.mock("@/components/creative/IterationThread", () => ({
   IterationThread: () => <div data-testid="iteration-thread" />,
 }));
+// ManagedGatePanels (the protected-artifact managed surfaces) is covered by its
+// own test; mock it here so CreativeManage tests stay focused on the page shell.
+vi.mock("@/components/creative/ManagedGatePanels", () => ({
+  ManagedGatePanels: ({
+    creativeId,
+    pipelineId,
+    surface,
+  }: {
+    creativeId: string;
+    pipelineId: string | null;
+    surface: string;
+  }) => (
+    <div
+      data-testid="managed-gate-panels"
+      data-creative={creativeId}
+      data-pipeline={pipelineId ?? ""}
+      data-surface={surface}
+    />
+  ),
+}));
 
 vi.mock("sonner", () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
 
@@ -166,7 +186,7 @@ describe("CreativeManage", () => {
     await waitFor(() => expect(restoreMock).toHaveBeenCalledWith("image", "c1"));
   });
 
-  it("renders copy variants + gate panels read-only with a pipeline link", () => {
+  it("renders copy variants + the managed gate panels with a pipeline link", () => {
     render(
       <CreativeManage
         creative={creative()}
@@ -188,34 +208,41 @@ describe("CreativeManage", () => {
       />,
     );
     expect(screen.getByText("Hi")).toBeInTheDocument();
-    expect(screen.getByText("Attempt 1")).toBeInTheDocument();
-    expect(screen.getByText("overridden")).toBeInTheDocument();
-    // The pipeline-review link surfaces the existing override/decision actions.
+    // The protected-artifact actions are delegated to ManagedGatePanels (image
+    // surface, wired to the creative's pipeline).
+    const panels = screen.getByTestId("managed-gate-panels");
+    expect(panels).toHaveAttribute("data-creative", "c1");
+    expect(panels).toHaveAttribute("data-pipeline", "pp1");
+    expect(panels).toHaveAttribute("data-surface", "image");
+    // The stage-state gate stays read-only on this page.
+    expect(screen.getByText("qa")).toBeInTheDocument();
+    // The pipeline-review link surfaces the full gate flow.
     const links = screen.getAllByRole("link", { name: /pipeline/i });
     expect(links.some((a) => a.getAttribute("href") === "/pipeline/pp1")).toBe(true);
   });
 
-  it("shows empty gate panels + no pipeline link when pipeline_id is null", () => {
+  it("passes a null pipeline through + no pipeline link when pipeline_id is null", () => {
     render(
       <CreativeManage
         creative={creative({ pipeline_id: null })}
         {...baseProps}
         brief={null}
         signedUrl={null}
+        stageState={[]}
       />,
     );
-    // No render placeholder + empty gate copy.
+    // No render placeholder.
     expect(screen.getByText(/No render yet/i)).toBeInTheDocument();
-    expect(screen.getByText(/No QA results/i)).toBeInTheDocument();
-    expect(screen.getByText(/No compliance findings/i)).toBeInTheDocument();
-    // No "Review in pipeline" link; the read-only note has no pipeline link.
+    // The managed panels receive a null pipeline (they self-disable the actions).
+    expect(screen.getByTestId("managed-gate-panels")).toHaveAttribute("data-pipeline", "");
+    // Stage-state empty state still renders on the page.
+    expect(screen.getByText(/No gate state/i)).toBeInTheDocument();
+    // No "Review in pipeline" link; the stage-state note has no pipeline link.
     expect(screen.queryByRole("link", { name: /review in pipeline/i })).not.toBeInTheDocument();
-    expect(
-      screen.getByText(/mutate only through their decision\/override routes/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/flow through the decision routes only/i)).toBeInTheDocument();
   });
 
-  it("renders a bare copy variant + bare gate rows (falsy optional fields)", () => {
+  it("renders a bare copy variant + bare stage-state row (falsy optional fields)", () => {
     render(
       <CreativeManage
         creative={creative()}
@@ -229,7 +256,7 @@ describe("CreativeManage", () => {
     );
     // No headline/body/placement -> the dash fallbacks render; nothing throws.
     expect(screen.getByText("Copy variants (1)")).toBeInTheDocument();
-    expect(screen.getByText(/Attempt \?/)).toBeInTheDocument();
+    expect(screen.getByTestId("managed-gate-panels")).toBeInTheDocument();
   });
 
   it("surfaces an iterations load error", async () => {
