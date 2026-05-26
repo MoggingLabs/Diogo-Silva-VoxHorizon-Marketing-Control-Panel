@@ -111,6 +111,37 @@ describe("GET /api/briefs", () => {
     );
   });
 
+  it("lists archived briefs when ?archived=1 (deleted_at not null)", async () => {
+    currentSupabase = mockClient({
+      briefs: { select: { data: [{ id: "b-arch" }], error: null } },
+    });
+    const res = await GET(makeRequest("http://localhost/api/briefs?archived=1"));
+    expect(res.status).toBe(200);
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    expect(selectChain?.not).toHaveBeenCalledWith("deleted_at", "is", null);
+  });
+
+  it("includes both active + archived when ?archived=all (no deleted_at filter)", async () => {
+    currentSupabase = mockClient({
+      briefs: { select: { data: [{ id: "a" }, { id: "b" }], error: null } },
+    });
+    const res = await GET(makeRequest("http://localhost/api/briefs?archived=all"));
+    expect(res.status).toBe(200);
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    expect(selectChain?.is).not.toHaveBeenCalledWith("deleted_at", null);
+    expect(selectChain?.not).not.toHaveBeenCalled();
+  });
+
   it("returns 500 when supabase errors", async () => {
     currentSupabase = mockClient({
       briefs: { select: { data: null, error: { message: "boom" } } },

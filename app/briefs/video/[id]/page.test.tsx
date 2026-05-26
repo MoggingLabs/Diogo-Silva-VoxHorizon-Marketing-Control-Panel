@@ -17,6 +17,12 @@ vi.mock("@/components/brief/VideoBriefTimeline", () => ({
     <div data-testid="timeline" data-count={initialEvents.length} />
   ),
 }));
+// Stub the client-side header action cluster (useRouter + drawer); tested on its own.
+vi.mock("@/components/briefs/VideoBriefDetailActions", () => ({
+  VideoBriefDetailActions: ({ archived }: { archived: boolean }) => (
+    <div data-testid="video-brief-actions" data-archived={String(archived)} />
+  ),
+}));
 
 const notFoundSpy = vi.fn(() => {
   throw new Error("__NOT_FOUND__");

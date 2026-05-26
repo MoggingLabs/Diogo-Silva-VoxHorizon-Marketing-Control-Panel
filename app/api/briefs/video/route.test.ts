@@ -236,17 +236,47 @@ describe("GET /api/briefs/video", () => {
         select: { data: [{ id: "v1" }], error: null },
       },
     });
-    const res = await GET();
+    const res = await GET(req("http://localhost/api/briefs/video"));
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toHaveLength(1);
+  });
+
+  it("lists archived video briefs when ?archived=1", async () => {
+    currentSupabase = mockClient({
+      video_briefs: { select: { data: [{ id: "v-arch" }], error: null } },
+    });
+    const res = await GET(req("http://localhost/api/briefs/video?archived=1"));
+    expect(res.status).toBe(200);
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    expect(selectChain?.not).toHaveBeenCalledWith("deleted_at", "is", null);
+  });
+
+  it("includes both when ?archived=all", async () => {
+    currentSupabase = mockClient({
+      video_briefs: { select: { data: [], error: null } },
+    });
+    const res = await GET(req("http://localhost/api/briefs/video?archived=all"));
+    expect(res.status).toBe(200);
+    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = fromResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    expect(selectChain?.not).not.toHaveBeenCalled();
   });
 
   it("returns 500 on supabase error", async () => {
     currentSupabase = mockClient({
       video_briefs: { select: { data: null, error: { message: "down" } } },
     });
-    const res = await GET();
+    const res = await GET(req("http://localhost/api/briefs/video"));
     expect(res.status).toBe(500);
   });
 });

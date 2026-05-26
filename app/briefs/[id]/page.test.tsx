@@ -16,6 +16,13 @@ vi.mock("@/components/brief/BriefTimeline", () => ({
     <div data-testid="timeline" data-count={initialEvents.length} />
   ),
 }));
+// The header action cluster is a client component (useRouter + drawers); it has
+// its own tests, so stub it here to keep the server-page test focused.
+vi.mock("@/components/briefs/BriefDetailActions", () => ({
+  BriefDetailActions: ({ archived }: { archived: boolean }) => (
+    <div data-testid="brief-actions" data-archived={String(archived)} />
+  ),
+}));
 
 const notFoundSpy = vi.fn(() => {
   throw new Error("__NOT_FOUND__");
