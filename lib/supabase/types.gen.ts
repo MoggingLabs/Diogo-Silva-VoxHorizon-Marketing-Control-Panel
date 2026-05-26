@@ -2299,6 +2299,132 @@ export type Database = {
           },
         ]
       }
+      work_item: {
+        Row: {
+          attempt: number
+          brief_id: string | null
+          claim_token: string | null
+          claimed_at: string | null
+          claimed_by: string | null
+          completed_at: string | null
+          created_at: string
+          created_by: string
+          creative_id: string | null
+          error_detail: Json | null
+          error_kind: string | null
+          heartbeat_at: string | null
+          id: string
+          idempotency_key: string
+          kind: Database["public"]["Enums"]["work_item_kind"]
+          next_attempt_at: string
+          parent_work_item_id: string | null
+          payload: Json
+          pipeline_id: string | null
+          result: Json | null
+          status: Database["public"]["Enums"]["work_item_status"]
+          updated_at: string
+        }
+        Insert: {
+          attempt?: number
+          brief_id?: string | null
+          claim_token?: string | null
+          claimed_at?: string | null
+          claimed_by?: string | null
+          completed_at?: string | null
+          created_at?: string
+          created_by: string
+          creative_id?: string | null
+          error_detail?: Json | null
+          error_kind?: string | null
+          heartbeat_at?: string | null
+          id?: string
+          idempotency_key: string
+          kind: Database["public"]["Enums"]["work_item_kind"]
+          next_attempt_at?: string
+          parent_work_item_id?: string | null
+          payload?: Json
+          pipeline_id?: string | null
+          result?: Json | null
+          status?: Database["public"]["Enums"]["work_item_status"]
+          updated_at?: string
+        }
+        Update: {
+          attempt?: number
+          brief_id?: string | null
+          claim_token?: string | null
+          claimed_at?: string | null
+          claimed_by?: string | null
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string
+          creative_id?: string | null
+          error_detail?: Json | null
+          error_kind?: string | null
+          heartbeat_at?: string | null
+          id?: string
+          idempotency_key?: string
+          kind?: Database["public"]["Enums"]["work_item_kind"]
+          next_attempt_at?: string
+          parent_work_item_id?: string | null
+          payload?: Json
+          pipeline_id?: string | null
+          result?: Json | null
+          status?: Database["public"]["Enums"]["work_item_status"]
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "work_item_parent_work_item_id_fkey"
+            columns: ["parent_work_item_id"]
+            isOneToOne: false
+            referencedRelation: "work_item"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "work_item_pipeline_id_fkey"
+            columns: ["pipeline_id"]
+            isOneToOne: false
+            referencedRelation: "pipelines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      work_item_consumers: {
+        Row: {
+          created_at: string
+          hostname: string | null
+          id: string
+          image_tag: string | null
+          kind: Database["public"]["Enums"]["work_item_kind"]
+          last_seen_at: string
+          startup_check: Json | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          hostname?: string | null
+          id: string
+          image_tag?: string | null
+          kind: Database["public"]["Enums"]["work_item_kind"]
+          last_seen_at?: string
+          startup_check?: Json | null
+          status: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          hostname?: string | null
+          id?: string
+          image_tag?: string | null
+          kind?: Database["public"]["Enums"]["work_item_kind"]
+          last_seen_at?: string
+          startup_check?: Json | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       v_campaign_perf: {
@@ -2493,6 +2619,28 @@ export type Database = {
         | "recaption"
         | "comment"
         | "user_edit"
+      work_item_kind:
+        | "operator_dispatch"
+        | "outbox_meta_record_launch"
+        | "outbox_drive_finalize_verified"
+        | "outbox_ghl_send"
+        | "kie_video_render"
+        | "kie_image_render"
+        | "kie_tts"
+        | "ffmpeg_compose"
+        | "worker_ideation"
+        | "worker_generation"
+        | "worker_monitor"
+        | "broll_search"
+        | "other"
+      work_item_status:
+        | "queued"
+        | "claimed"
+        | "running"
+        | "completed"
+        | "failed"
+        | "timed_out"
+        | "cancelled"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -2792,6 +2940,30 @@ export const Constants = {
         "recaption",
         "comment",
         "user_edit",
+      ],
+      work_item_kind: [
+        "operator_dispatch",
+        "outbox_meta_record_launch",
+        "outbox_drive_finalize_verified",
+        "outbox_ghl_send",
+        "kie_video_render",
+        "kie_image_render",
+        "kie_tts",
+        "ffmpeg_compose",
+        "worker_ideation",
+        "worker_generation",
+        "worker_monitor",
+        "broll_search",
+        "other",
+      ],
+      work_item_status: [
+        "queued",
+        "claimed",
+        "running",
+        "completed",
+        "failed",
+        "timed_out",
+        "cancelled",
       ],
     },
   },
