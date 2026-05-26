@@ -28,6 +28,7 @@ from .routes import (
     ping,
     qa_compliance,
     video_callback,
+    work_queue,
 )
 
 
@@ -196,6 +197,16 @@ def create_app() -> FastAPI:
     app.include_router(
         hermes_approval_mode.router, tags=["hermes-approval-mode"]
     )
+
+    # === silent-failure redesign PR-1: unified work_item queue ===
+    # The thin REST surface over migration 0050's work_item state machine.
+    # Consumers (the operator daemon coming in PR-2, the deterministic worker
+    # producers, the dashboard's enqueueWorkItem helper) hit these to claim /
+    # heartbeat / complete / fail / cancel rows. The auto-emit trigger writes
+    # pipeline_events for them so routes can NEVER forget to log a transition.
+    # PR-1 ships the surface ADDITIVELY: legacy paths still run; PR-2 dual-
+    # writes; PR-3 cuts over.
+    app.include_router(work_queue.router, tags=["work-queue"])
 
     # === startup applied-migrations handshake (E5.5 / #523) ===
     # deploy-stack.yml applies NO migrations (schema is pushed manually via

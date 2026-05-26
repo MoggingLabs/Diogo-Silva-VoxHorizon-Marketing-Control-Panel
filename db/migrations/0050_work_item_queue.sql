@@ -453,6 +453,39 @@ create trigger work_item_emit_pipeline_event_aiu
 -- reducer as a `stable` function the planner inlines on read, and the
 -- canonical dashboard view (below) projects through it.
 
+-- ----------------------------------------------------------------------------
+-- Monotonic ordering column for pipeline_events.
+-- ----------------------------------------------------------------------------
+--
+-- ``created_at`` (``timestamptz default now()``) is tx-time: every event
+-- inserted in the SAME transaction stamps the SAME timestamp, so the reducer
+-- cannot order two same-tx events by it. ``id`` is a v4 UUID, NOT
+-- chronologically ordered, so it's not a reliable tiebreaker either.
+--
+-- ``seq`` is a ``bigserial`` -- a session-local sequence that is monotonically
+-- increasing across every INSERT regardless of transaction boundary. The
+-- reducer orders by ``seq desc`` and gets a deterministic "most recent" even
+-- when many ``stage_advanced`` events ride one transaction (the realistic
+-- pattern: a route applies several gate transitions in one handler).
+--
+-- Additive + backfilled in place: existing rows get seq values via the
+-- ``bigserial`` default-on-add semantics (Postgres assigns sequence values
+-- chronologically by physical row order, which IS in insertion order for an
+-- append-only table that has never been re-clustered).
+alter table pipeline_events
+  add column if not exists seq bigserial;
+
+create index if not exists pipeline_events_pipeline_id_seq_idx
+  on pipeline_events (pipeline_id, seq desc);
+
+-- The implicit sequence Postgres mints for ``bigserial`` needs USAGE on
+-- the new sequence so service_role's INSERT path can allocate the next
+-- seq value. Without this grant, an INSERT under ``set role service_role``
+-- raises ``permission denied for sequence pipeline_events_seq_seq``.
+-- service_role is the only role that INSERTs pipeline_events (Next routes +
+-- the auto-emit trigger), so this is the only grant the column needs.
+grant usage, select on sequence pipeline_events_seq_seq to service_role;
+
 create or replace function compute_pipeline_status(p_pipeline_id uuid)
   returns pipeline_status_enum
   language sql stable
@@ -468,7 +501,7 @@ as $$
       where pipeline_id = p_pipeline_id
         and kind = 'stage_advanced'
         and stage is not null
-      order by created_at desc, id desc
+      order by seq desc
       limit 1),
     'configuration'::pipeline_status_enum
   );
@@ -502,11 +535,13 @@ select
       and wi.status in ('queued','claimed','running')
     order by wi.created_at desc
     limit 1) as active_work_item,
-  -- The last 10 events (timeline preview).
-  (select coalesce(jsonb_agg(to_jsonb(e.*) order by e.created_at desc), '[]'::jsonb)
+  -- The last 10 events (timeline preview). Orders by the monotonic ``seq``
+  -- column added above so events emitted in the same transaction tick still
+  -- sort deterministically (created_at alone is tx-time -> not unique).
+  (select coalesce(jsonb_agg(to_jsonb(e.*) order by e.seq desc), '[]'::jsonb)
      from (select * from pipeline_events
             where pipeline_id = p.id
-            order by created_at desc
+            order by seq desc
             limit 10) e) as recent_events,
   -- Daemon health for the operator_dispatch kind. The DaemonHealthBadge
   -- reads this; the kickoff form decides "should I let the user kick off?".
@@ -542,6 +577,12 @@ begin
            completed_at = now(),
            claim_token  = null,
            claimed_by   = null,
+           -- ``claimed_at`` MUST be cleared alongside the other claim columns:
+           -- ``work_item_claim_consistent`` requires every claim column to be
+           -- null when the row is in a queued/terminal status. Leaving
+           -- claimed_at set on a cancelled row would have violated the CHECK
+           -- (caught by the cancel-propagate test).
+           claimed_at   = null,
            error_kind   = 'pipeline_cancelled'
      where pipeline_id = new.pipeline_id
        and status in ('queued','claimed','running');

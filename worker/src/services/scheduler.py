@@ -41,8 +41,15 @@ from typing import Any, Awaitable, Callable, Mapping
 import structlog
 
 from ..config import Settings, get_settings
-from . import observability
+from . import observability, work_queue
 from .operator_dispatch_watchdog import StuckDispatch, find_stuck_dispatches
+from .work_item_watchdog import (
+    StaleConsumer,
+    StuckWorkItem,
+    compute_backoff_seconds,
+    find_stale_consumers,
+    find_stuck_work_items,
+)
 
 
 log = structlog.get_logger(__name__)
@@ -843,6 +850,237 @@ async def run_outbox_relay_once(settings: Settings) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Job: unified work_item watchdog (silent-failure PR-1)
+# ---------------------------------------------------------------------------
+#
+# Reads claimed/running work_item rows whose heartbeat is stale and the
+# consumer presence rows; rotates the claim_token (mark timed_out + parent-
+# chained requeue with exponential backoff) and flips stale consumers to
+# ``degraded`` / ``down``. Runs ALONGSIDE the legacy watchdogs in PR-1 -- no
+# behavior change to in-flight pipelines.
+
+
+def _open_held_work_items(sb: Any) -> list[dict[str, Any]]:
+    """Read the held (``claimed`` / ``running``) ``work_item`` rows."""
+    resp = (
+        sb.table("work_item")
+        .select(
+            "id, kind, pipeline_id, creative_id, brief_id, status, attempt, "
+            "claim_token, claimed_at, heartbeat_at, payload, idempotency_key, "
+            "parent_work_item_id, created_by"
+        )
+        .in_("status", ["claimed", "running"])
+        .execute()
+    )
+    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
+
+
+def _all_consumer_rows(sb: Any) -> list[dict[str, Any]]:
+    """Read every ``work_item_consumers`` row (small table; full scan is fine)."""
+    resp = sb.table("work_item_consumers").select(
+        "id, kind, status, last_seen_at"
+    ).execute()
+    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
+
+
+def _rotate_stuck_work_item(
+    sb: Any,
+    item: StuckWorkItem,
+    *,
+    max_attempts: int,
+    base_seconds: int,
+    cap_seconds: int,
+) -> str:
+    """Rotate one stuck work_item; returns ``'requeued'`` or ``'dead_lettered'``.
+
+    Two paths:
+      * attempt < max_attempts -- mark the row ``timed_out`` (clears the
+        claim) with ``error_kind='heartbeat_stale'``, then enqueue a NEW row
+        with ``parent_work_item_id`` set to the timed-out row, ``attempt``
+        carried forward, and ``next_attempt_at`` pushed out via exponential
+        backoff. The retry chain is the audit trail of "this work tried N
+        times and these are the diagnostics for each attempt".
+      * attempt >= max_attempts -- mark the row ``failed`` with
+        ``error_kind='max_attempts_exceeded'`` and leave it for the dead-letter
+        view. No new row is enqueued.
+
+    The token-scoped UPDATE returns 0 rows when the consumer raced us; that's
+    fine -- it means the consumer heartbeated/completed between our SELECT and
+    UPDATE and the row is no longer stuck.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    if item.attempt < max_attempts:
+        terminal_status = "timed_out"
+        terminal_error_kind = "heartbeat_stale"
+    else:
+        terminal_status = "failed"
+        terminal_error_kind = "max_attempts_exceeded"
+
+    update_query = (
+        sb.table("work_item")
+        .update(
+            {
+                "status": terminal_status,
+                "completed_at": now,
+                "error_kind": terminal_error_kind,
+                "error_detail": {
+                    "idle_seconds": item.idle_seconds,
+                    "rotated_at": now,
+                    "attempt_at_rotation": item.attempt,
+                },
+                "claim_token": None,
+                "claimed_by": None,
+                "claimed_at": None,
+            }
+        )
+        .eq("id", item.work_item_id)
+    )
+    if item.claim_token is not None:
+        update_query = update_query.eq("claim_token", item.claim_token)
+    update_query.execute()
+
+    if terminal_status == "failed":
+        log.warning(
+            "work_item_watchdog_dead_lettered",
+            work_item_id=item.work_item_id,
+            kind=item.kind,
+            attempt=item.attempt,
+        )
+        return "dead_lettered"
+
+    backoff = compute_backoff_seconds(
+        attempt=item.attempt,
+        base_seconds=base_seconds,
+        cap_seconds=cap_seconds,
+    )
+    next_attempt_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=backoff)
+    ).isoformat()
+    # The retry row is a fresh row with a fresh idempotency_key: a retry chain
+    # under ONE idempotency_key would unique-conflict on the second hop. The
+    # parent_work_item_id pointer is the audit chain.
+    retry_idempotency_key = (
+        f"{item.work_item_id}:retry:{item.attempt + 1}"
+    )
+    work_queue.enqueue_work_item(
+        sb,
+        kind=item.kind,
+        pipeline_id=item.pipeline_id,
+        creative_id=item.creative_id,
+        brief_id=item.brief_id,
+        payload=item.payload,
+        idempotency_key=retry_idempotency_key,
+        created_by="work_item_watchdog",
+        parent_work_item_id=item.work_item_id,
+        next_attempt_at=next_attempt_at,
+    )
+    log.info(
+        "work_item_watchdog_requeued",
+        work_item_id=item.work_item_id,
+        kind=item.kind,
+        next_attempt_in_s=backoff,
+        attempt=item.attempt + 1,
+    )
+    return "requeued"
+
+
+def _flip_stale_consumer(sb: Any, consumer: StaleConsumer) -> None:
+    """Write a consumer status transition (degraded / down)."""
+    sb.table("work_item_consumers").update(
+        {"status": consumer.target_status}
+    ).eq("id", consumer.consumer_id).execute()
+    log.warning(
+        "work_item_consumer_flipped",
+        consumer_id=consumer.consumer_id,
+        from_=consumer.current_status,
+        to=consumer.target_status,
+        idle_seconds=consumer.idle_seconds,
+    )
+
+
+async def run_work_item_watchdog_once(
+    sb: Any | None = None,
+    *,
+    settings: Settings | None = None,
+    now: datetime | None = None,
+) -> dict[str, int]:
+    """One pass of the unified work_item watchdog. Returns counts per action.
+
+    Returns ``{rotated, requeued, dead_lettered, consumers_flipped}``. The
+    scheduler-side wrapper supplies ``settings`` via the live module reload;
+    tests inject a clock + a FakeSupabase directly.
+
+    A per-row failure is logged + skipped so one bad row never aborts a
+    sweep, matching the legacy watchdogs' single-bad-row tolerance.
+    """
+    settings = settings or get_settings()
+    if sb is None:
+        from ..supabase_client import get_supabase_admin  # lazy; mirror peers
+        sb = get_supabase_admin()
+    held_rows = _open_held_work_items(sb)
+    threshold = timedelta(seconds=settings.work_item_heartbeat_threshold_s)
+    stuck = find_stuck_work_items(held_rows, threshold=threshold, now=now)
+    consumer_rows = _all_consumer_rows(sb)
+    consumer_interval = timedelta(seconds=settings.work_item_consumer_heartbeat_s)
+    stale_consumers = find_stale_consumers(
+        consumer_rows, heartbeat_interval=consumer_interval, now=now
+    )
+
+    counts = {
+        "rotated": 0,
+        "requeued": 0,
+        "dead_lettered": 0,
+        "consumers_flipped": 0,
+    }
+
+    for item in stuck[: settings.work_item_watchdog_max_per_pass]:
+        try:
+            outcome = _rotate_stuck_work_item(
+                sb,
+                item,
+                max_attempts=settings.work_item_max_attempts,
+                base_seconds=settings.work_item_backoff_base_s,
+                cap_seconds=settings.work_item_backoff_cap_s,
+            )
+        except Exception as exc:  # noqa: BLE001 -- one bad row never sinks the pass
+            log.warning(
+                "work_item_watchdog_rotation_failed",
+                work_item_id=item.work_item_id,
+                kind=item.kind,
+                error=str(exc),
+            )
+            continue
+        counts["rotated"] += 1
+        if outcome == "requeued":
+            counts["requeued"] += 1
+        elif outcome == "dead_lettered":
+            counts["dead_lettered"] += 1
+
+    for consumer in stale_consumers:
+        try:
+            _flip_stale_consumer(sb, consumer)
+            counts["consumers_flipped"] += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "work_item_consumer_flip_failed",
+                consumer_id=consumer.consumer_id,
+                error=str(exc),
+            )
+
+    log.info(
+        "work_item_watchdog_pass_done",
+        held_rows=len(held_rows),
+        stuck=len(stuck),
+        rotated=counts["rotated"],
+        requeued=counts["requeued"],
+        dead_lettered=counts["dead_lettered"],
+        consumers=len(consumer_rows),
+        consumers_flipped=counts["consumers_flipped"],
+    )
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # Loop supervisor + lifecycle
 # ---------------------------------------------------------------------------
 
@@ -979,6 +1217,18 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:outbox_relay",
         ),
+        # Silent-failure PR-1: runs alongside the legacy watchdogs above. No
+        # behavior change until consumers/routes enqueue real work_item rows
+        # in PR-2; on an empty queue this is a logged no-op.
+        loop.create_task(
+            _interval_loop(
+                "work_item_watchdog",
+                float(settings.work_item_watchdog_interval_s),
+                lambda: run_work_item_watchdog_once(settings=settings),
+                initial_delay_s=25.0,
+            ),
+            name="scheduler:work_item_watchdog",
+        ),
     ]
     log.info("scheduler_started", jobs=len(tasks))
     return Scheduler(tasks)
@@ -997,5 +1247,6 @@ __all__ = [
     "run_observability_once",
     "run_outbox_relay_once",
     "run_reconciliation_once",
+    "run_work_item_watchdog_once",
     "start_scheduler",
 ]

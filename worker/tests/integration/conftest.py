@@ -31,29 +31,15 @@ scaffolding the DDL leans on.
 
 from __future__ import annotations
 
-import os
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-# tests/integration/conftest.py -> worker/ -> repo root -> db/migrations
-_REPO_ROOT = Path(__file__).resolve().parents[3]
-_MIGRATIONS_DIR = _REPO_ROOT / "db" / "migrations"
-
-
-# ---------------------------------------------------------------------------
-# Supabase scaffolding a vanilla Postgres lacks (provisioned before migrations).
-# ---------------------------------------------------------------------------
-# The prelude lives in db/ci-bootstrap.sql (the single source) so the CI
-# migration-apply job and this harness cannot drift. It provisions only the
-# Supabase roles / publication / storage objects the migrations reference; no
-# application schema. Read once at import; the file is committed alongside.
-_BOOTSTRAP_SQL = (_REPO_ROOT / "db" / "ci-bootstrap.sql").read_text(encoding="utf-8")
+# The fixtures (``pg_dsn`` / ``migrated_db`` / ``db_conn`` /
+# ``image_creative`` / ``video_creative``) now live in
+# ``worker/tests/db_fixtures.py`` and are registered as a pytest plugin via
+# ``pyproject.toml``. Existing tests resolve them by name through pytest's
+# fixture lookup -- no source change here.
 
 
 # ===========================================================================
@@ -106,229 +92,16 @@ def pytest_configure(config: pytest.Config) -> None:
 
 
 # ===========================================================================
-# Database lifecycle (session-scoped: spin once, migrate once)
+# Database lifecycle + seed fixtures
 # ===========================================================================
-
-
-@pytest.fixture(scope="session")
-def pg_dsn() -> Iterator[str]:
-    """Resolve a Postgres DSN, or skip the tier cleanly.
-
-    DATABASE_URL wins (the contract). Otherwise try testcontainers + Docker.
-    Otherwise skip -- the unit suite and the coverage gate never see this tier.
-    """
-    env_url = os.environ.get("DATABASE_URL")
-    if env_url:
-        yield env_url
-        return
-
-    try:
-        from testcontainers.postgres import PostgresContainer
-    except ImportError:
-        pytest.skip(
-            "integration tier needs DATABASE_URL, or the `testcontainers` "
-            "package + Docker to spin one (neither is available)."
-        )
-        return
-
-    try:
-        container = PostgresContainer("postgres:16-alpine", driver="psycopg")
-        container.start()
-    except Exception as exc:  # noqa: BLE001 - Docker absent/unreachable -> skip
-        pytest.skip(
-            f"integration tier could not start a Postgres container "
-            f"(set DATABASE_URL to run against an existing DB): {exc}"
-        )
-        return
-
-    try:
-        # testcontainers hands back a SQLAlchemy-style URL; normalise it to a
-        # plain libpq DSN psycopg.connect understands.
-        url = container.get_connection_url()
-        dsn = url.replace("postgresql+psycopg://", "postgresql://").replace(
-            "postgresql+psycopg2://", "postgresql://"
-        )
-        yield dsn
-    finally:
-        container.stop()
-
-
-@pytest.fixture(scope="session")
-def migrated_db(pg_dsn: str):
-    """Apply bootstrap + every db/migrations/*.sql (lexical order) once.
-
-    Yields the live connection (autocommit) with the full rebuild schema in
-    place. Skips with a clear message if psycopg is missing or the DB is
-    unreachable, so a misconfigured DATABASE_URL degrades to a skip rather than
-    a hard error that would mask the unit suite.
-    """
-    try:
-        import psycopg
-    except ImportError:  # pragma: no cover - psycopg is a dev dep
-        pytest.skip("integration tier needs the `psycopg` package.")
-
-    try:
-        conn = psycopg.connect(pg_dsn, autocommit=True)
-    except Exception as exc:  # noqa: BLE001 - unreachable DB -> skip, don't error
-        pytest.skip(f"integration tier could not connect to Postgres: {exc}")
-
-    migrations = sorted(_MIGRATIONS_DIR.glob("*.sql"))
-    if not migrations:
-        conn.close()
-        pytest.skip(f"no migrations found under {_MIGRATIONS_DIR}")
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute(_BOOTSTRAP_SQL)
-            for path in migrations:
-                sql = path.read_text(encoding="utf-8")
-                try:
-                    cur.execute(sql)
-                except Exception as exc:  # noqa: BLE001 - name the failing file
-                    raise RuntimeError(
-                        f"failed applying migration {path.name}: {exc}"
-                    ) from exc
-        yield conn
-    finally:
-        conn.close()
-
-
-@pytest.fixture
-def db_conn(pg_dsn: str, migrated_db) -> Iterator["object"]:
-    """A per-test connection wrapped in a rolled-back transaction.
-
-    Depends on ``migrated_db`` so the schema is applied (once, session-scoped)
-    before any test connects, then opens its OWN connection on the same DSN.
-    Each test runs in one transaction that is rolled back at teardown, so seeded
-    rows never leak between tests and a FK violation aborts only its own
-    transaction. A separate connection per test keeps the FK-violation tests
-    isolated from the long-lived migration connection.
-    """
-    import psycopg
-
-    conn = psycopg.connect(pg_dsn, autocommit=False)
-    try:
-        yield conn
-    finally:
-        conn.rollback()
-        conn.close()
-
-
-# ===========================================================================
-# Both-vertical seed fixtures
-# ===========================================================================
-
-
-def _seed_client(cur, *, client_id: str | None = None) -> str:
-    """Insert a roofing client and return its id."""
-    cur.execute(
-        """
-        insert into clients (id, slug, name, service_type)
-        values (coalesce(%s::uuid, gen_random_uuid()),
-                'acme-roofing-' || substr(md5(random()::text), 1, 8),
-                'Acme Roofing', 'roofing')
-        returning id
-        """,
-        (client_id,),
-    )
-    return str(cur.fetchone()[0])
-
-
-@pytest.fixture
-def image_creative(db_conn) -> dict[str, str]:
-    """Seed an IMAGE creative via ``briefs`` + ``creatives``.
-
-    Returns ``{client_id, brief_id, pipeline_id, creative_id}``. The creative_id
-    is a real ``creatives(id)`` -- so it is the one a gate row legitimately
-    references today.
-    """
-    with db_conn.cursor() as cur:
-        client_id = _seed_client(cur)
-        # brief_id_human is UNIQUE; make it per-invocation so the fixture is safe
-        # to use in several tests regardless of commit/rollback behaviour.
-        cur.execute(
-            """
-            insert into briefs (brief_id_human, client_id, status, payload)
-            values ('acme-' || substr(md5(random()::text), 1, 12), %s, 'approved',
-                    '{"service": "roofing", "budget": 1000}'::jsonb)
-            returning id
-            """,
-            (client_id,),
-        )
-        brief_id = str(cur.fetchone()[0])
-        cur.execute(
-            """
-            insert into pipelines (format_choice, client_id, image_brief_id)
-            values ('image', %s, %s)
-            returning id
-            """,
-            (client_id, brief_id),
-        )
-        pipeline_id = str(cur.fetchone()[0])
-        cur.execute(
-            """
-            insert into creatives (brief_id, type, concept, ratio, version, status)
-            values (%s, 'image', 'fresh-roof', '1x1', 'v1.0', 'draft')
-            returning id
-            """,
-            (brief_id,),
-        )
-        creative_id = str(cur.fetchone()[0])
-    return {
-        "client_id": client_id,
-        "brief_id": brief_id,
-        "pipeline_id": pipeline_id,
-        "creative_id": creative_id,
-    }
-
-
-@pytest.fixture
-def video_creative(db_conn) -> dict[str, str]:
-    """Seed a VIDEO creative via ``video_briefs`` + ``video_creatives``.
-
-    Returns ``{client_id, brief_id, pipeline_id, creative_id}``. The creative_id
-    is a real ``video_creatives(id)`` -- crucially NOT a ``creatives(id)``. Today
-    the shared gate / evidence tables FK ``creatives(id)`` only, so this id has
-    no valid home in ``creative_stage_state`` / ``compliance_finding`` /
-    ``qa_result`` -- which is the foundation bug M1 (#448) fixes.
-    """
-    with db_conn.cursor() as cur:
-        client_id = _seed_client(cur)
-        # 0004 CHECK video_briefs_required_when_posted: a non-draft video brief
-        # must carry target_duration_s + voice_id. The integration tier (vs. the
-        # FK-blind fake double) actually enforces this, so the seed sets them.
-        cur.execute(
-            """
-            insert into video_briefs
-              (brief_id_human, client_id, status, target_duration_s, voice_id)
-            values ('vid-acme-' || substr(md5(random()::text), 1, 12), %s,
-                    'approved', 30, 'voice-1')
-            returning id
-            """,
-            (client_id,),
-        )
-        brief_id = str(cur.fetchone()[0])
-        cur.execute(
-            """
-            insert into pipelines (format_choice, client_id, video_brief_id)
-            values ('video', %s, %s)
-            returning id
-            """,
-            (client_id, brief_id),
-        )
-        pipeline_id = str(cur.fetchone()[0])
-        cur.execute(
-            """
-            insert into video_creatives (brief_id, version, status)
-            values (%s, 1, 'draft')
-            returning id
-            """,
-            (brief_id,),
-        )
-        creative_id = str(cur.fetchone()[0])
-    return {
-        "client_id": client_id,
-        "brief_id": brief_id,
-        "pipeline_id": pipeline_id,
-        "creative_id": creative_id,
-    }
+#
+# Silent-failure PR-1: the Postgres lifecycle fixtures (``pg_dsn`` /
+# ``migrated_db`` / ``db_conn``) + the both-vertical seed fixtures
+# (``image_creative`` / ``video_creative``) were promoted to
+# ``tests/db_fixtures.py`` so the work_item queue tests under ``tests/queue/``
+# (also ``-m integration``-marked) can SHARE them in the same pytest session
+# without registering the integration conftest twice (which fails with
+# "Plugin already registered under a different name"). The plugin is wired
+# via ``pyproject.toml::tool.pytest.ini_options::pytest_plugins``, so this
+# directory's tests still see every fixture by name -- the rename is
+# transparent to the existing tests.

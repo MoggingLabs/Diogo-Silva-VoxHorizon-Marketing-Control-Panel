@@ -21,6 +21,14 @@ supabase-py fluent API the worker uses: ``table(name).select(...).eq(...)
 ``update``, ``rpc(fn, params).execute()``, and ``storage.from_(bucket).upload``.
 It is the generalisation of the per-file ``_ToolsSupabase`` doubles that
 already live in ``test_pipeline_tools_route.py`` / ``test_pipeline_route.py``.
+
+Plugin registration (silent-failure PR-1): the work_item queue tests in
+``tests/queue/`` share the Postgres-backed fixtures with the integration
+tier in ``tests/integration/``. ``pytest_plugins`` MUST live at the top
+level (recent pytest forbids non-top-level declarations), so it sits here
+-- pytest loads the integration conftest as a plugin ONCE and the
+session-scoped ``migrated_db`` fixture is shared (preventing the double-
+migrate that would fail on ``type already exists``).
 """
 
 from __future__ import annotations
@@ -29,6 +37,14 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+# Register the shared Postgres-backed fixtures (``pg_dsn`` / ``migrated_db`` /
+# ``db_conn`` / ``image_creative`` / ``video_creative``) as a pytest plugin so
+# the SAME session-scoped instances are shared between the integration tier
+# (``tests/integration/``) and the work_item queue tests (``tests/queue/``).
+# Defining ``pytest_plugins`` MUST happen at the top-level conftest -- recent
+# pytest forbids it in nested conftests.
+pytest_plugins = ["tests.db_fixtures"]
 
 import httpx
 import pytest
@@ -86,6 +102,16 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
 
+    def in_(self, col: str, vals: list[Any]) -> "_FakeQuery":
+        """``column in (...)`` filter -- mirrors the supabase-py ``in_``.
+
+        Encoded as a special tuple so ``_matches`` checks set membership rather
+        than equality. Used by the silent-failure work_queue facade for
+        token-scoped UPDATEs that constrain ``status in ('claimed','running')``.
+        """
+        self._filters.append((col, ("__in__", tuple(vals))))
+        return self
+
     def order(self, col: str, *, desc: bool = False) -> "_FakeQuery":
         self._order = (col, desc)
         return self
@@ -120,7 +146,17 @@ class _FakeQuery:
 
     # -- internals ---------------------------------------------------------
     def _matches(self, row: dict[str, Any]) -> bool:
-        return all(row.get(c) == v for c, v in self._filters)
+        for col, val in self._filters:
+            if (
+                isinstance(val, tuple)
+                and len(val) == 2
+                and val[0] == "__in__"
+            ):
+                if row.get(col) not in val[1]:
+                    return False
+            elif row.get(col) != val:
+                return False
+        return True
 
     def _do_insert(self) -> SimpleNamespace:
         rows = self._insert_data if isinstance(self._insert_data, list) else [self._insert_data]

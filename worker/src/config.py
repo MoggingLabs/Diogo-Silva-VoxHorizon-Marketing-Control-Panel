@@ -147,6 +147,21 @@ class Settings(BaseSettings):
     scheduler_outbox_backoff_base_s: float = 30.0
     scheduler_outbox_backoff_cap_s: float = 3_600.0
 
+    # === Silent-failure redesign PR-1: unified work_item watchdog ===
+    # The new observer runs alongside the legacy per-domain watchdogs in PR-1
+    # (no behavior change yet). It reads claimed/running work_item rows whose
+    # heartbeat is stale, rotates the claim_token (timed_out + parent-chained
+    # requeue with exponential backoff), and flags stale consumers as
+    # ``degraded`` / ``down`` so the DaemonHealthBadge surfaces them. PR-3
+    # retires the legacy watchdogs once cutover is complete.
+    work_item_max_attempts: int = 3
+    work_item_heartbeat_threshold_s: int = 120
+    work_item_consumer_heartbeat_s: int = 30
+    work_item_watchdog_interval_s: int = 30
+    work_item_backoff_base_s: int = 60
+    work_item_backoff_cap_s: int = 3_600
+    work_item_watchdog_max_per_pass: int = 25
+
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via
     # chat.postMessage. The bot token is sourced at deploy time from
