@@ -20,6 +20,7 @@ import { MIN_APPROVED_COPY } from "@/lib/review/grid";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { VideoBriefInput, type VideoBriefInsertRow } from "@/lib/video-briefs";
+import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -578,7 +579,17 @@ async function advanceFromConfiguration(
     if (opEvErr) {
       console.warn(`[pipelines.advance] event insert failed: ${opEvErr.message}`);
     }
-    void retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+    // Synchronously enqueue the operator dispatch work_item BEFORE returning.
+    // Enqueue failure -> 5xx so the caller sees the silent-failure error and
+    // can retry (rather than the legacy fire-and-forget swallowing it).
+    try {
+      await retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+    } catch (e) {
+      return NextResponse.json(
+        { error: `work_item enqueue failed: ${String(e)}` },
+        { status: 500 },
+      );
+    }
     return NextResponse.json({
       pipeline: opUpdated,
       image_brief_id: pipeline.image_brief_id,
@@ -792,18 +803,45 @@ async function advanceFromConfiguration(
     console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
   }
 
-  // 7. Hand ideation off to the right executor — exactly one of them, never
+  // 7. Hand ideation off to the right executor -- exactly one of them, never
   //    both (running both would render every concept twice and double the Kie
-  //    spend). Operator-driven pipelines: the Hermes operator authors + renders
-  //    the concept previews (its render call is the spend gate). Regular
-  //    pipelines: the deterministic /work/pipeline/ideation producer (Ekko's
-  //    image-ad-prompting skill is an interactive prompt-writer, not an
-  //    automated executor). Both paths emit the same task_* / cost_recorded
-  //    pipeline_events the StageGeneration UI + auto-advance trigger read, and
-  //    both are fire-and-forget so a worker outage never blocks the advance.
+  //    spend). Operator-driven pipelines never reach this point -- step 1b's
+  //    early return handles them -- but the symmetric branch stays so the
+  //    function reads top-to-bottom against the gate the kickoff route writes.
+  //    Regular pipelines: the deterministic /work/pipeline/ideation producer
+  //    (Ekko's image-ad-prompting skill is an interactive prompt-writer, not
+  //    an automated executor). Both paths emit the same task_* / cost_recorded
+  //    pipeline_events the StageGeneration UI + auto-advance trigger read.
+  //
+  //    The work_item enqueue is synchronous and must succeed before HTTP
+  //    returns (silent-failure foundational redesign): a route can no longer
+  //    claim "operator dispatched" / "worker ideation kicked" without a
+  //    backing row. Enqueue failure -> 5xx. The legacy fire-and-forget below
+  //    each enqueue stays so the worker still kicks; PR-3 removes it.
   if (isOperatorDriven(pipeline.config_draft)) {
-    void retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+    try {
+      await retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
+    } catch (e) {
+      return NextResponse.json(
+        { error: `work_item enqueue failed: ${String(e)}` },
+        { status: 500 },
+      );
+    }
   } else {
+    try {
+      await enqueueWorkItem({
+        kind: "worker_ideation",
+        pipelineId: pipeline.id,
+        payload: { stage: "ideation" },
+        idempotencyKey: `wi:${pipeline.id}:ideation`,
+        createdBy: "api/pipelines/advance/fireWorkerIdeation",
+      });
+    } catch (e) {
+      return NextResponse.json(
+        { error: `work_item enqueue failed: ${String(e)}` },
+        { status: 500 },
+      );
+    }
     void fireWorkerIdeation(pipeline.id).catch((e) => {
       console.warn(
         `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
@@ -922,17 +960,17 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
 
 /**
  * Re-task the operator for the next stage and record the handoff on the
- * timeline. Both halves are best-effort:
+ * timeline. The work_item enqueue is synchronous and must succeed before the
+ * function returns (silent-failure foundational redesign): a route can no
+ * longer claim "operator dispatched" without a backing row + the auto-emit
+ * trigger's `pipeline_events` row. Enqueue failure throws; the caller turns it
+ * into a 5xx. PR-3 removes the legacy `operator_dispatched` event insert and
+ * the fire-and-forget `dispatchOperator` once the daemon owns the queue.
  *
- *   - the `operator_dispatched` event makes the narration view show the
- *     handoff immediately (before the operator's own events stream in);
- *   - the worker dispatch nudges the operator container.
- *
- * Idempotency lives on the operator side — it reads the live pipeline state
- * and only does the work that's outstanding for the stage — so a duplicate
- * dispatch (e.g. a double-clicked Continue) is safe. We swallow every failure
- * here: a stage transition has already committed and must not be undone by a
- * worker outage.
+ * Idempotency lives on the operator side -- it reads the live pipeline state
+ * and only does the work that's outstanding for the stage -- so a duplicate
+ * dispatch (e.g. a double-clicked Continue) is safe. The legacy event insert
+ * and the worker dispatch stay best-effort below the enqueue.
  */
 async function retaskOperator(
   supabase: SupabaseClient,
@@ -941,6 +979,18 @@ async function retaskOperator(
   reason: string,
 ): Promise<void> {
   const instruction = operatorInstruction(stage, pipelineId);
+
+  // Synchronously enqueue the work_item BEFORE the legacy fire-and-forget so
+  // the queue row exists by the time this function returns. Enqueue throws ->
+  // the caller returns 5xx (NEVER swallow the enqueue error).
+  await enqueueWorkItem({
+    kind: "operator_dispatch",
+    pipelineId,
+    payload: { instruction, stage },
+    idempotencyKey: `op-disp:${pipelineId}:${stage}:${reason}`,
+    createdBy: "api/pipelines/advance/retaskOperator",
+  });
+
   const event: PipelineEventInsert = {
     pipeline_id: pipelineId,
     kind: "operator_dispatched",

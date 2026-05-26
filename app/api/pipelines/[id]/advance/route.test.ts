@@ -31,6 +31,13 @@ vi.mock("@/lib/operator/dispatch", async () => {
   return { ...actual, dispatchOperator };
 });
 
+const { enqueueWorkItem } = vi.hoisted(() => ({
+  enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(
+    async () => ({ id: "wi-1", duplicate: false }),
+  ),
+}));
+vi.mock("@/lib/work-queue/enqueue", () => ({ enqueueWorkItem }));
+
 import { POST } from "./route";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -73,6 +80,8 @@ beforeEach(() => {
   delete process.env.WORKER_URL;
   delete process.env.WORKER_SHARED_SECRET;
   dispatchOperator.mockClear();
+  enqueueWorkItem.mockReset();
+  enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -1646,6 +1655,177 @@ describe("POST /api/pipelines/:id/advance", () => {
         { params },
       );
       expect(res.status).toBe(500);
+    });
+  });
+
+  // -- silent-failure foundational redesign PR-2b: dual-write to work_item --
+
+  describe("dual-write enqueue (operator-driven configuration -> ideation)", () => {
+    function operatorDrivenPipeline() {
+      return {
+        id,
+        status: "configuration",
+        format_choice: "image",
+        client_id: clientId,
+        image_brief_id: "op-brief-1",
+        config_draft: {
+          operator_driven: true,
+          image_payload: validImagePayload,
+        },
+        advanced_at: {},
+      };
+    }
+
+    it("enqueues an operator_dispatch work_item with the right idempotency_key (200)", async () => {
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: operatorDrivenPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("operator_dispatch");
+      expect(opts.pipelineId).toBe(id);
+      expect(opts.idempotencyKey).toBe(`op-disp:${id}:ideation:config_approved`);
+      expect(opts.createdBy).toBe("api/pipelines/advance/retaskOperator");
+      const payload = opts.payload as Record<string, unknown>;
+      expect(payload.stage).toBe("ideation");
+    });
+
+    it("returns 500 when the work_item enqueue throws (operator-driven path)", async () => {
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: operatorDrivenPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(String(body.error)).toContain("work_item enqueue failed");
+      // Legacy dispatch must NOT fire when the enqueue failed.
+      await new Promise((r) => setTimeout(r, 5));
+      expect(dispatchOperator).not.toHaveBeenCalled();
+    });
+
+    it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {
+      enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: operatorDrivenPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("dual-write enqueue (regular configuration -> ideation worker_ideation)", () => {
+    function regularPipeline() {
+      return {
+        id,
+        status: "configuration",
+        format_choice: "image",
+        client_id: clientId,
+        config_draft: { image_payload: validImagePayload },
+        advanced_at: {},
+      };
+    }
+
+    it("enqueues a worker_ideation work_item with the right idempotency_key (200)", async () => {
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: regularPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          clients: { select: { single: { data: { slug: "acme" }, error: null } } },
+          briefs: { insert: { single: { data: { id: "ib1" }, error: null } } },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME-2026-0001", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("worker_ideation");
+      expect(opts.pipelineId).toBe(id);
+      expect(opts.idempotencyKey).toBe(`wi:${id}:ideation`);
+      expect(opts.createdBy).toBe("api/pipelines/advance/fireWorkerIdeation");
+    });
+
+    it("returns 500 when the worker_ideation enqueue throws", async () => {
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: regularPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          clients: { select: { single: { data: { slug: "acme" }, error: null } } },
+          briefs: { insert: { single: { data: { id: "ib1" }, error: null } } },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(String(body.error)).toContain("work_item enqueue failed");
+    });
+
+    it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {
+      enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
+      currentSupabase = withRpc(
+        mockClient({
+          pipelines: {
+            select: { single: { data: regularPipeline(), error: null } },
+            update: { single: { data: { id, status: "ideation" }, error: null } },
+          },
+          clients: { select: { single: { data: { slug: "acme" }, error: null } } },
+          briefs: { insert: { single: { data: { id: "ib1" }, error: null } } },
+          pipeline_events: { insert: { data: null, error: null } },
+        }),
+        () => ({ data: "ACME", error: null }),
+      );
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
     });
   });
 });
