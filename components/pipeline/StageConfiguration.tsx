@@ -671,11 +671,11 @@ function ManualConfiguration({ pipeline, clients: initialClients }: StageConfigu
                 onClick={() => setModalOpen(true)}
                 className="gap-2"
               >
-                <Sparkles className="h-4 w-4 text-violet-600" aria-hidden="true" />
+                <Sparkles className="h-4 w-4 text-accent" aria-hidden="true" />
                 Let Ekko draft this
               </Button>
               {draftBanner ? (
-                <p className="rounded-md border border-violet-200 bg-violet-50 px-3 py-1.5 text-xs text-violet-900">
+                <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-1.5 text-xs text-accent">
                   {draftBanner}
                 </p>
               ) : null}

@@ -29,9 +29,9 @@ export type OperatorNarrationProps = {
 };
 
 const TONE_DOT: Record<NarrationTone, string> = {
-  operator: "text-sky-600 dark:text-sky-400",
+  operator: "text-info",
   system: "text-muted-foreground",
-  cost: "text-emerald-600 dark:text-emerald-400",
+  cost: "text-success",
   error: "text-destructive",
 };
 
@@ -62,7 +62,7 @@ export function OperatorNarration({
       )}
     >
       <div className="flex items-center gap-2">
-        <Bot aria-hidden="true" className="h-4 w-4 text-sky-600 dark:text-sky-400" />
+        <Bot aria-hidden="true" className="h-4 w-4 text-info" />
         <h2 className="text-sm font-semibold tracking-tight">Operator</h2>
         <span className="text-xs text-muted-foreground">live narration</span>
       </div>

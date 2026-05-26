@@ -3,8 +3,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  AlertTriangle,
-  CheckCircle2,
   ExternalLink,
   Image as ImageIcon,
   Loader2,
@@ -14,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { StageShell } from "@/components/pipeline/StageShell";
 import { usePipelineEvents } from "@/hooks/usePipelineEvents";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
@@ -21,7 +20,6 @@ import {
   collapseGenerationTasks,
   readCostTotal,
   type GenerationTask,
-  type GenerationTaskStatus,
 } from "@/lib/pipeline/generation-tasks";
 import type { Pipeline, PipelineEvent } from "@/lib/pipeline/types";
 import { signStoragePath } from "@/lib/realtime/client-data";
@@ -187,39 +185,6 @@ function TaskRow({ pipelineId, task }: { pipelineId: string; task: GenerationTas
         ) : null}
       </div>
     </div>
-  );
-}
-
-function StatusBadge({ status }: { status: GenerationTaskStatus }) {
-  if (status === "queued") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
-        <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
-        Queued
-      </span>
-    );
-  }
-  if (status === "running") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-900 dark:bg-sky-950/40 dark:text-sky-200">
-        <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin" />
-        Running
-      </span>
-    );
-  }
-  if (status === "done") {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
-        <CheckCircle2 aria-hidden="true" className="h-3 w-3" />
-        Done
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-full bg-destructive/15 px-2 py-0.5 text-[11px] font-medium text-destructive">
-      <AlertTriangle aria-hidden="true" className="h-3 w-3" />
-      Error
-    </span>
   );
 }
 

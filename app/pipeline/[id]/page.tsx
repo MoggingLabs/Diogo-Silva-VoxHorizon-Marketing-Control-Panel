@@ -4,6 +4,7 @@ import { notFound } from "next/navigation";
 import { Bell } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { ArchivePipelineButton } from "@/components/pipeline/ArchivePipelineButton";
 import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
 import { MonitorDashboard } from "@/components/monitor/MonitorDashboard";
@@ -26,17 +27,8 @@ import { getPipeline } from "@/lib/pipeline/client";
 import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/review/fetch";
 import { getVariantPlanEditorData } from "@/lib/variant-plan/fetch";
 import type { VariantTestVariable } from "@/lib/variant-plan/schemas";
-import {
-  PIPELINE_FORMAT_BADGE,
-  PIPELINE_FORMAT_LABEL,
-  PIPELINE_STATUS_BADGE,
-  PIPELINE_STATUS_LABEL,
-  type Pipeline,
-  type PipelineEvent,
-  type PipelineStatus,
-} from "@/lib/pipeline/types";
+import { type Pipeline, type PipelineEvent, type PipelineStatus } from "@/lib/pipeline/types";
 import { createClient } from "@/lib/supabase/server";
-import { cn } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -169,22 +161,8 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
             <h1 className="text-xl font-semibold tracking-tight sm:text-2xl md:text-3xl">
               {shortClientLabel(pipeline, clientName)}
             </h1>
-            <span
-              className={cn(
-                "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
-                PIPELINE_STATUS_BADGE[pipeline.status],
-              )}
-            >
-              {PIPELINE_STATUS_LABEL[pipeline.status]}
-            </span>
-            <span
-              className={cn(
-                "inline-flex items-center rounded-full px-2.5 py-0.5 text-xs",
-                PIPELINE_FORMAT_BADGE[pipeline.format_choice],
-              )}
-            >
-              {PIPELINE_FORMAT_LABEL[pipeline.format_choice]}
-            </span>
+            <StatusBadge status={pipeline.status} />
+            <StatusBadge status={pipeline.format_choice} />
           </div>
           <div className="flex flex-wrap items-center gap-2 self-start">
             {isCancellable ? <CancelPipelineButton pipelineId={pipeline.id} /> : null}
@@ -194,7 +172,7 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
       </header>
 
       {isArchived ? (
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300">
+        <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-warning">
           This pipeline is archived and hidden from the active list. Restore it to bring it back.
         </div>
       ) : null}

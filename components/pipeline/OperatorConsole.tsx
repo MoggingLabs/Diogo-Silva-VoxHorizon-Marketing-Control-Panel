@@ -84,7 +84,7 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
           onClick={() => setKickoffOpen((o) => !o)}
         >
           <span className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-            <Bot className="h-4 w-4 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+            <Bot className="h-4 w-4 text-info" aria-hidden="true" />
             Hire the operator
           </span>
           {kickoffOpen ? (
@@ -148,8 +148,8 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
                       </div>
 
                       {gate ? (
-                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5">
-                          <span className="text-xs text-amber-700 dark:text-amber-300">{gate}</span>
+                        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-warning/40 bg-warning/10 px-2.5 py-1.5">
+                          <span className="text-xs text-warning">{gate}</span>
                           <Button asChild size="sm" variant="outline" className="h-7">
                             <Link href={`/pipeline/${run.id}` as Route}>Review &amp; decide</Link>
                           </Button>
@@ -174,7 +174,7 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
               <>
                 <div className="flex items-center justify-between gap-2">
                   <h2 className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-                    <Radio className="h-4 w-4 text-sky-600 dark:text-sky-400" aria-hidden="true" />
+                    <Radio className="h-4 w-4 text-info" aria-hidden="true" />
                     {selected.clientName ?? selected.id.slice(0, 8)}
                   </h2>
                   <Button asChild size="sm" variant="outline" className="h-7">

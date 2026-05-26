@@ -15,17 +15,10 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useRealtimeStream } from "@/hooks/useRealtimeStream";
 import { archivePipeline, listPipelines, restorePipeline } from "@/lib/pipeline/client";
-import {
-  PIPELINE_FORMAT_BADGE,
-  PIPELINE_FORMAT_LABEL,
-  PIPELINE_STATUS_BADGE,
-  PIPELINE_STATUS_LABEL,
-  type Pipeline,
-  type PipelineFormat,
-  type PipelineStatus,
-} from "@/lib/pipeline/types";
+import { type Pipeline, type PipelineFormat, type PipelineStatus } from "@/lib/pipeline/types";
 import { cn } from "@/lib/utils";
 
 type StatusFilter = "all" | "in-flight" | "done" | "cancelled" | "archived";
@@ -270,24 +263,10 @@ export function PipelineList({ initialPipelines, clientNames }: PipelineListProp
                       </Link>
                     </td>
                     <td className="px-3 py-2">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs",
-                          PIPELINE_FORMAT_BADGE[p.format_choice],
-                        )}
-                      >
-                        {PIPELINE_FORMAT_LABEL[p.format_choice]}
-                      </span>
+                      <StatusBadge status={p.format_choice} />
                     </td>
                     <td className="px-3 py-2">
-                      <span
-                        className={cn(
-                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs",
-                          PIPELINE_STATUS_BADGE[p.status],
-                        )}
-                      >
-                        {PIPELINE_STATUS_LABEL[p.status]}
-                      </span>
+                      <StatusBadge status={p.status} />
                     </td>
                     <td className="px-3 py-2 text-muted-foreground">{formatDate(p.created_at)}</td>
                     <td className="px-3 py-2 text-muted-foreground">
