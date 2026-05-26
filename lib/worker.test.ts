@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // project can import the module under test.
 vi.mock("server-only", () => ({}));
 
-import { WorkerError, callWorker, worker } from "./worker";
+import { WorkerError, callWorker, qaRun, specRun, worker } from "./worker";
 import { jsonResponse, spyOnFetch, textResponse } from "@/tests/unit/helpers/worker-mock";
 
 const ORIG_ENV = { ...process.env };
@@ -115,6 +115,62 @@ describe("worker.health", () => {
     const out = await worker.health();
     expect(out.ok).toBe(true);
     expect(spy.mock.calls[0]?.[0]).toBe("http://worker.test/api/work/health");
+  });
+});
+
+describe("worker.qaRun", () => {
+  it("POSTs the qa_run tool with the batch body and returns the result", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(
+      jsonResponse({ ok: true, rollup: "passed", results: [], errors: [] }),
+    );
+    const out = await qaRun({
+      pipeline_id: "p1",
+      items: [{ creative_id: "c1", surface: "image" }],
+    });
+    expect(out.rollup).toBe("passed");
+    const call = spy.mock.calls[0];
+    expect(call?.[0]).toBe("http://worker.test/api/work/pipeline/tools/qa_run");
+    const init = call?.[1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(init.body as string)).toEqual({
+      pipeline_id: "p1",
+      items: [{ creative_id: "c1", surface: "image" }],
+    });
+  });
+
+  it("is exposed on the worker namespace", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(
+      jsonResponse({ ok: true, rollup: "passed", results: [], errors: [] }),
+    );
+    await worker.qaRun({ pipeline_id: "p1", items: [{ creative_id: "c1" }] });
+    expect(spy.mock.calls[0]?.[0]).toBe("http://worker.test/api/work/pipeline/tools/qa_run");
+  });
+});
+
+describe("worker.specRun", () => {
+  it("POSTs the spec_result tool with the batch body", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    const out = await specRun({
+      pipeline_id: "p1",
+      results: [{ creative_id: "c1", placement: "feed", status: "pass" }],
+    });
+    expect(out.ok).toBe(true);
+    const call = spy.mock.calls[0];
+    expect(call?.[0]).toBe("http://worker.test/api/work/pipeline/tools/spec_result");
+    expect((call?.[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("is exposed on the worker namespace", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    await worker.specRun({
+      pipeline_id: "p1",
+      results: [{ creative_id: "c1", placement: "feed", status: "pass" }],
+    });
+    expect(spy.mock.calls[0]?.[0]).toBe("http://worker.test/api/work/pipeline/tools/spec_result");
   });
 });
 

@@ -108,3 +108,87 @@ export async function restoreCreative(kind: CreativeKind, id: string): Promise<v
   });
   if (!res.ok) await readError(res, `POST ${basePath(kind)}/${id}/restore`);
 }
+
+/** Per-creative result row returned by a QA re-run. */
+export type QARerunResult = {
+  ok: boolean;
+  rollup: string;
+  results: Array<{
+    creative_id: string;
+    verdict: string;
+    status: string;
+    attempt: number;
+    rerender_recommended: boolean;
+    defect_count: number;
+  }>;
+  errors: Array<{ creative_id: string; error: string }>;
+};
+
+/**
+ * Re-run QA for a creative (APPEND-ONLY: the worker posts a NEW qa_result
+ * attempt; it never edits a prior one). The route resolves the creative from
+ * the image OR video store, so one path covers both kinds.
+ */
+export async function rerunQa(
+  id: string,
+  opts: { surface?: CreativeKind; ratio?: string } = {},
+): Promise<QARerunResult> {
+  const res = await fetch(`/api/creatives/${encodeURIComponent(id)}/qa`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(opts),
+    cache: "no-store",
+  });
+  if (!res.ok) await readError(res, `POST /api/creatives/${id}/qa`);
+  return (await res.json()) as QARerunResult;
+}
+
+/** Input for a manager spec override (one placement). */
+export type SpecOverrideInputT = {
+  platform?: "meta" | "google" | "tiktok";
+  placement: string;
+  status: "pending" | "pass" | "warn" | "fail" | "exception";
+  reason: string;
+  ratio?: string;
+};
+
+/**
+ * Submit a manager spec override (OVERRIDE-ROUTE only: a corrected per-placement
+ * result through the worker upsert + the DB rollup, with a required reason).
+ */
+export async function overrideSpec(id: string, input: SpecOverrideInputT): Promise<unknown> {
+  const res = await fetch(`/api/creatives/${encodeURIComponent(id)}/spec`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+  });
+  if (!res.ok) await readError(res, `POST /api/creatives/${id}/spec`);
+  return (await res.json()) as unknown;
+}
+
+/** Input for a manager compliance override (one creative). */
+export type ComplianceOverrideInputT = {
+  creative_id: string;
+  override_note: string;
+  copy_variant_id?: string;
+};
+
+/**
+ * Submit a manager compliance override via the EXISTING pipeline-scoped route
+ * (OVERRIDE-ROUTE only: the only path that releases a hard compliance block;
+ * the failing findings are retained, the override columns are stamped).
+ */
+export async function overrideCompliance(
+  pipelineId: string,
+  input: ComplianceOverrideInputT,
+): Promise<unknown> {
+  const res = await fetch(`/api/pipelines/${encodeURIComponent(pipelineId)}/compliance/override`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+    cache: "no-store",
+  });
+  if (!res.ok) await readError(res, `POST /api/pipelines/${pipelineId}/compliance/override`);
+  return (await res.json()) as unknown;
+}
