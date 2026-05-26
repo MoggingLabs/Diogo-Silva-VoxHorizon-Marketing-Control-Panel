@@ -194,32 +194,15 @@ export function qaPassItems(
   }));
 }
 
-/** Read a pipeline's current status from the canonical reducer view
- * (`v_pipeline_dispatch_state.derived_status`). Silent-failure PR-3:
- * `pipelines.status` is no longer the source of truth -- the reducer
- * derives it from the event stream, and PR-4 drops the column entirely.
- */
+/** Read a pipeline's current status straight from the DB (server truth). */
 export async function readPipelineStatus(pipelineId: string): Promise<string | null> {
   const admin = getAdminClient();
-  const { data } = await (
-    admin as unknown as {
-      from: (table: string) => {
-        select: (cols: string) => {
-          eq: (
-            col: string,
-            val: string,
-          ) => {
-            maybeSingle: () => Promise<{ data: { derived_status?: string } | null }>;
-          };
-        };
-      };
-    }
-  )
-    .from("v_pipeline_dispatch_state")
-    .select("derived_status")
-    .eq("pipeline_id", pipelineId)
+  const { data } = await admin
+    .from("pipelines")
+    .select("status")
+    .eq("id", pipelineId)
     .maybeSingle();
-  return data?.derived_status ?? null;
+  return data?.status ?? null;
 }
 
 /** Read every `stage_advanced` event's stage for a pipeline, in fire order. */

@@ -76,28 +76,31 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, cancelled: now };
 
-  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
-  // `pipeline_cancelled` event drives the reducer (cancelled is the terminal
-  // escape in `compute_pipeline_status`) AND fires the cancel-propagate
-  // trigger from migration 0050 so every in-flight work_item for the
-  // pipeline is cancelled in the same transaction.
+  // Silent-failure PR-3: write the cancel status alongside the strict
+  // `pipeline_cancelled` event emission. The event fires the
+  // cancel-propagate trigger from migration 0050 (every open work_item for
+  // the pipeline is cancelled in the same transaction) AND drives the
+  // reducer's terminal-escape branch.
   const update: PipelineUpdate = {
+    status: "cancelled",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
     // Re-assert the previous status so a concurrent transition can't race.
-    .in("status", ["configuration", "ideation", "review", "generation"]);
-  if (updateErr) {
+    .in("status", ["configuration", "ideation", "review", "generation"])
+    .select()
+    .single();
+  if (updateErr || !updated) {
     return NextResponse.json(
-      { error: updateErr.message ?? "cancel update failed" },
+      { error: updateErr?.message ?? "cancel update failed" },
       { status: 500 },
     );
   }
 
-  // Emit the canonical cancel event. This is the load-bearing input to the
+  // Emit the canonical cancel event. Load-bearing input to the
   // cancel-propagate trigger AND the reducer; no longer swallowed.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
@@ -116,20 +119,10 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // Fan out kanban cancels for every still-active task on this
-  // pipeline. We don't block the response on this -- a single sluggish
-  // worker shouldn't drag the cancel response time up -- but we do
-  // await the lookup so the result is deterministic for tests.
+  // Fan out kanban cancels for every still-active task on this pipeline.
   await cancelActiveKanbanTasks(supabase, pipeline.id);
 
-  // Synthesise the response (silent-failure PR-3: the reducer derives
-  // `cancelled` from the pipeline_cancelled event we just emitted).
-  const synthesised = {
-    ...pipeline,
-    status: "cancelled",
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
-  return NextResponse.json({ pipeline: synthesised });
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**

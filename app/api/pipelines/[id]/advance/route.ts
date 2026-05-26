@@ -190,10 +190,9 @@ async function advanceFromFinalizeAssets(
     );
   }
 
-  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
-  // reducer derives it from the `stage_advanced` event we emit below. Keep
-  // the `advanced_at.launch_handoff` stamp; the column survives PR-3 (PR-4
-  // drops `pipelines.status`).
+  // Silent-failure PR-3: emit the stage_advanced event strictly (5xx on
+  // failure). The `pipelines.status` write stays as the cache update until
+  // PR-4 drops the column.
   const now = new Date().toISOString();
   const advancedAt =
     pipeline.advanced_at &&
@@ -201,24 +200,27 @@ async function advanceFromFinalizeAssets(
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
-  const nextAdvancedAt = { ...advancedAt, launch_handoff: now };
   const update: PipelineUpdate = {
-    advanced_at: nextAdvancedAt as unknown as Json,
+    status: "launch_handoff",
+    advanced_at: { ...advancedAt, launch_handoff: now } as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "finalize_assets");
-  if (updateErr) {
+    .eq("status", "finalize_assets")
+    .select()
+    .single();
+  if (updateErr || !updated) {
     return NextResponse.json(
-      { error: updateErr.message ?? "finalize advance failed" },
+      { error: updateErr?.message ?? "finalize advance failed" },
       { status: 500 },
     );
   }
 
-  // Emit the stage_advanced event -- the reducer's load-bearing input. No
-  // longer swallowed: a failed insert means the derived status stays stale.
+  // Emit the stage_advanced event -- the reducer's load-bearing input.
+  // No longer swallowed: a failed insert is the silent-failure class we are
+  // curing.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -233,15 +235,7 @@ async function advanceFromFinalizeAssets(
     );
   }
 
-  // Synthesise the response from the known-next state (the reducer derives
-  // the same on read). PR-4 drops `pipelines.status` so the synthesised
-  // shape disappears once the response speaks the derived view.
-  const synthesised = {
-    ...pipeline,
-    status: "launch_handoff",
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
-  return NextResponse.json({ pipeline: synthesised });
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**
@@ -505,26 +499,32 @@ async function commitPerCreativeAdvance(
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
   const nextAdvancedAt = { ...advancedAt, [next]: now };
-  // Stamp the per-stage timestamp only; the reducer derives `status` from
-  // the `stage_advanced` event we emit below. CAS on the current status so
-  // a concurrent advance no-ops cleanly.
+  // Silent-failure PR-3: emit the `stage_advanced` event strictly (5xx on
+  // failure -- no console.warn swallow). The reducer derives the canonical
+  // status from the event stream; we ALSO update `pipelines.status` so the
+  // (cache) column stays in sync until PR-4 drops it. CAS on the current
+  // status so a concurrent advance no-ops cleanly.
   const update: PipelineUpdate = {
+    status: next,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", status);
-  if (updateErr) {
+    .eq("status", status)
+    .select()
+    .single();
+  if (updateErr || !updated) {
     return NextResponse.json(
-      { error: updateErr.message ?? "pipeline advance failed" },
+      { error: updateErr?.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
   // Emit the stage_advanced event -- the reducer's load-bearing input. No
-  // longer swallowed: a failed insert means the derived status stays stale.
+  // longer swallowed: a failed insert means the audit log diverges from the
+  // status cache (the cure for the original silent-failure class).
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -539,18 +539,7 @@ async function commitPerCreativeAdvance(
     );
   }
 
-  // Silent-failure PR-3: synthesise the response from the known-next state
-  // (the reducer derives the same on read). We don't re-read because the
-  // route already knows the intended status -- the `pipeline_events` row we
-  // just emitted is the canonical input, and the dashboard reads via the
-  // `v_pipeline_dispatch_state` view. PR-4 drops `pipelines.status`.
-  const synthesised = {
-    ...pipeline,
-    status: next,
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
-
-  return NextResponse.json({ pipeline: synthesised });
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**
@@ -579,12 +568,6 @@ async function advanceFromConfiguration(
   //     schema (the "image_payload invalid" 422 the manager hit) and mint a
   //     duplicate brief. Re-task the operator to author the concept previews
   //     (its render call is the spend gate).
-  //
-  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
-  // reducer derives it from the `stage_advanced` event we emit below.
-  // Stamp `advanced_at.ideation`, emit `stage_advanced`, enqueue the operator
-  // dispatch work_item (the daemon owns claiming + driving the operator
-  // container; the auto-emit trigger writes the `operator_dispatched` event).
   if (isOperatorDriven(pipeline.config_draft)) {
     const nowOp = new Date().toISOString();
     const prevAdvancedAt =
@@ -594,20 +577,24 @@ async function advanceFromConfiguration(
         ? (pipeline.advanced_at as Record<string, string>)
         : {};
     const opUpdate: PipelineUpdate = {
+      status: "ideation",
       advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
     };
-    const { error: opErr } = await supabase
+    const { data: opUpdated, error: opErr } = await supabase
       .from("pipelines")
       .update(opUpdate)
       .eq("id", pipeline.id)
-      .eq("status", "configuration");
-    if (opErr) {
+      .eq("status", "configuration")
+      .select()
+      .single();
+    if (opErr || !opUpdated) {
       return NextResponse.json(
-        { error: opErr.message ?? "pipeline advance failed" },
+        { error: opErr?.message ?? "pipeline advance failed" },
         { status: 500 },
       );
     }
-    // Emit the stage_advanced event -- the reducer's load-bearing input.
+    // Silent-failure PR-3: emit stage_advanced strictly (5xx on insert
+    // failure). The legacy console.warn swallow is gone.
     const opEvent: PipelineEventInsert = {
       pipeline_id: pipeline.id,
       kind: "stage_advanced",
@@ -631,14 +618,8 @@ async function advanceFromConfiguration(
         { status: 500 },
       );
     }
-    // Synthesise the response (silent-failure PR-3: see commitPerCreativeAdvance).
-    const opSynth = {
-      ...pipeline,
-      status: "ideation",
-      advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
-    };
     return NextResponse.json({
-      pipeline: opSynth,
+      pipeline: opUpdated,
       image_brief_id: pipeline.image_brief_id,
       video_brief_id: pipeline.video_brief_id,
     });
@@ -798,10 +779,7 @@ async function advanceFromConfiguration(
     videoBriefId = brief.id;
   }
 
-  // 5. Update the pipeline row. Silent-failure PR-3 cutover: the route no
-  //    longer writes `status` -- the reducer derives it from the
-  //    `stage_advanced` event we emit below. We still write the brief ids +
-  //    `advanced_at.ideation`. CAS on the current status so a concurrent
+  // 5. Update the pipeline row. CAS on the current status so a concurrent
   //    second advance no-ops.
   const advancedAt =
     (pipeline.advanced_at &&
@@ -811,16 +789,19 @@ async function advanceFromConfiguration(
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, ideation: now };
   const update: PipelineUpdate = {
+    status: "ideation",
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "configuration");
-  if (updateErr) {
+    .eq("status", "configuration")
+    .select()
+    .single();
+  if (updateErr || !updated) {
     // Compensating cleanup -- both possible briefs.
     if (imageBriefId) {
       await supabase.from("briefs").delete().eq("id", imageBriefId);
@@ -829,12 +810,14 @@ async function advanceFromConfiguration(
       await supabase.from("video_briefs").delete().eq("id", videoBriefId);
     }
     return NextResponse.json(
-      { error: updateErr.message ?? "pipeline advance failed" },
+      { error: updateErr?.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
-  // 6. Emit the stage_advanced event -- the reducer's load-bearing input.
+  // 6. Silent-failure PR-3: emit the stage_advanced event strictly (5xx on
+  //    failure). This is the reducer's load-bearing input AND the audit log;
+  //    the console.warn swallow is gone.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -885,17 +868,8 @@ async function advanceFromConfiguration(
     }
   }
 
-  // 8. Synthesise the response (silent-failure PR-3: see
-  //    commitPerCreativeAdvance). The reducer derives the same status on read.
-  const synthesised = {
-    ...pipeline,
-    status: "ideation",
-    image_brief_id: imageBriefId,
-    video_brief_id: videoBriefId,
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
   return NextResponse.json({
-    pipeline: synthesised,
+    pipeline: updated,
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
   });
@@ -939,12 +913,8 @@ async function advanceFromIdeation(
     );
   }
 
-  // 2. Stamp the advance timestamp. Silent-failure PR-3 cutover: the reducer
-  //    + auto-emit trigger own status transitions; we still write
-  //    `advanced_at.review` as a per-stage timestamp. ideation -> review is a
-  //    pure operator gate (the picks themselves are the work, not a
-  //    work_item dispatch), so we don't enqueue here -- the next stage's
-  //    transition (review/decision) is what kicks generation.
+  // 2. Stamp the advance + status. CAS on the current status so a
+  //    concurrent second advance no-ops.
   const now = new Date().toISOString();
   const advancedAt =
     (pipeline.advanced_at &&
@@ -954,25 +924,25 @@ async function advanceFromIdeation(
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, review: now };
   const update: PipelineUpdate = {
+    status: "review",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "ideation");
-  if (updateErr) {
+    .eq("status", "ideation")
+    .select()
+    .single();
+  if (updateErr || !updated) {
     return NextResponse.json(
-      { error: updateErr.message ?? "pipeline advance failed" },
+      { error: updateErr?.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
-  // 3. ideation -> review has no dispatch -- it is a manual gate. To keep the
-  //    timeline visible (no work_item to fire the auto-emit trigger), we
-  //    still emit the `stage_advanced` event directly. This is the one
-  //    transition that has no upstream work_item; the trigger handles every
-  //    other stage.
+  // 3. Silent-failure PR-3: emit the stage_advanced event strictly (5xx on
+  //    failure). This is the reducer's load-bearing input.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -990,14 +960,7 @@ async function advanceFromIdeation(
     );
   }
 
-  // 4. Synthesise the response (silent-failure PR-3: see
-  //    commitPerCreativeAdvance). The reducer derives the same status.
-  const synthesised = {
-    ...pipeline,
-    status: "review",
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
-  return NextResponse.json({ pipeline: synthesised });
+  return NextResponse.json({ pipeline: updated });
 }
 
 /**

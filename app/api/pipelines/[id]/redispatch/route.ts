@@ -45,12 +45,9 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
   const supabase = createAdminClient();
 
-  // 1. Load the pipeline. We need `config_draft` for the operator-driven
-  //    check; we read it from the `pipelines` table directly. Silent-failure
-  //    PR-3: the row's `status` column is no longer authoritative -- the
-  //    reducer derives the canonical status. We overlay `derived_status` from
-  //    `v_pipeline_dispatch_state` so the terminal-stage guard uses the
-  //    truth, not the (stale, soon-to-be-deleted) column.
+  // 1. Load the pipeline. Re-derive the stage from `compute_pipeline_status`
+  //    would also work, but the route also needs `config_draft` for the
+  //    operator-driven check so we read the row directly.
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
     .select("id, status, config_draft")
@@ -61,15 +58,6 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   }
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
-  }
-  const { data: derivedRow } = await supabase
-    .from("v_pipeline_dispatch_state")
-    .select("derived_status")
-    .eq("pipeline_id", id)
-    .maybeSingle();
-  const derivedStatus = (derivedRow as { derived_status?: string } | null)?.derived_status;
-  if (derivedStatus) {
-    pipeline.status = derivedStatus as typeof pipeline.status;
   }
 
   // 2. Terminal pipelines have nothing to redispatch -- the operator daemon

@@ -91,23 +91,25 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
 
   // 3. Reject branch -- terminal, no cost snapshot or worker kick.
-  //    Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
-  //    `pipeline_cancelled` event drives the reducer (cancelled is the
-  //    terminal escape in `compute_pipeline_status`) AND fires the
-  //    cancel-propagate trigger from migration 0050 so any in-flight
-  //    operator dispatch is cancelled alongside.
+  //    Silent-failure PR-3: emit `pipeline_cancelled` strictly so the
+  //    cancel-propagate trigger from migration 0050 fans the cancel out to
+  //    every open work_item; the `pipelines.status` cache is updated
+  //    alongside until PR-4 drops the column.
   if (decision === "rejected") {
     const update: PipelineUpdate = {
+      status: "cancelled",
       approval: approval as unknown as Json,
     };
-    const { error: updateErr } = await supabase
+    const { data: updated, error: updateErr } = await supabase
       .from("pipelines")
       .update(update)
       .eq("id", pipeline.id)
-      .eq("status", "review");
-    if (updateErr) {
+      .eq("status", "review")
+      .select()
+      .single();
+    if (updateErr || !updated) {
       return NextResponse.json(
-        { error: updateErr.message ?? "reject update failed" },
+        { error: updateErr?.message ?? "reject update failed" },
         { status: 500 },
       );
     }
@@ -126,14 +128,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       );
     }
 
-    // Synthesise the response (the reducer derives `cancelled` from the
-    // pipeline_cancelled event we just emitted).
-    const synthesised = {
-      ...pipeline,
-      status: "cancelled",
-      approval: approval as unknown as Json,
-    };
-    return NextResponse.json({ pipeline: synthesised });
+    return NextResponse.json({ pipeline: updated });
   }
 
   // 4. Approve / approve_with_changes — compute cost estimate from the live
@@ -158,29 +153,31 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, generation: now };
 
-  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
-  // reducer derives it from the `stage_advanced` event we emit below. The
-  // other columns (approval snapshot, cost_estimate, advanced_at.generation)
-  // remain the route's job.
+  // Silent-failure PR-3: keep the `pipelines.status` cache update alongside
+  // the (strict) stage_advanced event emission.
   const update: PipelineUpdate = {
+    status: "generation",
     approval: approval as unknown as Json,
     cost_estimate: estimate as unknown as Json,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { error: updateErr } = await supabase
+  const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "review");
-  if (updateErr) {
+    .eq("status", "review")
+    .select()
+    .single();
+  if (updateErr || !updated) {
     return NextResponse.json(
-      { error: updateErr.message ?? "approve update failed" },
+      { error: updateErr?.message ?? "approve update failed" },
       { status: 500 },
     );
   }
 
-  // Emit the stage_advanced event -- the reducer's load-bearing input. No
-  // longer swallowed: a failed insert means the derived status stays stale.
+  // Emit the stage_advanced event -- the reducer's load-bearing input.
+  // No longer swallowed: a failed insert is the silent-failure class
+  // we are curing.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -238,16 +235,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     }
   }
 
-  // Synthesise the response (silent-failure PR-3: the reducer derives the
-  // same on read).
-  const synthesised = {
-    ...pipeline,
-    status: "generation",
-    approval: approval as unknown as Json,
-    cost_estimate: estimate as unknown as Json,
-    advanced_at: nextAdvancedAt as unknown as Json,
-  };
-  return NextResponse.json({ pipeline: synthesised });
+  return NextResponse.json({ pipeline: updated });
 }
 
 // Silent-failure PR-3 cutover: the legacy `fireWorkerGeneration` fire-and-forget

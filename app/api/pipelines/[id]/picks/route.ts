@@ -98,7 +98,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Status guard — only the ideation stage may record picks.
+  // Status guard -- only the ideation stage may record picks.
   if (pipeline.status !== "ideation") {
     return NextResponse.json(
       {
