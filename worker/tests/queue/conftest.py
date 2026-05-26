@@ -7,13 +7,16 @@ machine, the auto-emit trigger, and the cancel-propagation trigger only
 exist as live SQL artifacts; the in-memory ``FakeSupabase`` double cannot
 exercise them.
 
-Pytest collects conftests only from a test's own directory + ancestors,
-not from siblings, so we explicitly re-export those fixtures here and add
-the ``integration`` marker (mirroring what
-``tests/integration/conftest.py::pytest_collection_modifyitems`` does for
-its own directory). The fixtures themselves live in one place
-(``tests/integration/conftest.py``) -- this file is a thin re-export so
-there is no source duplication of the migration-apply machinery.
+Pytest only auto-collects conftests from a test's own directory + ancestors,
+not from siblings. To reuse the integration tier's fixtures (single source
+of truth for the migration-apply lifecycle, session-scoped) we register
+that conftest as a PLUGIN via ``pytest_plugins`` -- pytest then loads its
+fixtures ONCE and shares them across both selections, so a combined
+``pytest -m integration`` run that walks both directories applies the
+migrations exactly once. (A naive re-import via ``from tests.integration
+.conftest import migrated_db`` would create a DUPLICATE session-scoped
+fixture and apply migrations twice, which fails on ``type already exists``
+the second time.)
 """
 
 from __future__ import annotations
@@ -22,14 +25,13 @@ from pathlib import Path
 
 import pytest
 
-# Re-export the DB lifecycle fixtures from the integration conftest. Pytest
-# resolves these by NAME via the import; the same session-scoped DB is shared.
-# (worker/ is the pythonpath root per pyproject.toml ``pythonpath = ["."]``.)
-from tests.integration.conftest import (  # type: ignore[import-not-found]  # noqa: F401
-    pg_dsn,
-    migrated_db,
-    db_conn,
-)
+
+# Load the integration tier's conftest as a plugin so its session-scoped
+# ``migrated_db`` / ``pg_dsn`` / ``db_conn`` fixtures are registered ONCE and
+# shared with the queue tests. Pytest's plugin-loader deduplicates by module
+# path so this is safe even when ``-m integration`` also collects the
+# integration directory directly.
+pytest_plugins = ["tests.integration.conftest"]
 
 
 def pytest_collection_modifyitems(
