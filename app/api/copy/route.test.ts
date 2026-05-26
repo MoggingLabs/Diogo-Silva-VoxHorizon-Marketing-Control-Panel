@@ -63,6 +63,30 @@ describe("GET /api/copy", () => {
     expect(currentSupabase._spies.from).toHaveBeenCalledWith("video_copy_variants");
   });
 
+  it("lists archived variants when ?archived=1", async () => {
+    currentSupabase = mockClient({
+      copy_variants: { select: { data: [{ id: "cv-arch" }], error: null } },
+    });
+    const res = await GET(
+      req(`http://localhost/api/copy?creative_id=${creativeId}&format=image&archived=1`),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.variants).toHaveLength(1);
+  });
+
+  it("includes both active + archived when ?archived=all", async () => {
+    currentSupabase = mockClient({
+      copy_variants: { select: { data: [{ id: "a" }, { id: "b" }], error: null } },
+    });
+    const res = await GET(
+      req(`http://localhost/api/copy?creative_id=${creativeId}&format=image&archived=all`),
+    );
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.variants).toHaveLength(2);
+  });
+
   it("500 on a DB error", async () => {
     currentSupabase = mockClient({
       copy_variants: { select: { data: null, error: { message: "boom" } } },

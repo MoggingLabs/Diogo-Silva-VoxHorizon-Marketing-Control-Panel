@@ -41,6 +41,7 @@ function makeBrief(over: Partial<VideoBrief> = {}): VideoBrief {
     decided_at: null,
     decided_by: null,
     decided_notes: null,
+    deleted_at: null,
     ...over,
   } as VideoBrief;
 }
@@ -71,6 +72,48 @@ describe("VideoBriefEditDrawer", () => {
     expect(body.dimensions).toBe("9x16");
     expect(body.broll_selection_mode).toBe("review_each");
     expect(body.status).toBeUndefined();
+  });
+
+  it("sets music + hook + captions + a status change (truthy branches)", async () => {
+    const user = userEvent.setup();
+    render(
+      <VideoBriefEditDrawer
+        open
+        onOpenChange={vi.fn()}
+        brief={makeBrief({
+          status: "posted",
+          music_track: null,
+          hook_style: null,
+          captions_style: null,
+        })}
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/music track/i), "epic.mp3");
+
+    // hook style select (set to a real value)
+    await user.click(screen.getByLabelText(/hook style/i));
+    await user.click(await screen.findByRole("option", { name: /curiosity/i }));
+
+    // captions style select
+    await user.click(screen.getByLabelText(/captions style/i));
+    await user.click(await screen.findByRole("option", { name: /bold yellow/i }));
+
+    // status posted -> draft
+    const triggers = screen.getAllByRole("combobox");
+    const statusTrigger = triggers.at(-1);
+    if (!statusTrigger) throw new Error("status select not found");
+    await user.click(statusTrigger);
+    await user.click(await screen.findByRole("option", { name: "Draft" }));
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(updateVideoBrief).toHaveBeenCalled());
+    const [, body] = updateVideoBrief.mock.calls[0] as [string, Record<string, unknown>];
+    expect(body.music_track).toBe("epic.mp3");
+    expect(body.hook_style).toBe("curiosity");
+    expect(body.captions_style).toBe("bold_yellow");
+    expect(body.status).toBe("draft");
   });
 
   it("blocks submit when voice_id is cleared (zod)", async () => {

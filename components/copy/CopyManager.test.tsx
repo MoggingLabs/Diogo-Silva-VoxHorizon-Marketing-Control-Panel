@@ -94,4 +94,48 @@ describe("CopyManager", () => {
     await user.click(screen.getByRole("button", { name: /restore variant 1/i }));
     await waitFor(() => expect(restoreCopy).toHaveBeenCalledWith("image", "cv1"));
   });
+
+  it("renders a bare variant (no status / headline / body) without crashing", () => {
+    render(
+      <CopyManager
+        format="image"
+        creativeId="cr1"
+        variants={[
+          variant({ id: "cv2", variant_index: 2, status: null, headline: null, body: null }),
+        ]}
+      />,
+    );
+    // The row still renders its index + platform.
+    expect(screen.getByText("#2")).toBeInTheDocument();
+    expect(screen.queryByText("Draft")).not.toBeInTheDocument();
+  });
+
+  it("surfaces a restore failure as an error toast", async () => {
+    const { toast } = await import("sonner");
+    restoreCopy.mockRejectedValueOnce(new Error("restore boom"));
+    const user = userEvent.setup();
+    render(
+      <CopyManager
+        format="image"
+        creativeId="cr1"
+        variants={[variant({ deleted_at: "2026-05-25T00:00:00Z" })]}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /restore variant 1/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("restore boom"));
+  });
+
+  it("renders multiple variants", () => {
+    render(
+      <CopyManager
+        format="video"
+        creativeId="cr1"
+        variants={[
+          variant({ id: "a", variant_index: 1 }),
+          variant({ id: "b", variant_index: 2, headline: "Second" }),
+        ]}
+      />,
+    );
+    expect(screen.getAllByTestId("copy-row")).toHaveLength(2);
+  });
 });

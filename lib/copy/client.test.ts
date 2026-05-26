@@ -79,3 +79,27 @@ describe("restoreCopy", () => {
     expect((call?.[1] as RequestInit | undefined)?.method).toBe("POST");
   });
 });
+
+describe("base-url resolution + error parsing", () => {
+  it("uses NEXT_PUBLIC_APP_URL when set", async () => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://app.example.com/";
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ variant: {} }, { status: 201 }));
+    await createCopy({ format: "image", creative_id: "cr1", variant_index: 1 });
+    expect(spy.mock.calls[0]?.[0]).toBe("https://app.example.com/api/copy");
+  });
+
+  it("uses the VERCEL_URL fallback", async () => {
+    process.env.VERCEL_URL = "preview.vercel.app";
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ variant: {} }, { status: 201 }));
+    await createCopy({ format: "image", creative_id: "cr1", variant_index: 1 });
+    expect(spy.mock.calls[0]?.[0]).toBe("https://preview.vercel.app/api/copy");
+  });
+
+  it("tolerates a non-JSON 2xx body", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(textResponse("", { status: 200 }));
+    await expect(restoreCopy("image", "cv1")).resolves.toBeUndefined();
+  });
+});

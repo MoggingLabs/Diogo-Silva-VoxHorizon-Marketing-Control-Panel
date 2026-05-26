@@ -97,4 +97,32 @@ describe("updateVideoBrief", () => {
     await updateVideoBrief("v1", {});
     expect(spy.mock.calls[0]?.[0]).toBe("https://app.example.com/api/briefs/video/v1");
   });
+
+  it("uses the VERCEL_URL fallback when NEXT_PUBLIC_APP_URL is unset", async () => {
+    process.env.VERCEL_URL = "preview.vercel.app";
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ id: "v1" }));
+    await updateVideoBrief("v1", {});
+    expect(spy.mock.calls[0]?.[0]).toBe("https://preview.vercel.app/api/briefs/video/v1");
+  });
+});
+
+describe("error envelope parsing", () => {
+  it("prefers the JSON error field over the raw body", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ error: "explicit message" }, { status: 400 }));
+    await expect(archiveBrief("image", "b1")).rejects.toThrow(/explicit message/);
+  });
+
+  it("falls back to the raw text when the error body is not JSON", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(textResponse("totally not json", { status: 502 }));
+    await expect(archiveBrief("image", "b1")).rejects.toThrow(/totally not json/);
+  });
+
+  it("tolerates a non-JSON 2xx body (resolves without throwing)", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(textResponse("", { status: 200 }));
+    await expect(restoreBrief("image", "b1")).resolves.toBeUndefined();
+  });
 });

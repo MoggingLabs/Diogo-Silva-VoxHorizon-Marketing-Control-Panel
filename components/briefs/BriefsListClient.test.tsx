@@ -5,7 +5,7 @@
  * archive vs active row actions, single-row archive + restore calling the
  * format-aware client, and the active/archived view link.
  */
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -149,5 +149,48 @@ describe("BriefsListClient", () => {
     const table = screen.getByRole("table");
     expect(within(table).getByText("Draft")).toBeInTheDocument();
     expect(within(table).getByText("Posted")).toBeInTheDocument();
+  });
+
+  it("bulk-archives the selected rows through the confirm dialog (each format)", async () => {
+    const user = userEvent.setup();
+    render(<BriefsListClient rows={ROWS} archived={false} />);
+    // Select all rows on the page via the header checkbox.
+    await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+    // The bulk bar appears; click Archive -> opens ConfirmArchive.
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
+    await waitFor(() => expect(archiveBrief).toHaveBeenCalledTimes(2));
+    expect(archiveBrief).toHaveBeenCalledWith("image", "i1");
+    expect(archiveBrief).toHaveBeenCalledWith("video", "v1");
+  });
+
+  it("bulk-restores the selected rows directly in the archived view", async () => {
+    const user = userEvent.setup();
+    render(
+      <BriefsListClient
+        rows={[
+          row({ id: "i1", deletedAt: "2026-05-25T00:00:00Z" }),
+          row({ id: "v1", format: "video", href: "/briefs/video/v1", deletedAt: "x" }),
+        ]}
+        archived
+      />,
+    );
+    await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+    // In archived view the bulk action restores directly (no confirm dialog).
+    await user.click(screen.getByRole("button", { name: /^restore$/i }));
+    await waitFor(() => expect(restoreBrief).toHaveBeenCalledTimes(2));
+  });
+
+  it("reports a bulk failure via an error toast but still refreshes", async () => {
+    const { toast } = await import("sonner");
+    archiveBrief.mockRejectedValueOnce(new Error("archive failed"));
+    const user = userEvent.setup();
+    render(<BriefsListClient rows={[IMAGE_ROW]} archived={false} />);
+    await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+    await user.click(screen.getByRole("button", { name: /^archive$/i }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith("archive failed"));
   });
 });

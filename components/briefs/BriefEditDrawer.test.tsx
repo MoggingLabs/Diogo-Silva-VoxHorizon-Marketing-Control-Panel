@@ -39,6 +39,7 @@ function makeBrief(over: Partial<Brief> = {}): Brief {
     decided_at: null,
     decided_by: null,
     decided_notes: null,
+    deleted_at: null,
     ...over,
   } as Brief;
 }
@@ -71,6 +72,44 @@ describe("BriefEditDrawer", () => {
     expect(payload.targeting).toEqual({ radius_km: 25 });
     // Status unchanged → not sent.
     expect(body.status).toBeUndefined();
+  });
+
+  it("fills every optional payload field + a status change, sending both payload and status", async () => {
+    const user = userEvent.setup();
+    // Start from a posted brief so a draft transition is legal + selectable.
+    render(
+      <BriefEditDrawer
+        open
+        onOpenChange={vi.fn()}
+        brief={makeBrief({
+          status: "posted",
+          payload: { service: "roofing", budget: 1000, market: "Austin" },
+        })}
+      />,
+    );
+
+    await user.type(screen.getByLabelText(/daily budget/i), "250");
+    await user.type(screen.getByLabelText(/landing page url/i), "https://lp.example.com");
+    await user.type(screen.getByLabelText(/offer text/i), "Free quote");
+    await user.type(screen.getByLabelText(/^notes$/i), "rush this");
+
+    // Change status posted -> draft (an allowed transition).
+    const triggers = screen.getAllByRole("combobox");
+    const statusTrigger = triggers.at(-1);
+    if (!statusTrigger) throw new Error("status select not found");
+    await user.click(statusTrigger);
+    await user.click(await screen.findByRole("option", { name: "Draft" }));
+
+    await user.click(screen.getByRole("button", { name: /^save$/i }));
+
+    await waitFor(() => expect(updateImageBrief).toHaveBeenCalled());
+    const [, body] = updateImageBrief.mock.calls[0] as [string, Record<string, unknown>];
+    const payload = body.payload as Record<string, unknown>;
+    expect(payload.budget_daily).toBe(250);
+    expect(payload.landing_page_url).toBe("https://lp.example.com");
+    expect(payload.offer_text).toBe("Free quote");
+    expect(payload.notes).toBe("rush this");
+    expect(body.status).toBe("draft");
   });
 
   it("only offers status transitions the state machine allows from draft", async () => {
