@@ -333,10 +333,20 @@ async def test_claim_server_error_does_not_crash_loop():
     hermes = FakeHermesExec()
     hermes.chat_responses.append(ChatResult(exit_code=0, stdout_tail="ok", error_kind=None))
 
-    daemon = Daemon(settings=settings, queue_client=queue, hermes_exec=hermes)  # type: ignore[arg-type]
+    # Inject a near-zero sleep so the claim-poll back-off doesn't gate the
+    # test on the CI runner's 1s wall clock.
+    async def _no_sleep(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    daemon = Daemon(
+        settings=settings,
+        queue_client=queue,  # type: ignore[arg-type]
+        hermes_exec=hermes,  # type: ignore[arg-type]
+        sleep=_no_sleep,
+    )
 
     async def _stop_when_completed():
-        for _ in range(80):
+        for _ in range(1000):
             await asyncio.sleep(0.01)
             if queue.complete_calls:
                 break
@@ -359,10 +369,18 @@ async def test_claim_generic_client_error_does_not_crash_loop():
     hermes = FakeHermesExec()
     hermes.chat_responses.append(ChatResult(exit_code=0, stdout_tail="ok", error_kind=None))
 
-    daemon = Daemon(settings=settings, queue_client=queue, hermes_exec=hermes)  # type: ignore[arg-type]
+    async def _no_sleep(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    daemon = Daemon(
+        settings=settings,
+        queue_client=queue,  # type: ignore[arg-type]
+        hermes_exec=hermes,  # type: ignore[arg-type]
+        sleep=_no_sleep,
+    )
 
     async def _stopper():
-        for _ in range(80):
+        for _ in range(1000):
             await asyncio.sleep(0.01)
             if queue.complete_calls:
                 break
