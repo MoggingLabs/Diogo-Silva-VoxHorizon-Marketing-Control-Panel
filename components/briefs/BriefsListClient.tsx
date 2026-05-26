@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import type { Route } from "next";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Archive, ArchiveRestore, ClipboardList, Eye, FileVideo, Plus } from "lucide-react";
@@ -137,7 +138,7 @@ export function BriefsListClient({ rows, archived }: BriefsListClientProps) {
       sortable: true,
       cell: (row) => (
         <Link
-          href={row.href}
+          href={row.href as Route}
           className="inline-flex items-center gap-2 font-mono text-xs underline-offset-4 hover:underline"
         >
           {row.format === "video" ? (
@@ -190,7 +191,7 @@ export function BriefsListClient({ rows, archived }: BriefsListClientProps) {
     {
       label: "View",
       icon: <Eye className="h-4 w-4" aria-hidden="true" />,
-      onSelect: (row) => router.push(row.href),
+      onSelect: (row) => router.push(row.href as Route),
     },
     archived
       ? {

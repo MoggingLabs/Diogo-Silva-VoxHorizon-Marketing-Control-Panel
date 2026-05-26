@@ -1,3 +1,4 @@
+import type { Route } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 
@@ -54,10 +55,10 @@ export default async function CopyPage({ searchParams }: { searchParams: Promise
   if (!creativeRes.data) notFound();
 
   const briefId = (creativeRes.data as { brief_id: string | null }).brief_id;
-  const briefHref = briefId
-    ? format === "video"
-      ? `/briefs/video/${briefId}`
-      : `/briefs/${briefId}`
+  // Runtime-built path: typedRoutes can't statically verify the interpolation,
+  // so cast to Route (same pattern as DataTable's URL-state writer).
+  const briefHref: Route | null = briefId
+    ? ((format === "video" ? `/briefs/video/${briefId}` : `/briefs/${briefId}`) as Route)
     : null;
 
   const variants: ManagedCopyVariant[] = (variantsRes.data ?? []).map((v) => {
