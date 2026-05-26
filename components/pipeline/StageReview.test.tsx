@@ -40,6 +40,18 @@ vi.mock("@/lib/realtime/client-data", () => ({
   signStoragePaths: (b: string, p: string[]) => signStoragePaths(b, p),
 }));
 
+// Silent-failure PR-3: the WorkItemPanelSlot auto-hides when nothing is queued.
+let slotHasActiveWorkItem = false;
+vi.mock("./WorkItemPanel", () => ({
+  WorkItemPanelSlot: ({ pipelineId }: { pipelineId: string }) =>
+    slotHasActiveWorkItem ? (
+      <div data-testid="work-item-panel-slot" data-pipeline={pipelineId} />
+    ) : null,
+  WorkItemPanel: ({ pipelineId }: { pipelineId: string }) => (
+    <div data-testid="work-item-panel" data-pipeline={pipelineId} />
+  ),
+}));
+
 import { StageReview } from "./StageReview";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -72,6 +84,7 @@ beforeEach(() => {
   fetchVideoCreativesByIdsWithOutline.mockReset();
   fetchVideoCreativesByIdsWithOutline.mockResolvedValue({ creatives: [], outlines: {} });
   signStoragePaths.mockClear();
+  slotHasActiveWorkItem = false;
 });
 
 afterEach(() => {
@@ -294,5 +307,22 @@ describe("StageReview", () => {
     expect(await screen.findByText("30s")).toBeInTheDocument();
     expect(screen.getByText(/0 segments/)).toBeInTheDocument();
     expect(screen.getByText(/b-roll plan pending/)).toBeInTheDocument();
+  });
+});
+
+describe("StageReview - work item panel slot (silent-failure PR-3)", () => {
+  it("hides the WorkItemPanelSlot when no active work_item is in flight", () => {
+    slotHasActiveWorkItem = false;
+    render(<StageReview pipeline={makePipeline({ picks: { image: ["c1"] } })} />);
+    expect(screen.queryByText(/hang tight/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+  });
+
+  it("mounts the WorkItemPanelSlot when an active work_item is in flight", () => {
+    slotHasActiveWorkItem = true;
+    render(<StageReview pipeline={makePipeline({ picks: { image: ["c1"] } })} />);
+    const slot = screen.getByTestId("work-item-panel-slot");
+    expect(slot).toBeInTheDocument();
+    expect(slot.getAttribute("data-pipeline")).toBe("p1");
   });
 });

@@ -77,6 +77,58 @@ services:
       start_period: 30s
       retries: 3
 
+  # operator-daemon: silent-failure foundational redesign PR-3.
+  #   Sidecar container that owns the work_item queue's operator_dispatch
+  #   kind. The daemon claims queued operator_dispatch rows from the worker's
+  #   REST surface and docker-execs into the co-located hermes-agent-operator
+  #   container (NEVER mutates the operator image's CMD -- the daemon is a
+  #   SIDECAR, not a swap). Health is exposed on :9001/healthz so the docker
+  #   healthcheck + the dashboard's DaemonHealthBadge can both probe it.
+  operator-daemon:
+    build:
+      context: ./operator-daemon
+      dockerfile: Dockerfile
+    image: ghcr.io/${GHCR_OWNER:-mogginglabs}/voxhorizon-operator-daemon:${OPERATOR_DAEMON_IMAGE_TAG:-latest}
+    restart: unless-stopped
+    env_file:
+      - /opt/voxhorizon/.env
+    expose:
+      - "9001"
+    environment:
+      # The daemon docker-execs into this container to drive the operator. The
+      # name lives in env so dev/prod (and per-VPS overrides) can target a
+      # different operator container without a compose edit.
+      HERMES_OPERATOR_CONTAINER_NAME: ${HERMES_OPERATOR_CONTAINER_NAME:-hermes-agent-operator}
+    volumes:
+      # Host docker socket -- required for the daemon to docker-exec into the
+      # operator container. Same threat model as the worker mount above; see
+      # SECRETS.md (HI-12).
+      - /var/run/docker.sock:/var/run/docker.sock
+    # The `app` user (uid 10001 in the daemon image) needs the host docker
+    # group's GID to read /var/run/docker.sock. Mirrors the worker.
+    group_add:
+      - "${DOCKER_GID:-988}"
+    # Multi-network: the daemon POSTs to the worker's REST surface at
+    # http://worker:8000 over the default voxhorizon network AND has to reach
+    # the operator container which lives on the Hermes-managed stack's
+    # network (mirrors the worker's attachment pattern).
+    networks:
+      default: {}
+      hermes-agent-ekko_default: {}
+    depends_on:
+      # Don't try to claim work before the worker's /work/queue/claim endpoint
+      # is reachable -- the daemon would crash-loop on connection refused.
+      worker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "curl -fsS http://localhost:9001/healthz || exit 1"
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+
   # web: VPS-8 (#229)
   #   Next.js dashboard. Builds NEXT_PUBLIC_* env into the static bundle at
   #   image-build time (they're inlined into client JS, so they must be

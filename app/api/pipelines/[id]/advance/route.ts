@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { BriefPayload, type BriefInsert } from "@/lib/briefs";
-import { dispatchOperator, isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
 import {
   PER_CREATIVE_STAGES,
   activeTracksLocal,
@@ -190,6 +190,10 @@ async function advanceFromFinalizeAssets(
     );
   }
 
+  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  // reducer derives it from the `stage_advanced` event we emit below. Keep
+  // the `advanced_at.launch_handoff` stamp; the column survives PR-3 (PR-4
+  // drops `pipelines.status`).
   const now = new Date().toISOString();
   const advancedAt =
     pipeline.advanced_at &&
@@ -197,24 +201,24 @@ async function advanceFromFinalizeAssets(
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
+  const nextAdvancedAt = { ...advancedAt, launch_handoff: now };
   const update: PipelineUpdate = {
-    status: "launch_handoff",
-    advanced_at: { ...advancedAt, launch_handoff: now } as unknown as Json,
+    advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "finalize_assets")
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .eq("status", "finalize_assets");
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "finalize advance failed" },
+      { error: updateErr.message ?? "finalize advance failed" },
       { status: 500 },
     );
   }
 
+  // Emit the stage_advanced event -- the reducer's load-bearing input. No
+  // longer swallowed: a failed insert means the derived status stays stale.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -223,10 +227,21 @@ async function advanceFromFinalizeAssets(
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // Synthesise the response from the known-next state (the reducer derives
+  // the same on read). PR-4 drops `pipelines.status` so the synthesised
+  // shape disappears once the response speaks the derived view.
+  const synthesised = {
+    ...pipeline,
+    status: "launch_handoff",
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  return NextResponse.json({ pipeline: synthesised });
 }
 
 /**
@@ -459,9 +474,15 @@ async function computeCopyGate(
 }
 
 /**
- * Commit a per-creative stage advance: compare-and-set the pipeline status to
- * its successor and emit the `stage_advanced` event. Shared by the rollup-gated
- * stages and the copy stage so both record the move identically.
+ * Commit a per-creative stage advance. Silent-failure PR-3 cutover: the route
+ * stops writing `pipelines.status` -- the reducer derives it from the
+ * `stage_advanced` event we emit here, and PR-4's migration 0051 will drop
+ * the `status` column entirely. `advanced_at` (a per-stage timestamp the
+ * dashboard still reads) and the `stage_advanced` event remain the route's
+ * job; the event is the load-bearing input to `compute_pipeline_status`.
+ *
+ * The event insert is no longer best-effort -- if it fails the reducer would
+ * not flip, so we surface a 5xx instead of `console.warn`-swallowing it.
  */
 async function commitPerCreativeAdvance(
   supabase: SupabaseClient,
@@ -484,26 +505,26 @@ async function commitPerCreativeAdvance(
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
   const nextAdvancedAt = { ...advancedAt, [next]: now };
+  // Stamp the per-stage timestamp only; the reducer derives `status` from
+  // the `stage_advanced` event we emit below. CAS on the current status so
+  // a concurrent advance no-ops cleanly.
   const update: PipelineUpdate = {
-    status: next,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  // Compare-and-set on the current status so a concurrent second advance (or a
-  // stale double-click) can't double-promote.
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", status)
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .eq("status", status);
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "pipeline advance failed" },
+      { error: updateErr.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
+  // Emit the stage_advanced event -- the reducer's load-bearing input. No
+  // longer swallowed: a failed insert means the derived status stays stale.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -512,10 +533,24 @@ async function commitPerCreativeAdvance(
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // Silent-failure PR-3: synthesise the response from the known-next state
+  // (the reducer derives the same on read). We don't re-read because the
+  // route already knows the intended status -- the `pipeline_events` row we
+  // just emitted is the canonical input, and the dashboard reads via the
+  // `v_pipeline_dispatch_state` view. PR-4 drops `pipelines.status`.
+  const synthesised = {
+    ...pipeline,
+    status: next,
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+
+  return NextResponse.json({ pipeline: synthesised });
 }
 
 /**
@@ -539,11 +574,17 @@ async function advanceFromConfiguration(
   // 1b. Operator-driven pipelines: the Hermes operator already authored the
   //     brief (the worker validated it; pipeline.image_brief_id is set) and it
   //     re-reads live state on each dispatch. Skip the deterministic
-  //     validate-and-insert path below — running it would re-check the
+  //     validate-and-insert path below -- running it would re-check the
   //     operator's looser, extras-bearing payload against the strict form
   //     schema (the "image_payload invalid" 422 the manager hit) and mint a
-  //     duplicate brief. Just advance the stage and re-task the operator to
-  //     author the concept previews (its render call is the spend gate).
+  //     duplicate brief. Re-task the operator to author the concept previews
+  //     (its render call is the spend gate).
+  //
+  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  // reducer derives it from the `stage_advanced` event we emit below.
+  // Stamp `advanced_at.ideation`, emit `stage_advanced`, enqueue the operator
+  // dispatch work_item (the daemon owns claiming + driving the operator
+  // container; the auto-emit trigger writes the `operator_dispatched` event).
   if (isOperatorDriven(pipeline.config_draft)) {
     const nowOp = new Date().toISOString();
     const prevAdvancedAt =
@@ -553,22 +594,20 @@ async function advanceFromConfiguration(
         ? (pipeline.advanced_at as Record<string, string>)
         : {};
     const opUpdate: PipelineUpdate = {
-      status: "ideation",
       advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
     };
-    const { data: opUpdated, error: opErr } = await supabase
+    const { error: opErr } = await supabase
       .from("pipelines")
       .update(opUpdate)
       .eq("id", pipeline.id)
-      .eq("status", "configuration")
-      .select()
-      .single();
-    if (opErr || !opUpdated) {
+      .eq("status", "configuration");
+    if (opErr) {
       return NextResponse.json(
-        { error: opErr?.message ?? "pipeline advance failed" },
+        { error: opErr.message ?? "pipeline advance failed" },
         { status: 500 },
       );
     }
+    // Emit the stage_advanced event -- the reducer's load-bearing input.
     const opEvent: PipelineEventInsert = {
       pipeline_id: pipeline.id,
       kind: "stage_advanced",
@@ -577,11 +616,13 @@ async function advanceFromConfiguration(
     };
     const { error: opEvErr } = await supabase.from("pipeline_events").insert(opEvent);
     if (opEvErr) {
-      console.warn(`[pipelines.advance] event insert failed: ${opEvErr.message}`);
+      return NextResponse.json(
+        { error: `stage_advanced event insert failed: ${opEvErr.message}` },
+        { status: 500 },
+      );
     }
     // Synchronously enqueue the operator dispatch work_item BEFORE returning.
-    // Enqueue failure -> 5xx so the caller sees the silent-failure error and
-    // can retry (rather than the legacy fire-and-forget swallowing it).
+    // Enqueue failure -> 5xx so the caller sees the silent-failure error.
     try {
       await retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
     } catch (e) {
@@ -590,8 +631,14 @@ async function advanceFromConfiguration(
         { status: 500 },
       );
     }
+    // Synthesise the response (silent-failure PR-3: see commitPerCreativeAdvance).
+    const opSynth = {
+      ...pipeline,
+      status: "ideation",
+      advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
+    };
     return NextResponse.json({
-      pipeline: opUpdated,
+      pipeline: opSynth,
       image_brief_id: pipeline.image_brief_id,
       video_brief_id: pipeline.video_brief_id,
     });
@@ -751,8 +798,11 @@ async function advanceFromConfiguration(
     videoBriefId = brief.id;
   }
 
-  // 5. Update the pipeline row. Re-assert status=configuration so a
-  //    concurrent second advance can't double-promote.
+  // 5. Update the pipeline row. Silent-failure PR-3 cutover: the route no
+  //    longer writes `status` -- the reducer derives it from the
+  //    `stage_advanced` event we emit below. We still write the brief ids +
+  //    `advanced_at.ideation`. CAS on the current status so a concurrent
+  //    second advance no-ops.
   const advancedAt =
     (pipeline.advanced_at &&
     typeof pipeline.advanced_at === "object" &&
@@ -761,20 +811,17 @@ async function advanceFromConfiguration(
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, ideation: now };
   const update: PipelineUpdate = {
-    status: "ideation",
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "configuration")
-    .select()
-    .single();
-  if (updateErr || !updated) {
-    // Compensating cleanup — both possible briefs.
+    .eq("status", "configuration");
+  if (updateErr) {
+    // Compensating cleanup -- both possible briefs.
     if (imageBriefId) {
       await supabase.from("briefs").delete().eq("id", imageBriefId);
     }
@@ -782,13 +829,12 @@ async function advanceFromConfiguration(
       await supabase.from("video_briefs").delete().eq("id", videoBriefId);
     }
     return NextResponse.json(
-      { error: updateErr?.message ?? "pipeline advance failed" },
+      { error: updateErr.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
-  // 6. Emit the timeline event. Failure is non-fatal — the row is the
-  //    primary artifact and the dashboard re-derives state from the row.
+  // 6. Emit the stage_advanced event -- the reducer's load-bearing input.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -800,24 +846,19 @@ async function advanceFromConfiguration(
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  // 7. Hand ideation off to the right executor -- exactly one of them, never
-  //    both (running both would render every concept twice and double the Kie
-  //    spend). Operator-driven pipelines never reach this point -- step 1b's
-  //    early return handles them -- but the symmetric branch stays so the
-  //    function reads top-to-bottom against the gate the kickoff route writes.
-  //    Regular pipelines: the deterministic /work/pipeline/ideation producer
-  //    (Ekko's image-ad-prompting skill is an interactive prompt-writer, not
-  //    an automated executor). Both paths emit the same task_* / cost_recorded
-  //    pipeline_events the StageGeneration UI + auto-advance trigger read.
-  //
-  //    The work_item enqueue is synchronous and must succeed before HTTP
-  //    returns (silent-failure foundational redesign): a route can no longer
-  //    claim "operator dispatched" / "worker ideation kicked" without a
-  //    backing row. Enqueue failure -> 5xx. The legacy fire-and-forget below
-  //    each enqueue stays so the worker still kicks; PR-3 removes it.
+  // 7. Hand ideation off to the worker queue. The work_item enqueue is the
+  //    only producer -- the auto-emit trigger writes the `task_queued` /
+  //    `operator_dispatched` events the panel + audit log read, and the
+  //    daemon/worker pulls the queued row to do the work. The legacy
+  //    fire-and-forget kicks are gone (PR-3 cutover). Operator-driven
+  //    pipelines never reach this point (step 1b's early return handles
+  //    them); the symmetric branch stays as defence-in-depth.
   if (isOperatorDriven(pipeline.config_draft)) {
     try {
       await retaskOperator(supabase, pipeline.id, "ideation", "config_approved");
@@ -834,7 +875,7 @@ async function advanceFromConfiguration(
         pipelineId: pipeline.id,
         payload: { stage: "ideation" },
         idempotencyKey: `wi:${pipeline.id}:ideation`,
-        createdBy: "api/pipelines/advance/fireWorkerIdeation",
+        createdBy: "api/pipelines/advance/worker_ideation",
       });
     } catch (e) {
       return NextResponse.json(
@@ -842,15 +883,19 @@ async function advanceFromConfiguration(
         { status: 500 },
       );
     }
-    void fireWorkerIdeation(pipeline.id).catch((e) => {
-      console.warn(
-        `[pipelines.advance] worker ideation kick failed for ${pipeline.id}: ${String(e)}`,
-      );
-    });
   }
 
+  // 8. Synthesise the response (silent-failure PR-3: see
+  //    commitPerCreativeAdvance). The reducer derives the same status on read.
+  const synthesised = {
+    ...pipeline,
+    status: "ideation",
+    image_brief_id: imageBriefId,
+    video_brief_id: videoBriefId,
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
   return NextResponse.json({
-    pipeline: updated,
+    pipeline: synthesised,
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
   });
@@ -894,8 +939,12 @@ async function advanceFromIdeation(
     );
   }
 
-  // 2. Stamp the advance timestamp and update the row. Re-assert
-  //    status=ideation so a concurrent second advance can't double-promote.
+  // 2. Stamp the advance timestamp. Silent-failure PR-3 cutover: the reducer
+  //    + auto-emit trigger own status transitions; we still write
+  //    `advanced_at.review` as a per-stage timestamp. ideation -> review is a
+  //    pure operator gate (the picks themselves are the work, not a
+  //    work_item dispatch), so we don't enqueue here -- the next stage's
+  //    transition (review/decision) is what kicks generation.
   const now = new Date().toISOString();
   const advancedAt =
     (pipeline.advanced_at &&
@@ -905,24 +954,25 @@ async function advanceFromIdeation(
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, review: now };
   const update: PipelineUpdate = {
-    status: "review",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "ideation")
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .eq("status", "ideation");
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "pipeline advance failed" },
+      { error: updateErr.message ?? "pipeline advance failed" },
       { status: 500 },
     );
   }
 
-  // 3. Emit the timeline event. Failure is non-fatal.
+  // 3. ideation -> review has no dispatch -- it is a manual gate. To keep the
+  //    timeline visible (no work_item to fire the auto-emit trigger), we
+  //    still emit the `stage_advanced` event directly. This is the one
+  //    transition that has no upstream work_item; the trigger handles every
+  //    other stage.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -934,10 +984,20 @@ async function advanceFromIdeation(
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.advance] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // 4. Synthesise the response (silent-failure PR-3: see
+  //    commitPerCreativeAdvance). The reducer derives the same status.
+  const synthesised = {
+    ...pipeline,
+    status: "review",
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  return NextResponse.json({ pipeline: synthesised });
 }
 
 /**
@@ -959,18 +1019,17 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
 }
 
 /**
- * Re-task the operator for the next stage and record the handoff on the
- * timeline. The work_item enqueue is synchronous and must succeed before the
- * function returns (silent-failure foundational redesign): a route can no
- * longer claim "operator dispatched" without a backing row + the auto-emit
- * trigger's `pipeline_events` row. Enqueue failure throws; the caller turns it
- * into a 5xx. PR-3 removes the legacy `operator_dispatched` event insert and
- * the fire-and-forget `dispatchOperator` once the daemon owns the queue.
+ * Re-task the operator for the next stage. Silent-failure PR-3 cutover: this
+ * is now a pure work_item enqueue -- the auto-emit trigger writes the
+ * `operator_dispatched` `pipeline_events` row from the queued work_item, and
+ * the operator-daemon claims the row and docker-execs into the operator
+ * container. The legacy fire-and-forget `dispatchOperator` and the explicit
+ * `operator_dispatched` event insert are gone (the route no longer races the
+ * trigger nor the daemon).
  *
  * Idempotency lives on the operator side -- it reads the live pipeline state
- * and only does the work that's outstanding for the stage -- so a duplicate
- * dispatch (e.g. a double-clicked Continue) is safe. The legacy event insert
- * and the worker dispatch stay best-effort below the enqueue.
+ * and only does the work that's outstanding for the stage -- and on the
+ * queue's idempotency_key (a duplicate dispatch on the same stage no-ops).
  */
 async function retaskOperator(
   supabase: SupabaseClient,
@@ -978,11 +1037,8 @@ async function retaskOperator(
   stage: "ideation" | "generation",
   reason: string,
 ): Promise<void> {
+  void supabase; // kept for signature stability; PR-4 may need it again
   const instruction = operatorInstruction(stage, pipelineId);
-
-  // Synchronously enqueue the work_item BEFORE the legacy fire-and-forget so
-  // the queue row exists by the time this function returns. Enqueue throws ->
-  // the caller returns 5xx (NEVER swallow the enqueue error).
   await enqueueWorkItem({
     kind: "operator_dispatch",
     pipelineId,
@@ -990,52 +1046,9 @@ async function retaskOperator(
     idempotencyKey: `op-disp:${pipelineId}:${stage}:${reason}`,
     createdBy: "api/pipelines/advance/retaskOperator",
   });
-
-  const event: PipelineEventInsert = {
-    pipeline_id: pipelineId,
-    kind: "operator_dispatched",
-    stage,
-    payload: { instruction, reason } as Json,
-  };
-  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
-  if (evErr) {
-    console.warn(`[pipelines.advance] operator_dispatched event insert failed: ${evErr.message}`);
-  }
-  try {
-    await dispatchOperator(pipelineId, instruction);
-  } catch (e) {
-    console.warn(`[pipelines.advance] operator dispatch failed for ${pipelineId}: ${String(e)}`);
-  }
 }
 
-/**
- * Fire-and-forget POST to the worker's image-generation ideation endpoint
- * (`/work/pipeline/ideation`). Wrapped in its own function so the call site
- * can `void fireWorkerIdeation(...).catch(...)` cleanly without leaking the
- * promise chain into the response path.
- *
- * The worker reads everything it needs (briefs, picks, format) from the
- * pipeline row keyed by `pipeline_id`, so the body is just the id. Skip when
- * WORKER_URL or WORKER_SHARED_SECRET are unset — the API route still
- * succeeds and unit tests don't need to stub the worker. A 404 is treated
- * as "worker not configured / route not deployed" and swallowed silently;
- * anything else is logged.
- */
-async function fireWorkerIdeation(pipelineId: string): Promise<void> {
-  const base = process.env.WORKER_URL?.replace(/\/$/, "");
-  const secret = process.env.WORKER_SHARED_SECRET;
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/ideation`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ pipeline_id: pipelineId }),
-    cache: "no-store",
-  });
-  if (!res.ok && res.status !== 404) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/ideation -> ${res.status}: ${text.slice(0, 200)}`);
-  }
-}
+// Silent-failure PR-3 cutover: the legacy `fireWorkerIdeation` fire-and-forget
+// helper was removed -- the operator-daemon and the worker poll the
+// work_item queue for the same effect, and the route no longer needs a
+// direct HTTP kick. PR-4 deletes the worker route it called.

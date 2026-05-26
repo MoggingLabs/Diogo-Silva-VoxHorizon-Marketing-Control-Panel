@@ -20,6 +20,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { EkkoDraftModal, type ProposedConfig } from "./EkkoDraftModal";
 import { OperatorBriefReview } from "./OperatorBriefReview";
 import { StageShell } from "./StageShell";
+import { WorkItemPanel } from "./WorkItemPanel";
 import { BriefPayload, type BriefPayloadT } from "@/lib/briefs";
 import { activeTracksLocal } from "@/lib/pipeline/transitions";
 import type { Pipeline, PipelineFormat } from "@/lib/pipeline/types";
@@ -373,11 +374,13 @@ function useAutosave(pipelineId: string) {
 /**
  * Configuration-stage dispatcher.
  *
- * Operator-driven pipelines DON'T use the manual brief form — the operator
+ * Operator-driven pipelines DON'T use the manual brief form -- the operator
  * authors the brief and the manager reviews + approves it:
- *   - brief authored (`image_brief_id` set) → render `<OperatorBriefReview />`;
- *   - operator still drafting (`image_brief_id` null) → a waiting state (live
- *     progress shows in the OperatorNarration sidebar).
+ *   - brief authored (`image_brief_id` set) -> render `<OperatorBriefReview />`;
+ *   - operator still drafting (`image_brief_id` null) -> the canonical
+ *     `<WorkItemPanel />` (silent-failure PR-3 cutover): the dispatch state
+ *     is the single source of truth, with live status, retry chain, and
+ *     Redispatch on failure.
  * Everything else falls through to the existing manual form unchanged, so the
  * deterministic flow does not regress.
  */
@@ -389,37 +392,27 @@ export function StageConfiguration(props: StageConfigurationProps) {
     if (pipeline.image_brief_id) {
       return <OperatorBriefReview pipeline={pipeline} />;
     }
-    return <OperatorDraftingWaiting />;
+    return <OperatorDraftingWaiting pipelineId={pipeline.id} />;
   }
 
   return <ManualConfiguration {...props} />;
 }
 
 /**
- * Waiting state shown while an operator-driven pipeline's brief is still being
- * authored. Live progress streams into the OperatorNarration sidebar; this
- * panel just reassures the manager there's nothing to do yet.
+ * Operator-driven configuration stage's waiting state (silent-failure PR-3
+ * cutover). The legacy locked "Hang tight" block is gone -- the
+ * <WorkItemPanel /> is the canonical source of truth: it shows the live
+ * dispatcher status, daemon health, retry chain, and a Redispatch button on
+ * failure so a stuck operator dispatch can be recovered without restarting.
  */
-function OperatorDraftingWaiting() {
+function OperatorDraftingWaiting({ pipelineId }: { pipelineId: string }) {
   return (
     <StageShell
-      title="The operator is drafting the brief…"
-      subtitle="Hang tight — the operator is authoring the image brief. Live progress shows in the Operator panel."
+      title="Operator is preparing the brief"
+      subtitle="Live status shown below. Use Redispatch on failure."
       canContinue={false}
-      continueLabel="Waiting for the brief…"
-      body={
-        <div
-          role="status"
-          aria-live="polite"
-          className="flex flex-col items-center justify-center gap-3 rounded-md border border-dashed bg-muted/30 px-6 py-12 text-center"
-        >
-          <Loader2 aria-hidden="true" className="h-6 w-6 animate-spin text-muted-foreground" />
-          <p className="text-sm text-muted-foreground">
-            The operator hasn&apos;t finished the brief yet. You&apos;ll be able to review and
-            approve it here once it&apos;s ready.
-          </p>
-        </div>
-      }
+      continueLabel="Waiting on operator"
+      body={<WorkItemPanel pipelineId={pipelineId} />}
     />
   );
 }

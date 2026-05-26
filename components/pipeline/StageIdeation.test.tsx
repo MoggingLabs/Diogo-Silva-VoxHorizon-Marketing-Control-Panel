@@ -62,6 +62,21 @@ vi.mock("@/lib/realtime/client-data", () => ({
   signStoragePath: vi.fn(async () => "https://x.example/x"),
 }));
 
+// Silent-failure PR-3: the WorkItemPanelSlot is rendered as a subsection. The
+// panel's own internals (loading, error, retry chain) are covered by
+// WorkItemPanel.test.tsx; here we stub the slot so it lights up when the test
+// flips `activeWorkItem` to non-null and stays hidden otherwise.
+let slotHasActiveWorkItem = false;
+vi.mock("./WorkItemPanel", () => ({
+  WorkItemPanelSlot: ({ pipelineId }: { pipelineId: string }) =>
+    slotHasActiveWorkItem ? (
+      <div data-testid="work-item-panel-slot" data-pipeline={pipelineId} />
+    ) : null,
+  WorkItemPanel: ({ pipelineId }: { pipelineId: string }) => (
+    <div data-testid="work-item-panel" data-pipeline={pipelineId} />
+  ),
+}));
+
 import { StageIdeation } from "./StageIdeation";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -94,6 +109,7 @@ beforeEach(() => {
   supabaseFromMock.video_creatives = { data: [], error: null };
   delete supabaseFromMock.creatives.throws;
   delete supabaseFromMock.video_creatives.throws;
+  slotHasActiveWorkItem = false;
 });
 
 /**
@@ -959,5 +975,24 @@ describe("StageIdeation", () => {
       deleteHandler({ old: { id: "v1" } });
     });
     expect(screen.queryByText(/Concept v1/)).not.toBeInTheDocument();
+  });
+});
+
+describe("StageIdeation - work item panel slot (silent-failure PR-3)", () => {
+  it("hides the WorkItemPanelSlot when no active work_item is in flight", () => {
+    slotHasActiveWorkItem = false;
+    render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
+    // The legacy "Hang tight" copy is gone -- the slot is the canonical
+    // dispatcher surface and stays hidden when the queue is quiet.
+    expect(screen.queryByText(/hang tight/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+  });
+
+  it("mounts the WorkItemPanelSlot when an active work_item is in flight", () => {
+    slotHasActiveWorkItem = true;
+    render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
+    const slot = screen.getByTestId("work-item-panel-slot");
+    expect(slot).toBeInTheDocument();
+    expect(slot.getAttribute("data-pipeline")).toBe("p1");
   });
 });

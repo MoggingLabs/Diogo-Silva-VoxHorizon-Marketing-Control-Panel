@@ -1152,9 +1152,15 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
     Idempotent + safe: when Supabase isn't configured (local boot / tests) or
     when scheduling is disabled via ``SCHEDULER_ENABLED=false``, this logs and
     returns an empty :class:`Scheduler` (``task_count == 0``) -- the app boots
-    normally with no loops. Otherwise it spawns one supervised loop per job:
-    the dispatch watchdog, the observability watchdogs, and (no-op until targets
-    exist) the daily GHL reconciliation.
+    normally with no loops. Otherwise it spawns one supervised loop per job.
+
+    Silent-failure PR-3 cutover: the per-domain ``dispatch_watchdog`` and
+    ``outbox_relay`` loops were retired -- the unified ``work_item_watchdog``
+    owns both responsibilities now (any stuck dispatch is a stuck work_item;
+    any failed outbox row rides the same retry chain). PR-4 deletes the
+    underlying ``run_dispatch_watchdog_once`` and ``run_outbox_relay_once``
+    functions; for now they stay exported so any external caller keeps
+    compiling.
 
     Must be called from inside a running event loop (the FastAPI lifespan).
     """
@@ -1172,15 +1178,11 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
 
     loop = asyncio.get_event_loop()
     tasks: list[asyncio.Task[Any]] = [
-        loop.create_task(
-            _interval_loop(
-                "dispatch_watchdog",
-                settings.scheduler_watchdog_interval_s,
-                lambda: run_dispatch_watchdog_once(settings),
-                initial_delay_s=5.0,
-            ),
-            name="scheduler:dispatch_watchdog",
-        ),
+        # Silent-failure PR-3 cutover: `dispatch_watchdog` + `outbox_relay`
+        # were retired -- the unified `work_item_watchdog` covers BOTH
+        # responsibilities now (stuck dispatches AND outbox-style retries
+        # ride the same kind enum + the same heartbeat-stale rotation).
+        # The functions are still exported so PR-4 can delete them cleanly.
         loop.create_task(
             _interval_loop(
                 "observability",
@@ -1208,18 +1210,6 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:kie_reconcile",
         ),
-        loop.create_task(
-            _interval_loop(
-                "outbox_relay",
-                settings.scheduler_outbox_interval_s,
-                lambda: run_outbox_relay_once(settings),
-                initial_delay_s=10.0,
-            ),
-            name="scheduler:outbox_relay",
-        ),
-        # Silent-failure PR-1: runs alongside the legacy watchdogs above. No
-        # behavior change until consumers/routes enqueue real work_item rows
-        # in PR-2; on an empty queue this is a logged no-op.
         loop.create_task(
             _interval_loop(
                 "work_item_watchdog",

@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { CostBreakdownTable } from "@/components/pipeline/CostBreakdownTable";
 import { StageShell } from "@/components/pipeline/StageShell";
+import { WorkItemPanelSlot } from "@/components/pipeline/WorkItemPanel";
 import { submitReviewDecision } from "@/lib/pipeline/client";
 import { activeTracks, type PipelineTrack } from "@/lib/pipeline/tracks";
 import type { Pipeline } from "@/lib/pipeline/types";
@@ -156,6 +157,13 @@ export function StageReview({ pipeline }: StageReviewProps) {
               router.refresh();
             }}
           />
+          {/* Silent-failure PR-3: live dispatcher status (auto-hides when
+              nothing is queued). The review stage is mostly an approval gate
+              over already-rendered picks, but an operator dispatch can be
+              in-flight (e.g. waiting for the operator to re-task between
+              ideation and review); this seam surfaces it without altering
+              the main UI. */}
+          <WorkItemPanelSlot pipelineId={pipeline.id} />
         </div>
       }
     />

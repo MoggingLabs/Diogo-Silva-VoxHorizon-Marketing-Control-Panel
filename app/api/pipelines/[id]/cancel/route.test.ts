@@ -150,7 +150,9 @@ describe("POST /api/pipelines/:id/cancel", () => {
         select: {
           single: { data: { id, status: "configuration", advanced_at: {} }, error: null },
         },
-        update: { single: { data: null, error: { message: "race" } } },
+        // Silent-failure PR-3: the route awaits the chain directly (no
+        // `.single()`), so the error rides the base-result on update.
+        update: { data: null, error: { message: "race" } },
       },
     });
     const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
@@ -159,23 +161,26 @@ describe("POST /api/pipelines/:id/cancel", () => {
     expect(res.status).toBe(500);
   });
 
-  it("warns but returns 200 when event insert fails", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("500 when the pipeline_cancelled event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: {
           single: { data: { id, status: "configuration", advanced_at: {} }, error: null },
         },
-        update: { single: { data: { id, status: "cancelled" }, error: null } },
+        update: { data: { id, status: "cancelled" }, error: null },
       },
       pipeline_events: { insert: { data: null, error: { message: "events down" } } },
     });
     const res = await POST(req(`http://localhost/api/pipelines/${id}/cancel`, { method: "POST" }), {
       params,
     });
-    expect(res.status).toBe(200);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
-    warn.mockRestore();
+    // Silent-failure PR-3 cutover: the pipeline_cancelled event is the
+    // load-bearing input to the reducer AND the cancel-propagate trigger;
+    // a failed insert no longer console.warns and returns 200 -- it
+    // surfaces as 5xx so the operator can retry.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("events down");
   });
 
   // ----------------------------------------------------------------------

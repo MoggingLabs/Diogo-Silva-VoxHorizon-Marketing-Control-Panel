@@ -72,20 +72,37 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
+  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  // reducer derives it from the `stage_advanced` event below. Keep
+  // `advanced_at.done` as a per-stage timestamp.
   const update: PipelineUpdate = {
-    status: "done",
     advanced_at: { ...advancedAt, done: now } as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", id)
-    .eq("status", "monitor")
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .eq("status", "monitor");
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "monitor decision update failed" },
+      { error: updateErr.message ?? "monitor decision update failed" },
+      { status: 500 },
+    );
+  }
+
+  // Emit the canonical stage_advanced event (the reducer's load-bearing
+  // input) AND the monitor_decision audit event. Both are no longer
+  // swallowed -- silent-failure principle.
+  const stageEvent: PipelineEventInsert = {
+    pipeline_id: id,
+    kind: "stage_advanced",
+    stage: "done",
+    payload: { from: "monitor", decision } as Json,
+  };
+  const { error: stageEvErr } = await supabase.from("pipeline_events").insert(stageEvent);
+  if (stageEvErr) {
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${stageEvErr.message}` },
       { status: 500 },
     );
   }
@@ -98,8 +115,19 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.monitor.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `monitor_decision event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
+
+  // Synthesise the response (silent-failure PR-3: the reducer derives
+  // `done` from the stage_advanced event we just emitted).
+  const updated = {
+    ...pipeline,
+    status: "done",
+    advanced_at: { ...advancedAt, done: now } as unknown as Json,
+  };
 
   // The monitor → next-brief loop (P5.5, #368). A `scale` verdict means this
   // run produced a winner worth expanding, so spawn a NEW `configuration`

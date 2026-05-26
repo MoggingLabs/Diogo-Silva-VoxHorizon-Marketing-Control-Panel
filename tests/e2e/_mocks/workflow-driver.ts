@@ -120,47 +120,32 @@ export async function seedFinalCreatives(args: {
  * `outcome: "error"` for the NEGATIVE no-stall case (all task_error ⇒ the
  * pipeline must STAY in generation).
  *
- * Silent-failure PR-2b: the review/decision approve route now dual-writes a
- * `worker_generation` work_item, whose auto-emit trigger inserts an EXTRA
- * `task_queued` `pipeline_events` row keyed to `stage='generation'`. Closing
- * the work_item to `completed` here so the trigger fires a matching `task_done`
- * keeps the migration-0024 closure count balanced (v_done + v_error >=
- * greatest(v_queued, v_running)) and the auto-advance from generation -> qa
- * stays green. PR-3 collapses the producer + dual-write into a single source.
+ * Silent-failure PR-3 cutover: the work_item is the single source of truth.
+ * The review/decision approve route enqueues a `worker_generation` work_item
+ * which fires the auto-emit trigger's matching `task_queued, stage=generation`
+ * event. The mock no longer writes pipeline_events directly -- we only flip
+ * the work_item to `completed` / `failed` and let the trigger emit the
+ * `task_done` / `task_error` event. The trigger emits ONE event per status
+ * transition, so the migration-0024 closure count (v_done + v_error >=
+ * greatest(v_queued, v_running)) is met by the single work_item lifecycle.
+ *
+ * `taskCount` is retained on the signature so the spec stays unchanged; under
+ * the unified queue, the lifecycle is per-work_item, not per-task, so a
+ * second work_item per pipeline would simply ride the same enqueue path. The
+ * tests that need multiple "tasks" enqueue multiple work_items upstream.
  */
 export async function emitGenerationClosure(args: {
   pipelineId: string;
   taskCount: number;
   outcome: "done" | "error";
 }): Promise<void> {
+  void args.taskCount; // retained for signature stability; see docstring
   const admin = getAdminClient();
-  const kinds: Array<"task_queued" | "task_running" | "task_done" | "task_error"> = [];
-  for (let i = 0; i < args.taskCount; i += 1) {
-    kinds.push("task_queued");
-    kinds.push("task_running");
-    kinds.push(args.outcome === "done" ? "task_done" : "task_error");
-  }
-  // Serialize the inserts so the statement-stable trigger sees a stable order
-  // and only fires its flip on the final closing event.
-  for (const kind of kinds) {
-    const { error } = await admin.from("pipeline_events").insert({
-      pipeline_id: args.pipelineId,
-      kind,
-      stage: "generation",
-      payload: { kind: "image", ratio: "1x1" } as unknown as Json,
-    });
-    if (error) {
-      throw new Error(`emitGenerationClosure (${kind}) failed: ${error.message}`);
-    }
-  }
-
-  // Silent-failure PR-2b dual-write balancing. The route enqueued a
-  // `worker_generation` work_item (kind, status='queued'); the auto-emit
-  // trigger has already inserted the matching `task_queued, stage=generation`
-  // event. Flip the row to 'completed' (happy) or 'failed' (negative) so the
-  // trigger fires a corresponding `task_done` / `task_error` event and the
-  // migration-0024 closure count stays balanced. Skip silently when no row
-  // exists (e.g. unit tests that bypass the route).
+  // Flip the dual-written work_item to a terminal status. The auto-emit
+  // trigger fires the matching task_done / task_error pipeline_events row
+  // keyed to `stage='generation'`, which the migration-0024 trigger counts.
+  // Skip silently when no row exists (e.g. unit tests that bypass the
+  // approval route).
   const finalStatus = args.outcome === "done" ? "completed" : "failed";
   const completedAt = new Date().toISOString();
   const update: {

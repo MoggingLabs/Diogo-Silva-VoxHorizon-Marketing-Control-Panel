@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { StageShell } from "@/components/pipeline/StageShell";
+import { WorkItemPanelSlot } from "@/components/pipeline/WorkItemPanel";
 import { usePipelineEvents } from "@/hooks/usePipelineEvents";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
 import {
@@ -115,6 +116,10 @@ export function StageGeneration({ pipeline, initialEvents }: StageGenerationProp
               ))}
             </ul>
           )}
+          {/* Silent-failure PR-3: live dispatcher status when an operator or
+              worker work_item is in flight; auto-hides when the queue is
+              quiet so the task list stays the primary surface. */}
+          <WorkItemPanelSlot pipelineId={pipeline.id} />
         </div>
       }
       // Custom footer message — `StageShell` always renders a CTA, so

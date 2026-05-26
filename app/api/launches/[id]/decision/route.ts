@@ -77,13 +77,22 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: updateErr?.message ?? "update failed" }, { status: 500 });
   }
 
+  // Silent-failure PR-3 cutover: surface the audit-trail write failure
+  // instead of letting it pass silently. The legacy unchecked await let an
+  // inserted-but-not-recorded decision diverge from the audit log.
   const evt: EventInsert = {
     kind: "launch_package_decided",
     ref_table: "launch_packages",
     ref_id: launch.id,
     payload: { decision, notes: notes ?? null } as Json,
   };
-  await supabase.from("events").insert(evt);
+  const { error: evErr } = await supabase.from("events").insert(evt);
+  if (evErr) {
+    return NextResponse.json(
+      { error: `launch_package_decided event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
+  }
 
   return NextResponse.json({ launch });
 }

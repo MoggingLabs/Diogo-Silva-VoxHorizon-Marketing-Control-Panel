@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { estimatePipelineCost } from "@/lib/cost-estimator";
-import { dispatchOperator, isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
 import {
   ReviewDecisionInput,
   type PipelineEventInsert,
@@ -90,38 +90,50 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     decided_at: now,
   };
 
-  // 3. Reject branch — terminal, no cost snapshot or worker kick.
+  // 3. Reject branch -- terminal, no cost snapshot or worker kick.
+  //    Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  //    `pipeline_cancelled` event drives the reducer (cancelled is the
+  //    terminal escape in `compute_pipeline_status`) AND fires the
+  //    cancel-propagate trigger from migration 0050 so any in-flight
+  //    operator dispatch is cancelled alongside.
   if (decision === "rejected") {
     const update: PipelineUpdate = {
-      status: "cancelled",
       approval: approval as unknown as Json,
     };
-    const { data: updated, error: updateErr } = await supabase
+    const { error: updateErr } = await supabase
       .from("pipelines")
       .update(update)
       .eq("id", pipeline.id)
-      .eq("status", "review")
-      .select()
-      .single();
-    if (updateErr || !updated) {
+      .eq("status", "review");
+    if (updateErr) {
       return NextResponse.json(
-        { error: updateErr?.message ?? "reject update failed" },
+        { error: updateErr.message ?? "reject update failed" },
         { status: 500 },
       );
     }
 
     const event: PipelineEventInsert = {
       pipeline_id: pipeline.id,
-      kind: "stage_advanced",
+      kind: "pipeline_cancelled",
       stage: "cancelled",
-      payload: { decision, notes: notes ?? null } as Json,
+      payload: { decision, notes: notes ?? null, reason: "review_rejected" } as Json,
     };
     const { error: evErr } = await supabase.from("pipeline_events").insert(event);
     if (evErr) {
-      console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
+      return NextResponse.json(
+        { error: `pipeline_cancelled event insert failed: ${evErr.message}` },
+        { status: 500 },
+      );
     }
 
-    return NextResponse.json({ pipeline: updated });
+    // Synthesise the response (the reducer derives `cancelled` from the
+    // pipeline_cancelled event we just emitted).
+    const synthesised = {
+      ...pipeline,
+      status: "cancelled",
+      approval: approval as unknown as Json,
+    };
+    return NextResponse.json({ pipeline: synthesised });
   }
 
   // 4. Approve / approve_with_changes — compute cost estimate from the live
@@ -146,28 +158,29 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, generation: now };
 
+  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  // reducer derives it from the `stage_advanced` event we emit below. The
+  // other columns (approval snapshot, cost_estimate, advanced_at.generation)
+  // remain the route's job.
   const update: PipelineUpdate = {
-    status: "generation",
     approval: approval as unknown as Json,
     cost_estimate: estimate as unknown as Json,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "review")
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .eq("status", "review");
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "approve update failed" },
+      { error: updateErr.message ?? "approve update failed" },
       { status: 500 },
     );
   }
 
-  // Emit the timeline event. Failure is non-fatal — the row is the
-  // primary artifact and the dashboard re-derives state from it.
+  // Emit the stage_advanced event -- the reducer's load-bearing input. No
+  // longer swallowed: a failed insert means the derived status stays stale.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -176,17 +189,17 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  // Hand generation off to exactly one executor -- never both, or every final
-  // would render twice and double the Kie spend. This approval IS the
-  // generation gate; the per-tool Ekko ApprovalModal does not gate it.
-  //
-  // The work_item enqueue is synchronous and must succeed before HTTP returns
-  // (silent-failure foundational redesign): a route can no longer claim
-  // "operator dispatched" / "worker generation kicked" without a backing row.
-  // Enqueue failure -> 5xx. PR-3 removes the legacy fire-and-forgets.
+  // Hand generation off to exactly one executor via the work_item queue.
+  // The auto-emit trigger writes the `operator_dispatched` / `task_queued`
+  // events the panel reads; the daemon/worker pulls the queued row. The
+  // legacy fire-and-forget kicks and the explicit `operator_dispatched`
+  // event insert are gone (PR-3 cutover).
   if (isOperatorDriven(pipeline.config_draft)) {
     // Operator-driven: the Hermes operator renders the finals for the picked
     // concepts (its render call is the per-batch spend gate).
@@ -205,27 +218,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         { status: 500 },
       );
     }
-    const dispatchEvent: PipelineEventInsert = {
-      pipeline_id: pipeline.id,
-      kind: "operator_dispatched",
-      stage: "generation",
-      payload: { instruction, reason: "review_approved" } as Json,
-    };
-    const { error: dEvErr } = await supabase.from("pipeline_events").insert(dispatchEvent);
-    if (dEvErr) {
-      console.warn(
-        `[pipelines.review.decision] operator_dispatched event insert failed: ${dEvErr.message}`,
-      );
-    }
-    void dispatchOperator(pipeline.id, instruction).catch((e) => {
-      console.warn(
-        `[pipelines.review.decision] operator dispatch failed for ${pipeline.id}: ${String(e)}`,
-      );
-    });
   } else {
-    // Regular: the deterministic /work/pipeline/generation producer renders the
-    // final 1:1 + 9:16 assets for every Review pick. The worker emits the
-    // task_* + cost_recorded pipeline_events the StageGeneration UI reads.
+    // Regular: the deterministic worker renders the final 1:1 + 9:16 assets
+    // for every Review pick. The auto-emit trigger writes the task_queued /
+    // task_done events the StageGeneration UI reads.
     try {
       await enqueueWorkItem({
         kind: "worker_generation",
@@ -240,39 +236,20 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         { status: 500 },
       );
     }
-    void fireWorkerGeneration(pipeline.id).catch((e) => {
-      console.warn(
-        `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,
-      );
-    });
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // Synthesise the response (silent-failure PR-3: the reducer derives the
+  // same on read).
+  const synthesised = {
+    ...pipeline,
+    status: "generation",
+    approval: approval as unknown as Json,
+    cost_estimate: estimate as unknown as Json,
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  return NextResponse.json({ pipeline: synthesised });
 }
 
-/**
- * Fire-and-forget POST to the worker's image-generation endpoint
- * (`/work/pipeline/generation`). Mirrors the advance route's
- * `fireWorkerIdeation` so the call shape is consistent: the worker reads the
- * picks + format off the pipeline row keyed by `pipeline_id`, so the body is
- * just the id. If the worker isn't configured (WORKER_URL /
- * WORKER_SHARED_SECRET unset) we skip, and a 404 is swallowed silently.
- */
-async function fireWorkerGeneration(pipelineId: string): Promise<void> {
-  const base = process.env.WORKER_URL?.replace(/\/$/, "");
-  const secret = process.env.WORKER_SHARED_SECRET;
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/generation`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ pipeline_id: pipelineId }),
-    cache: "no-store",
-  });
-  if (!res.ok && res.status !== 404) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/generation -> ${res.status}: ${text.slice(0, 200)}`);
-  }
-}
+// Silent-failure PR-3 cutover: the legacy `fireWorkerGeneration` fire-and-forget
+// helper was removed -- the worker polls the work_item queue (kind =
+// worker_generation) instead of accepting a direct HTTP kick.

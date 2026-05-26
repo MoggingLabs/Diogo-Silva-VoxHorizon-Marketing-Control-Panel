@@ -1,10 +1,12 @@
 /**
- * Tests for `app/api/pipelines/operator/route.ts` — the operator-driven
+ * Tests for `app/api/pipelines/operator/route.ts` -- the operator-driven
  * kickoff. The route creates a pipeline, stores the manager's free-text
- * instruction in config_draft, emits the bootstrap + handoff events, and
- * fires the operator dispatch. We mock the dispatch module so no real worker
- * fetch happens and we can assert the operator was kicked with the right
- * instruction.
+ * instruction in config_draft, and synchronously enqueues an
+ * operator_dispatch work_item. Silent-failure PR-3 cutover: the legacy
+ * fire-and-forget `dispatchOperator` is gone (the operator-daemon claims the
+ * queued work_item and docker-execs into the operator container); the
+ * `stage_advanced` + `operator_dispatched` event inserts are gone (the
+ * auto-emit trigger on the work_item enqueue writes them from the DB).
  */
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -21,16 +23,6 @@ vi.mock("server-only", () => ({}));
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
-
-// `vi.hoisted` so the spy exists when the hoisted `vi.mock` factory runs.
-const { dispatchOperator } = vi.hoisted(() => ({
-  dispatchOperator: vi.fn<(id: string, instruction: string) => Promise<void>>(async () => {}),
-}));
-vi.mock("@/lib/operator/dispatch", async () => {
-  const actual =
-    await vi.importActual<typeof import("@/lib/operator/dispatch")>("@/lib/operator/dispatch");
-  return { ...actual, dispatchOperator };
-});
 
 const { enqueueWorkItem } = vi.hoisted(() => ({
   enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(
@@ -57,7 +49,6 @@ function flush() {
 
 beforeEach(() => {
   currentSupabase = mockClient();
-  dispatchOperator.mockClear();
   enqueueWorkItem.mockReset();
   enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
 });
@@ -67,12 +58,11 @@ afterEach(() => {
 });
 
 describe("POST /api/pipelines/operator", () => {
-  it("creates a pipeline, stores the instruction, and dispatches the operator (201)", async () => {
+  it("creates a pipeline, stores the instruction, and enqueues the operator dispatch (201)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         insert: { single: { data: { id: "p1", status: "configuration" }, error: null } },
       },
-      pipeline_events: { insert: { data: null, error: null } },
     });
 
     const res = await POST(req({ instruction: "4 roofing ads, Austin, $99 inspection" }));
@@ -93,12 +83,14 @@ describe("POST /api/pipelines/operator", () => {
       "roofing",
     );
 
-    // The operator was kicked with a configuration instruction containing the brief.
+    // Silent-failure PR-3: the operator was enqueued (not fire-and-forget).
+    // The legacy `dispatchOperator` call is gone -- the operator-daemon
+    // claims the queued work_item.
     await flush();
-    expect(dispatchOperator).toHaveBeenCalledTimes(1);
-    const [pid, instruction] = dispatchOperator.mock.calls[0]!;
-    expect(pid).toBe("p1");
-    expect(instruction).toContain("roofing");
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect((opts.payload as Record<string, unknown>).instruction).toContain("roofing");
   });
 
   it("honours an explicit format_choice + client_id", async () => {
@@ -136,45 +128,14 @@ describe("POST /api/pipelines/operator", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 500 when the insert fails (no dispatch)", async () => {
+  it("returns 500 when the insert fails (no enqueue)", async () => {
     currentSupabase = mockClient({
       pipelines: { insert: { single: { data: null, error: { message: "dup key" } } } },
     });
     const res = await POST(req({ instruction: "x" }));
     expect(res.status).toBe(500);
     await flush();
-    expect(dispatchOperator).not.toHaveBeenCalled();
-  });
-
-  it("still 201 when the event insert fails (pipeline is primary)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipelines: {
-        insert: { single: { data: { id: "p4", status: "configuration" }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: { message: "events down" } } },
-    });
-    const res = await POST(req({ instruction: "x" }));
-    expect(res.status).toBe(201);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
-    await flush();
-    // Dispatch still fires — the pipeline exists.
-    expect(dispatchOperator).toHaveBeenCalledTimes(1);
-  });
-
-  it("does not fail the request when the dispatch rejects", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    dispatchOperator.mockRejectedValueOnce(new Error("worker 500"));
-    currentSupabase = mockClient({
-      pipelines: {
-        insert: { single: { data: { id: "p5", status: "configuration" }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-    });
-    const res = await POST(req({ instruction: "x" }));
-    expect(res.status).toBe(201);
-    await flush();
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("worker 500"));
+    expect(enqueueWorkItem).not.toHaveBeenCalled();
   });
 
   // -- silent-failure foundational redesign PR-2b: dual-write to work_item --
@@ -206,7 +167,6 @@ describe("POST /api/pipelines/operator", () => {
         insert: { single: { data: { id: "p-fail", status: "configuration" }, error: null } },
         delete: { data: null, error: null },
       },
-      pipeline_events: { insert: { data: null, error: null } },
     });
     const res = await POST(req({ instruction: "x" }));
     expect(res.status).toBe(500);
@@ -216,9 +176,6 @@ describe("POST /api/pipelines/operator", () => {
     // The pipeline row was rolled back via supabase.from('pipelines').delete().eq('id', ...).
     const fromCalls = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
     expect(fromCalls).toContain("pipelines");
-    // The legacy dispatch was NOT fired -- the route bailed before it.
-    await flush();
-    expect(dispatchOperator).not.toHaveBeenCalled();
   });
 
   it("treats a duplicate idempotency_key as 201 (the dedup branch)", async () => {
@@ -227,13 +184,11 @@ describe("POST /api/pipelines/operator", () => {
       pipelines: {
         insert: { single: { data: { id: "p-dup", status: "configuration" }, error: null } },
       },
-      pipeline_events: { insert: { data: null, error: null } },
     });
     const res = await POST(req({ instruction: "x" }));
     expect(res.status).toBe(201);
-    // Legacy fire still happens -- PR-3 removes it; until then, dual-write
-    // means BOTH the queue row and the worker kick.
-    await flush();
-    expect(dispatchOperator).toHaveBeenCalledTimes(1);
+    // Silent-failure PR-3: a duplicate idempotency_key short-circuits via
+    // the enqueue helper's dedup branch; the route still returns 201.
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
   });
 });

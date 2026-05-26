@@ -76,30 +76,32 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, cancelled: now };
 
+  // Silent-failure PR-3 cutover: stop writing `pipelines.status` -- the
+  // `pipeline_cancelled` event drives the reducer (cancelled is the terminal
+  // escape in `compute_pipeline_status`) AND fires the cancel-propagate
+  // trigger from migration 0050 so every in-flight work_item for the
+  // pipeline is cancelled in the same transaction.
   const update: PipelineUpdate = {
-    status: "cancelled",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
-  const { data: updated, error: updateErr } = await supabase
+  const { error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
     // Re-assert the previous status so a concurrent transition can't race.
-    .in("status", ["configuration", "ideation", "review", "generation"])
-    .select()
-    .single();
-  if (updateErr || !updated) {
+    .in("status", ["configuration", "ideation", "review", "generation"]);
+  if (updateErr) {
     return NextResponse.json(
-      { error: updateErr?.message ?? "cancel update failed" },
+      { error: updateErr.message ?? "cancel update failed" },
       { status: 500 },
     );
   }
 
-  // Emit the timeline event. Failure is non-fatal — the row is the
-  // primary artifact and the dashboard re-derives state from it.
+  // Emit the canonical cancel event. This is the load-bearing input to the
+  // cancel-propagate trigger AND the reducer; no longer swallowed.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
-    kind: "stage_advanced",
+    kind: "pipeline_cancelled",
     stage: "cancelled",
     payload: {
       reason: "operator_cancel",
@@ -108,16 +110,26 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.cancel] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `pipeline_cancelled event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   // Fan out kanban cancels for every still-active task on this
-  // pipeline. We don't block the response on this — a single sluggish
-  // worker shouldn't drag the cancel response time up — but we do
+  // pipeline. We don't block the response on this -- a single sluggish
+  // worker shouldn't drag the cancel response time up -- but we do
   // await the lookup so the result is deterministic for tests.
   await cancelActiveKanbanTasks(supabase, pipeline.id);
 
-  return NextResponse.json({ pipeline: updated });
+  // Synthesise the response (silent-failure PR-3: the reducer derives
+  // `cancelled` from the pipeline_cancelled event we just emitted).
+  const synthesised = {
+    ...pipeline,
+    status: "cancelled",
+    advanced_at: nextAdvancedAt as unknown as Json,
+  };
+  return NextResponse.json({ pipeline: synthesised });
 }
 
 /**

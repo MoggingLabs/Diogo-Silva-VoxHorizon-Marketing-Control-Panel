@@ -85,6 +85,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: updateErr?.message ?? "update failed" }, { status: 500 });
   }
 
+  // Silent-failure PR-3 cutover: the legacy console.warn swallow on this
+  // events insert is gone -- a failed audit-trail write surfaces as 5xx so
+  // the manager retries rather than the row+log silently diverging.
   const { error: evErr } = await supabase.from("events").insert({
     kind: "creative_decided",
     ref_table: "creatives",
@@ -92,8 +95,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     payload: { decision } as Json,
   });
   if (evErr) {
-    // Non-fatal: the creative decision is the primary effect. Log + continue.
-    console.warn(`[creatives.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `creative_decided event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({ creative });

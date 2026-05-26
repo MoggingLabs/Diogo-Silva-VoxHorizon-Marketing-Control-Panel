@@ -36,6 +36,18 @@ vi.mock("@/lib/realtime/client-data", () => ({
   signStoragePath: () => signStoragePath(),
 }));
 
+// Silent-failure PR-3: the WorkItemPanelSlot auto-hides when nothing is queued.
+let slotHasActiveWorkItem = false;
+vi.mock("./WorkItemPanel", () => ({
+  WorkItemPanelSlot: ({ pipelineId }: { pipelineId: string }) =>
+    slotHasActiveWorkItem ? (
+      <div data-testid="work-item-panel-slot" data-pipeline={pipelineId} />
+    ) : null,
+  WorkItemPanel: ({ pipelineId }: { pipelineId: string }) => (
+    <div data-testid="work-item-panel" data-pipeline={pipelineId} />
+  ),
+}));
+
 import { StageGeneration } from "./StageGeneration";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -75,6 +87,7 @@ function makeEvent(over: Partial<PipelineEvent> = {}): PipelineEvent {
 beforeEach(() => {
   routerRefresh.mockReset();
   signStoragePath.mockClear();
+  slotHasActiveWorkItem = false;
 });
 
 afterEach(() => {
@@ -307,7 +320,24 @@ describe("StageGeneration", () => {
       }),
     ];
     render(<StageGeneration pipeline={makePipeline()} initialEvents={events} />);
-    // No file_path → no signing attempt.
+    // No file_path -> no signing attempt.
     expect(signStoragePath).not.toHaveBeenCalled();
+  });
+});
+
+describe("StageGeneration - work item panel slot (silent-failure PR-3)", () => {
+  it("hides the WorkItemPanelSlot when no active work_item is in flight", () => {
+    slotHasActiveWorkItem = false;
+    render(<StageGeneration pipeline={makePipeline()} initialEvents={[]} />);
+    expect(screen.queryByText(/hang tight/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+  });
+
+  it("mounts the WorkItemPanelSlot when an active work_item is in flight", () => {
+    slotHasActiveWorkItem = true;
+    render(<StageGeneration pipeline={makePipeline()} initialEvents={[]} />);
+    const slot = screen.getByTestId("work-item-panel-slot");
+    expect(slot).toBeInTheDocument();
+    expect(slot.getAttribute("data-pipeline")).toBe("p1");
   });
 });

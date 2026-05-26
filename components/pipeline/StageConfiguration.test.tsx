@@ -60,6 +60,16 @@ vi.mock("./OperatorBriefReview", () => ({
   ),
 }));
 
+// Stub the WorkItemPanel: it is the canonical waiting-state surface for the
+// operator-driven path post-cutover (PR-3). The panel's own internals are
+// covered in WorkItemPanel.test.tsx; here we just assert it mounts with the
+// pipeline id.
+vi.mock("./WorkItemPanel", () => ({
+  WorkItemPanel: ({ pipelineId }: { pipelineId: string }) => (
+    <div data-testid="work-item-panel" data-pipeline={pipelineId} />
+  ),
+}));
+
 import { StageConfiguration } from "./StageConfiguration";
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
@@ -740,7 +750,7 @@ describe("StageConfiguration - operator-driven branch", () => {
     expect(screen.queryByText("Image brief")).not.toBeInTheDocument();
   });
 
-  it("renders a waiting state when operator_driven but brief not yet authored", () => {
+  it("renders the WorkItemPanel waiting state when operator_driven but brief not yet authored", () => {
     render(
       <StageConfiguration
         pipeline={makePipeline({
@@ -749,7 +759,12 @@ describe("StageConfiguration - operator-driven branch", () => {
         })}
       />,
     );
-    expect(screen.getByText(/operator is drafting the brief/i)).toBeInTheDocument();
+    // Silent-failure PR-3: the WorkItemPanel is the canonical waiting-state
+    // surface. The legacy "Hang tight" locked block is gone.
+    const panel = screen.getByTestId("work-item-panel");
+    expect(panel).toBeInTheDocument();
+    expect(panel.getAttribute("data-pipeline")).toBe("p1");
+    expect(screen.queryByText(/hang tight/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId("operator-brief-review")).not.toBeInTheDocument();
     expect(screen.queryByText("Image brief")).not.toBeInTheDocument();
   });
