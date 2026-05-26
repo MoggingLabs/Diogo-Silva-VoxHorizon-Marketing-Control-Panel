@@ -73,8 +73,21 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
     events: unknown[];
   };
 
+  // Silent-failure PR-3: the routes no longer write `pipelines.status`. The
+  // reducer derives the canonical status from the event stream; we project
+  // through the `v_pipeline_dispatch_state` view to overlay `derived_status`
+  // onto the response shape so the dashboard sees the truth even when the
+  // (stale) `pipelines.status` column has not been backfilled yet.
+  const { data: derivedRow } = await supabase
+    .from("v_pipeline_dispatch_state")
+    .select("derived_status")
+    .eq("pipeline_id", id)
+    .maybeSingle();
+  const derivedStatus = (derivedRow as { derived_status?: string } | null)?.derived_status;
+  const pipelineWithDerived = derivedStatus ? { ...pipeline, status: derivedStatus } : pipeline;
+
   return NextResponse.json({
-    pipeline,
+    pipeline: pipelineWithDerived,
     image_brief: image_brief ?? null,
     video_brief: video_brief ?? null,
     events: events ?? [],
