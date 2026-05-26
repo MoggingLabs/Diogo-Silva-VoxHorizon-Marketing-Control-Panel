@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { Bot, ChevronDown, ChevronUp, Factory, Gauge, Radio } from "lucide-react";
 
 import { EmptyState } from "@/components/EmptyState";
+import { DaemonHealthBadge } from "@/components/pipeline/DaemonHealthBadge";
 import { OperatorKickoffForm } from "@/components/pipeline/OperatorKickoffForm";
 import { OperatorNarration } from "@/components/pipeline/OperatorNarration";
 import { Button } from "@/components/ui/button";
@@ -63,10 +64,17 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
   }, [initialRuns]);
 
   // New runs + stage transitions: let the server re-query so client name joins
-  // and seeded events stay accurate (same approach as PipelineList).
+  // and seeded events stay accurate (same approach as PipelineList). Silent-
+  // failure PR-2a additionally subscribes to `work_item` so a dispatch
+  // state-change for any active run triggers a refresh — the per-row mini
+  // dispatch pill renders from the latest `pipelines.status` rollup, but this
+  // keeps the console honest while PR-2b/3 land the rollup-replacement view.
   useRealtimeStream(
     React.useMemo(
-      () => [{ table: "pipelines", event: "*" as const, callback: () => router.refresh() }],
+      () => [
+        { table: "pipelines", event: "*" as const, callback: () => router.refresh() },
+        { table: "work_item", event: "*" as const, callback: () => router.refresh() },
+      ],
       [router],
     ),
   );
@@ -75,6 +83,22 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
 
   return (
     <div className="flex flex-col gap-6">
+      {/* Silent-failure PR-2a: operator daemon health at the top of the console
+          so the supervisor sees the dispatcher's vital signs alongside every
+          run. The badge is colored from `work_item_consumers.status` + the
+          last_seen_at heartbeat — when the operator daemon goes red, the user
+          sees it BEFORE they try to kick off a new run. */}
+      <section
+        aria-label="Operator daemon health"
+        className="flex flex-col gap-1 rounded-lg border border-border bg-card px-4 py-3"
+        data-testid="operator-console-daemon"
+      >
+        <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Operator daemon
+        </span>
+        <DaemonHealthBadge />
+      </section>
+
       {/* Kickoff (collapsible) */}
       <section className="rounded-lg border border-border bg-card">
         <button
@@ -144,7 +168,26 @@ export function OperatorConsole({ initialRuns }: OperatorConsoleProps) {
                             {timeSince(run.updated_at ?? run.created_at)}
                           </span>
                         </button>
-                        <StatusBadge status={run.status} />
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {/* Silent-failure PR-2a: mini dispatch pill so the
+                              supervisor sees the queue's view of this run at a
+                              glance. Reads from OperatorRun.dispatchStatus
+                              (server-side aggregate over work_item). */}
+                          <span
+                            data-testid={`operator-run-${run.id}-dispatch`}
+                            className="inline-flex"
+                          >
+                            <StatusBadge
+                              status={run.dispatchStatus ?? "no-row"}
+                              label={
+                                run.dispatchStatus
+                                  ? `dispatch: ${run.dispatchStatus}`
+                                  : "dispatch: idle"
+                              }
+                            />
+                          </span>
+                          <StatusBadge status={run.status} />
+                        </div>
                       </div>
 
                       {gate ? (

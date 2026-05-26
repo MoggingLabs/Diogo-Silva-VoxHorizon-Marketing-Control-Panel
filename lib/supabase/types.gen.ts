@@ -2448,8 +2448,29 @@ export type Database = {
         }
         Relationships: []
       }
+      v_pipeline_dispatch_state: {
+        Row: {
+          active_work_item: Json | null
+          derived_status: Database["public"]["Enums"]["pipeline_status_enum"] | null
+          operator_daemon: Json | null
+          pipeline_id: string | null
+          recent_events: Json | null
+        }
+        Relationships: []
+      }
     }
     Functions: {
+      claim_work_item: {
+        Args: {
+          p_kind: Database["public"]["Enums"]["work_item_kind"]
+          p_consumer: string
+        }
+        Returns: Database["public"]["Tables"]["work_item"]["Row"]
+      }
+      compute_pipeline_status: {
+        Args: { p_pipeline_id: string }
+        Returns: Database["public"]["Enums"]["pipeline_status_enum"]
+      }
       gen_brief_id_human: { Args: { p_client_slug: string }; Returns: string }
       gen_video_brief_id_human: {
         Args: { p_client_slug: string }

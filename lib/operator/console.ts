@@ -3,6 +3,7 @@ import "server-only";
 import { isOperatorDriven } from "@/lib/operator/dispatch";
 import type { PipelineEvent, PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
+import type { WorkItemStatus } from "@/lib/work-queue/types";
 
 /**
  * Server-side data loader for the Operator Console (E5.3 / #597).
@@ -29,6 +30,13 @@ export type OperatorRun = {
   created_at: string;
   updated_at: string | null;
   events: PipelineEvent[];
+  /**
+   * Silent-failure PR-2a: the current dispatch status (queued/claimed/running
+   * for an active row, terminal for the most recent completed row). `null`
+   * means no work_item exists for this pipeline yet — rendered as the "Idle"
+   * pill in the console.
+   */
+  dispatchStatus: WorkItemStatus | null;
 };
 
 /** How many recent events to seed per run for the narration feed. */
@@ -81,6 +89,33 @@ export async function getOperatorRuns(limit = 25): Promise<OperatorRun[]> {
     }
   }
 
+  // Silent-failure PR-2a: the most-recent work_item per pipeline drives the
+  // mini dispatch pill in the console. Prefer an active (queued/claimed/running)
+  // row; fall back to the latest terminal row so the pill keeps showing the
+  // last outcome until the next dispatch fires.
+  const { data: workItems } = await supabase
+    .from("work_item")
+    .select("pipeline_id, status, created_at")
+    .in("pipeline_id", ids)
+    .order("created_at", { ascending: false });
+
+  const dispatchByPipeline = new Map<string, WorkItemStatus>();
+  const activeStatuses: ReadonlySet<WorkItemStatus> = new Set(["queued", "claimed", "running"]);
+  for (const wi of workItems ?? []) {
+    if (!wi.pipeline_id) continue;
+    if (dispatchByPipeline.has(wi.pipeline_id)) {
+      // We've already taken the newest row for this pipeline; if that row
+      // is non-active, we still want to upgrade to an active row if one
+      // exists earlier in the (newest-first) list. Active wins.
+      const prev = dispatchByPipeline.get(wi.pipeline_id)!;
+      if (!activeStatuses.has(prev) && activeStatuses.has(wi.status as WorkItemStatus)) {
+        dispatchByPipeline.set(wi.pipeline_id, wi.status as WorkItemStatus);
+      }
+      continue;
+    }
+    dispatchByPipeline.set(wi.pipeline_id, wi.status as WorkItemStatus);
+  }
+
   return operatorRows.map((r) => ({
     id: r.id,
     status: r.status as PipelineStatus,
@@ -92,5 +127,6 @@ export async function getOperatorRuns(limit = 25): Promise<OperatorRun[]> {
     // Events came back newest-first; the narration view expects chronological
     // and re-sorts internally, so hand it oldest-first for stability.
     events: (eventsByPipeline.get(r.id) ?? []).slice().reverse(),
+    dispatchStatus: dispatchByPipeline.get(r.id) ?? null,
   }));
 }

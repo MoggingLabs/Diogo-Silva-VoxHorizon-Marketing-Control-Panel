@@ -85,6 +85,11 @@ export const SUBSCRIBABLE_TABLES = new Set<string>([
   "chat_messages",
   // filtered-only consumer (VideoBriefTimeline)
   "events",
+  // publication (0050 silent-failure work queue) — the WorkItemPanel hook
+  // subscribes filtered on `pipeline_id`; the DaemonHealthBadge hook
+  // subscribes filtered on `kind=eq.operator_dispatch`.
+  "work_item",
+  "work_item_consumers",
 ]);
 
 const VALID_EVENTS: ReadonlySet<string> = new Set(["INSERT", "UPDATE", "DELETE", "*"]);

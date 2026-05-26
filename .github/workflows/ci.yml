@@ -477,6 +477,11 @@ jobs:
             allow_failure: false
           - spec: bulk-archive.spec.ts
             allow_failure: false
+          # Silent-failure PR-2a: WorkItemPanel + DaemonHealthBadge + new API
+          # surfaces. Blocking — these read surfaces are the canonical signal
+          # path for the redesign, regressions need to bounce off CI.
+          - spec: work-item-panel.spec.ts
+            allow_failure: false
     env:
       # Local Supabase stack endpoints (supabase start defaults).
       NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321

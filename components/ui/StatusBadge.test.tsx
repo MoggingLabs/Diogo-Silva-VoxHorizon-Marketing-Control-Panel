@@ -47,8 +47,33 @@ describe("resolveStatus", () => {
     ["keep", "success"],
     ["watch", "warning"],
     ["kill", "destructive"],
+    // Silent-failure PR-2a: work_item_status (queued / running / completed /
+    // failed / cancelled already covered above; claimed + timed_out are new).
+    ["claimed", "info"],
+    ["timed_out", "destructive"],
+    // Silent-failure PR-2a: work_item_consumers.status (live already mapped to
+    // success above; the four other consumer states are new).
+    ["starting", "info"],
+    ["degraded", "warning"],
+    ["stopped", "muted"],
+    ["down", "destructive"],
+    ["no-row", "muted"],
   ] as const)("maps %s -> %s", (status, semantic) => {
     expect(resolveStatus(status).semantic).toBe(semantic);
+  });
+
+  it("labels the work_item statuses with their canonical text", () => {
+    expect(resolveStatus("claimed").label).toBe("Claimed");
+    expect(resolveStatus("timed_out").label).toBe("Timed out");
+    expect(resolveStatus("starting").label).toBe("Starting");
+    expect(resolveStatus("degraded").label).toBe("Degraded");
+    expect(resolveStatus("stopped").label).toBe("Stopped");
+    expect(resolveStatus("down").label).toBe("Down");
+    expect(resolveStatus("no-row").label).toBe("Idle");
+  });
+
+  it("spins the starting badge (daemon-booting state)", () => {
+    expect(resolveStatus("starting").spin).toBe(true);
   });
 
   it("uses the curated pipeline labels (Spec validation, Variant plan, etc.)", () => {
