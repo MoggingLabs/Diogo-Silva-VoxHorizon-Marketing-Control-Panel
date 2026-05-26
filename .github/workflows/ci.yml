@@ -52,6 +52,7 @@ jobs:
       worker: ${{ steps.filter.outputs.worker }}
       db: ${{ steps.filter.outputs.db }}
       e2e: ${{ steps.filter.outputs.e2e }}
+      operator_daemon: ${{ steps.filter.outputs.operator_daemon }}
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +79,8 @@ jobs:
               - 'vitest.config.ts'
             worker:
               - 'worker/**'
+            operator_daemon:
+              - 'operator-daemon/**'
             db:
               - 'db/migrations/**'
             e2e:
@@ -240,6 +243,39 @@ jobs:
       - name: Run tests + coverage gate (>=90% lines)
         # Coverage flags come from worker/pyproject.toml [tool.pytest.ini_options]
         # addopts (--cov=src --cov-report=term-missing --cov-fail-under=90).
+        run: uv run pytest
+
+  # ---------------------------------------------------------------------------
+  # operator-daemon (silent-failure PR-2b): the sidecar container that owns the
+  # work_item queue's operator_dispatch kind. Self-contained Python package
+  # under operator-daemon/, built and tested independently of the worker. Same
+  # uv toolchain; same >=90% coverage gate (enforced by the package's own
+  # pyproject.toml addopts). Path-filtered to operator-daemon/**.
+  # ---------------------------------------------------------------------------
+  operator-daemon:
+    name: operator-daemon (pytest)
+    needs: changes
+    if: ${{ needs.changes.outputs.operator_daemon == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator-daemon
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Install deps
+        # Frozen sync against the committed uv.lock so CI builds the exact
+        # same dependency graph the dev env was tested against.
+        run: uv sync --frozen --extra dev
+
+      - name: Run tests + coverage gate (>=90% lines)
+        # Coverage flags come from operator-daemon/pyproject.toml
+        # [tool.pytest.ini_options] addopts.
         run: uv run pytest
 
   # ---------------------------------------------------------------------------
