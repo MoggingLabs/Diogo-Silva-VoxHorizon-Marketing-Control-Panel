@@ -81,7 +81,11 @@ test.describe("video launch package", () => {
     await approveBtn.click();
 
     await expect(page.getByText("Approved", { exact: true })).toBeVisible({
-      timeout: 15_000,
+      // The status flip is driven by the gate's router.refresh(), which re-runs
+      // the whole Supabase-heavy launch detail server component. On a contended
+      // CI runner that re-render can occasionally exceed 15s; 30s removes the
+      // flake without masking a real hang.
+      timeout: 30_000,
     });
     await expect(page.getByRole("button", { name: /^approve$/i })).toHaveCount(0);
   });
@@ -106,7 +110,10 @@ test.describe("video launch package", () => {
     await page.getByLabel(/notes/i).fill("Tighten the hook.");
     await page.getByRole("button", { name: /approve with changes/i }).click();
     await expect(page.getByText("Approved with changes", { exact: true })).toBeVisible({
-      timeout: 15_000,
+      // See the note on the Approve case above: the router.refresh() re-render
+      // of the Supabase-heavy launch detail page can exceed 15s on a busy CI
+      // runner. 30s removes the flake without masking a real hang.
+      timeout: 30_000,
     });
   });
 

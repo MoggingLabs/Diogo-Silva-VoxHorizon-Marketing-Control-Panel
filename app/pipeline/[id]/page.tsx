@@ -95,24 +95,27 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
     service_type: "roofing" | "remodeling";
   }[] = [];
   const supabase = await createClient();
-  if (pipeline.client_id) {
-    const { data } = await supabase
-      .from("clients")
-      .select("name")
-      .eq("id", pipeline.client_id)
-      .maybeSingle();
-    clientName = data?.name ?? null;
-  }
-  // The StageConfiguration component needs a client list to populate the
-  // picker. Server-fetching avoids the form's first paint flicker and keeps
-  // the auth path consistent with the rest of the app.
+  // The header's client name and (in configuration) the StageConfiguration
+  // picker's active-client list are independent reads, so fetch them in one
+  // parallel batch rather than on two serial round-trips (~140ms each to
+  // us-east). Each is conditional; an unused slot resolves instantly. Server-
+  // fetching the list avoids the form's first-paint flicker and keeps the auth
+  // path consistent with the rest of the app.
+  const [clientNameRes, clientListRes] = await Promise.all([
+    pipeline.client_id
+      ? supabase.from("clients").select("name").eq("id", pipeline.client_id).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    pipeline.status === "configuration"
+      ? supabase
+          .from("clients")
+          .select("id, name, slug, service_type")
+          .eq("status", "active")
+          .order("name")
+      : Promise.resolve({ data: [] as typeof clients, error: null }),
+  ]);
+  if (pipeline.client_id) clientName = clientNameRes.data?.name ?? null;
   if (pipeline.status === "configuration") {
-    const { data } = await supabase
-      .from("clients")
-      .select("id, name, slug, service_type")
-      .eq("status", "active")
-      .order("name");
-    clients = (data ?? []) as typeof clients;
+    clients = (clientListRes.data ?? []) as typeof clients;
   }
 
   // Per-creative review surfaces (P4.2–P4.6) read through the service-role

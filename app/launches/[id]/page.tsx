@@ -60,10 +60,12 @@ export default async function LaunchDetailPage({ params }: { params: Promise<{ i
     throw new Error("launch payload failed schema validation");
   }
 
-  // Fetch the brief + creatives + copy variants + recorded ad entities in
-  // parallel.
-  const adEntities = await getAdEntitiesForLaunch(launch.id);
-  const [briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
+  // Fetch the recorded ad entities + brief + creatives + copy variants +
+  // events in one parallel batch. They are all independent of each other, so
+  // the ad-entity graph should not take its own serial round-trip (~140ms to
+  // us-east) ahead of the rest.
+  const [adEntities, briefRes, creativesRes, copyRes, eventsRes] = await Promise.all([
+    getAdEntitiesForLaunch(launch.id),
     supabase.from("briefs").select("*").eq("id", launch.brief_id).maybeSingle(),
     payload.creative_ids.length
       ? supabase.from("creatives").select("*").in("id", payload.creative_ids)
