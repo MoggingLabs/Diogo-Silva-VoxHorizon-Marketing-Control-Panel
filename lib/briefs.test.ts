@@ -134,6 +134,10 @@ describe("canTransition / transitionEventKind", () => {
     expect(canTransition("approved", "draft")).toBe(false);
     expect(allowedTransitions.approved).toEqual([]);
   });
+
+  it("returns false for an unknown source status (defensive guard)", () => {
+    expect(canTransition("bogus" as never, "draft" as never)).toBe(false);
+  });
 });
 
 describe("readBriefPayload", () => {

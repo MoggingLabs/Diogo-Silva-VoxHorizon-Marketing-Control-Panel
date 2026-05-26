@@ -13,6 +13,7 @@ beforeEach(() => {
 afterEach(() => {
   process.env = { ...ORIG_ENV };
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("archiveBrief", () => {
@@ -124,5 +125,21 @@ describe("error envelope parsing", () => {
     const spy = spyOnFetch();
     spy.mockResolvedValueOnce(textResponse("", { status: 200 }));
     await expect(restoreBrief("image", "b1")).resolves.toBeUndefined();
+  });
+
+  it("falls back to the response status when a non-2xx error body is empty", async () => {
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(textResponse("", { status: 503 }));
+    await expect(archiveBrief("image", "b1")).rejects.toThrow(/503/);
+  });
+});
+
+describe("resolveBaseUrl in the browser", () => {
+  it("uses a relative URL when window is defined", async () => {
+    vi.stubGlobal("window", {} as unknown as Window & typeof globalThis);
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ brief: { id: "b1" } }));
+    await archiveBrief("image", "b1");
+    expect(spy.mock.calls[0]?.[0]).toBe("/api/briefs/b1");
   });
 });
