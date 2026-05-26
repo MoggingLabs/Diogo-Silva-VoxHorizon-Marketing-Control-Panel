@@ -5,6 +5,7 @@ import { dispatchOperator, operatorInstruction } from "@/lib/operator/dispatch";
 import { type PipelineEventInsert, type PipelineInsert } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
+import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -137,8 +138,33 @@ export async function POST(req: NextRequest) {
     console.warn(`[pipelines.operator] event insert failed: ${evErr.message}`);
   }
 
-  // Kick the operator. Fire-and-forget — a worker outage must not fail the
+  // Synchronously enqueue the operator dispatch work_item BEFORE the legacy
+  // fire-and-forget so the queue row exists by the time HTTP returns. This is
+  // the silent-failure foundational redesign's load-bearing invariant -- a
+  // route can no longer claim "operator dispatched" without a backing row
+  // (and the auto-emit trigger's `pipeline_events` row). Enqueue throws ->
+  // route returns 500 and rolls back the pipeline insert so a half-state
+  // cannot leak. PR-3 removes the legacy fire below.
+  try {
+    await enqueueWorkItem({
+      kind: "operator_dispatch",
+      pipelineId: pipeline.id,
+      payload: {
+        instruction: operatorInstruction("configuration", pipeline.id, instruction),
+        stage: "configuration",
+      },
+      idempotencyKey: `op-disp:${pipeline.id}:configuration:kickoff`,
+      createdBy: "api/pipelines/operator",
+    });
+  } catch (e) {
+    // Roll back the pipeline insert so silent-failure cannot leak a half-state.
+    await supabase.from("pipelines").delete().eq("id", pipeline.id);
+    return NextResponse.json({ error: `work_item enqueue failed: ${String(e)}` }, { status: 500 });
+  }
+
+  // Kick the operator. Fire-and-forget -- a worker outage must not fail the
   // kickoff (the pipeline exists; the manager can re-dispatch from the gate).
+  // PR-3 removes this once the operator daemon owns the queue.
   void dispatchOperator(
     pipeline.id,
     operatorInstruction("configuration", pipeline.id, instruction),

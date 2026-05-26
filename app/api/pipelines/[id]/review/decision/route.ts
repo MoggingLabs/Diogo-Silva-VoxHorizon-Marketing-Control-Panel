@@ -9,6 +9,7 @@ import {
 } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
+import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -178,15 +179,32 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.review.decision] event insert failed: ${evErr.message}`);
   }
 
-  // Hand generation off to exactly one executor — never both, or every final
+  // Hand generation off to exactly one executor -- never both, or every final
   // would render twice and double the Kie spend. This approval IS the
   // generation gate; the per-tool Ekko ApprovalModal does not gate it.
+  //
+  // The work_item enqueue is synchronous and must succeed before HTTP returns
+  // (silent-failure foundational redesign): a route can no longer claim
+  // "operator dispatched" / "worker generation kicked" without a backing row.
+  // Enqueue failure -> 5xx. PR-3 removes the legacy fire-and-forgets.
   if (isOperatorDriven(pipeline.config_draft)) {
     // Operator-driven: the Hermes operator renders the finals for the picked
-    // concepts (its render call is the per-batch spend gate). Best-effort
-    // handoff event + fire-and-forget dispatch (the transition has committed
-    // and must not be undone by a worker outage); idempotent on the operator.
+    // concepts (its render call is the per-batch spend gate).
     const instruction = operatorInstruction("generation", pipeline.id);
+    try {
+      await enqueueWorkItem({
+        kind: "operator_dispatch",
+        pipelineId: pipeline.id,
+        payload: { instruction, stage: "generation" },
+        idempotencyKey: `op-disp:${pipeline.id}:generation:review_approved`,
+        createdBy: "api/pipelines/review/decision",
+      });
+    } catch (e) {
+      return NextResponse.json(
+        { error: `work_item enqueue failed: ${String(e)}` },
+        { status: 500 },
+      );
+    }
     const dispatchEvent: PipelineEventInsert = {
       pipeline_id: pipeline.id,
       kind: "operator_dispatched",
@@ -208,7 +226,20 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     // Regular: the deterministic /work/pipeline/generation producer renders the
     // final 1:1 + 9:16 assets for every Review pick. The worker emits the
     // task_* + cost_recorded pipeline_events the StageGeneration UI reads.
-    // Failures are swallowed so a worker outage doesn't block the commit.
+    try {
+      await enqueueWorkItem({
+        kind: "worker_generation",
+        pipelineId: pipeline.id,
+        payload: { stage: "generation" },
+        idempotencyKey: `wg:${pipeline.id}:generation`,
+        createdBy: "api/pipelines/review/decision",
+      });
+    } catch (e) {
+      return NextResponse.json(
+        { error: `work_item enqueue failed: ${String(e)}` },
+        { status: 500 },
+      );
+    }
     void fireWorkerGeneration(pipeline.id).catch((e) => {
       console.warn(
         `[pipelines.review.decision] worker generation kick failed for ${pipeline.id}: ${String(e)}`,

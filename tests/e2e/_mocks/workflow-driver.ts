@@ -119,6 +119,14 @@ export async function seedFinalCreatives(args: {
  * Pass `outcome: "done"` for the happy path (≥1 success ⇒ advance) or
  * `outcome: "error"` for the NEGATIVE no-stall case (all task_error ⇒ the
  * pipeline must STAY in generation).
+ *
+ * Silent-failure PR-2b: the review/decision approve route now dual-writes a
+ * `worker_generation` work_item, whose auto-emit trigger inserts an EXTRA
+ * `task_queued` `pipeline_events` row keyed to `stage='generation'`. Closing
+ * the work_item to `completed` here so the trigger fires a matching `task_done`
+ * keeps the migration-0024 closure count balanced (v_done + v_error >=
+ * greatest(v_queued, v_running)) and the auto-advance from generation -> qa
+ * stays green. PR-3 collapses the producer + dual-write into a single source.
  */
 export async function emitGenerationClosure(args: {
   pipelineId: string;
@@ -145,6 +153,32 @@ export async function emitGenerationClosure(args: {
       throw new Error(`emitGenerationClosure (${kind}) failed: ${error.message}`);
     }
   }
+
+  // Silent-failure PR-2b dual-write balancing. The route enqueued a
+  // `worker_generation` work_item (kind, status='queued'); the auto-emit
+  // trigger has already inserted the matching `task_queued, stage=generation`
+  // event. Flip the row to 'completed' (happy) or 'failed' (negative) so the
+  // trigger fires a corresponding `task_done` / `task_error` event and the
+  // migration-0024 closure count stays balanced. Skip silently when no row
+  // exists (e.g. unit tests that bypass the route).
+  const finalStatus = args.outcome === "done" ? "completed" : "failed";
+  const completedAt = new Date().toISOString();
+  const update: {
+    status: "completed" | "failed";
+    completed_at: string;
+    error_kind?: string;
+  } = { status: finalStatus, completed_at: completedAt };
+  if (finalStatus === "failed") {
+    // The work_item_failure_explained CHECK constraint requires `error_kind`
+    // when status flips to failed/timed_out.
+    update.error_kind = "synthetic_e2e_closure";
+  }
+  await admin
+    .from("work_item")
+    .update(update as never)
+    .eq("pipeline_id", args.pipelineId)
+    .eq("kind", "worker_generation")
+    .eq("status", "queued");
 }
 
 /** The four universal QA vision rubric items (non-roofing vertical). */

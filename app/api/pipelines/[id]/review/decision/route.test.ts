@@ -27,6 +27,13 @@ vi.mock("@/lib/operator/dispatch", async () => {
   return { ...actual, dispatchOperator };
 });
 
+const { enqueueWorkItem } = vi.hoisted(() => ({
+  enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(
+    async () => ({ id: "wi-1", duplicate: false }),
+  ),
+}));
+vi.mock("@/lib/work-queue/enqueue", () => ({ enqueueWorkItem }));
+
 import { POST } from "./route";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -39,6 +46,8 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 beforeEach(() => {
   currentSupabase = mockClient();
   dispatchOperator.mockClear();
+  enqueueWorkItem.mockReset();
+  enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
   delete process.env.WORKER_URL;
   delete process.env.WORKER_SHARED_SECRET;
 });
@@ -497,5 +506,184 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       { params },
     );
     expect(res.status).toBe(200);
+  });
+
+  // -- silent-failure foundational redesign PR-2b: dual-write to work_item --
+
+  describe("dual-write enqueue (operator-driven approval -> generation)", () => {
+    function operatorReviewPipeline() {
+      return {
+        id,
+        status: "review",
+        format_choice: "image",
+        picks: { image: ["c1"] },
+        advanced_at: {},
+        config_draft: { operator_driven: true },
+      };
+    }
+
+    it("enqueues an operator_dispatch work_item on approval (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: operatorReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("operator_dispatch");
+      expect(opts.pipelineId).toBe(id);
+      expect(opts.idempotencyKey).toBe(`op-disp:${id}:generation:review_approved`);
+      expect(opts.createdBy).toBe("api/pipelines/review/decision");
+      const payload = opts.payload as Record<string, unknown>;
+      expect(payload.stage).toBe("generation");
+    });
+
+    it("returns 500 when the work_item enqueue throws", async () => {
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: operatorReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(String(body.error)).toContain("work_item enqueue failed");
+      // Legacy dispatch must NOT fire when the enqueue failed.
+      await new Promise((r) => setTimeout(r, 5));
+      expect(dispatchOperator).not.toHaveBeenCalled();
+    });
+
+    it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {
+      enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: operatorReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe("dual-write enqueue (regular approval -> worker_generation)", () => {
+    function regularReviewPipeline() {
+      return {
+        id,
+        status: "review",
+        format_choice: "image",
+        picks: { image: ["c1"] },
+        advanced_at: {},
+      };
+    }
+
+    it("enqueues a worker_generation work_item on approval (200)", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: regularReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("worker_generation");
+      expect(opts.pipelineId).toBe(id);
+      expect(opts.idempotencyKey).toBe(`wg:${id}:generation`);
+      expect(opts.createdBy).toBe("api/pipelines/review/decision");
+    });
+
+    it("returns 500 when the work_item enqueue throws", async () => {
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: regularReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(String(body.error)).toContain("work_item enqueue failed");
+    });
+
+    it("does NOT enqueue when the decision is rejected", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: regularReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "cancelled" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "rejected", notes: "no" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).not.toHaveBeenCalled();
+    });
+
+    it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {
+      enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: regularReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+    });
   });
 });

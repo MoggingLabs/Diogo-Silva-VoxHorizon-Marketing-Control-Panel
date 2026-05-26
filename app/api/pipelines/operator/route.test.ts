@@ -32,6 +32,13 @@ vi.mock("@/lib/operator/dispatch", async () => {
   return { ...actual, dispatchOperator };
 });
 
+const { enqueueWorkItem } = vi.hoisted(() => ({
+  enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(
+    async () => ({ id: "wi-1", duplicate: false }),
+  ),
+}));
+vi.mock("@/lib/work-queue/enqueue", () => ({ enqueueWorkItem }));
+
 import { POST } from "./route";
 
 function req(body: unknown): NextRequest {
@@ -51,6 +58,8 @@ function flush() {
 beforeEach(() => {
   currentSupabase = mockClient();
   dispatchOperator.mockClear();
+  enqueueWorkItem.mockReset();
+  enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
 });
 
 afterEach(() => {
@@ -166,5 +175,65 @@ describe("POST /api/pipelines/operator", () => {
     expect(res.status).toBe(201);
     await flush();
     expect(warn).toHaveBeenCalledWith(expect.stringContaining("worker 500"));
+  });
+
+  // -- silent-failure foundational redesign PR-2b: dual-write to work_item --
+
+  it("dual-writes a work_item with the right kind + idempotency_key + createdBy", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        insert: { single: { data: { id: "p-dw", status: "configuration" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ instruction: "siding ads" }));
+    expect(res.status).toBe(201);
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.pipelineId).toBe("p-dw");
+    expect(opts.idempotencyKey).toBe("op-disp:p-dw:configuration:kickoff");
+    expect(opts.createdBy).toBe("api/pipelines/operator");
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.stage).toBe("configuration");
+    expect(String(payload.instruction)).toContain("siding");
+  });
+
+  it("returns 500 and rolls back the pipeline when enqueueWorkItem throws", async () => {
+    enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+    currentSupabase = mockClient({
+      pipelines: {
+        insert: { single: { data: { id: "p-fail", status: "configuration" }, error: null } },
+        delete: { data: null, error: null },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ instruction: "x" }));
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("work_item enqueue failed");
+
+    // The pipeline row was rolled back via supabase.from('pipelines').delete().eq('id', ...).
+    const fromCalls = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
+    expect(fromCalls).toContain("pipelines");
+    // The legacy dispatch was NOT fired -- the route bailed before it.
+    await flush();
+    expect(dispatchOperator).not.toHaveBeenCalled();
+  });
+
+  it("treats a duplicate idempotency_key as 201 (the dedup branch)", async () => {
+    enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
+    currentSupabase = mockClient({
+      pipelines: {
+        insert: { single: { data: { id: "p-dup", status: "configuration" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ instruction: "x" }));
+    expect(res.status).toBe(201);
+    // Legacy fire still happens -- PR-3 removes it; until then, dual-write
+    // means BOTH the queue row and the worker kick.
+    await flush();
+    expect(dispatchOperator).toHaveBeenCalledTimes(1);
   });
 });
