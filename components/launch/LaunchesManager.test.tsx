@@ -102,4 +102,59 @@ describe("LaunchesManager", () => {
     await waitFor(() => expect(listLaunches).toHaveBeenCalledWith("image", { archived: true }));
     expect(await screen.findByRole("link", { name: "arch-1" })).toBeInTheDocument();
   });
+
+  it("shows an error banner when the archived load fails", async () => {
+    listLaunches.mockRejectedValue(new Error("load failed"));
+    const user = userEvent.setup();
+    render(<LaunchesManager initialImage={[]} initialVideo={[]} />);
+    await user.click(screen.getByRole("tab", { name: "Archived" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/load failed/i);
+  });
+
+  it("restores an archived launch via the row action", async () => {
+    listLaunches.mockResolvedValue([
+      row({ id: "arch1", payload: { brief_id_human: "arch-1", client: null }, deleted_at: "x" }),
+    ]);
+    const user = userEvent.setup();
+    render(<LaunchesManager initialImage={[]} initialVideo={[]} />);
+    await user.click(screen.getByRole("tab", { name: "Archived" }));
+    await screen.findByRole("link", { name: "arch-1" });
+    await user.click(screen.getByRole("button", { name: /row actions/i }));
+    await user.click(screen.getByRole("menuitem", { name: /restore/i }));
+    await waitFor(() => expect(restoreLaunch).toHaveBeenCalledWith("image", "arch1"));
+  });
+
+  it("falls back to the brief id slice + dash client when payload is malformed", () => {
+    render(
+      <LaunchesManager
+        initialImage={[row({ id: "l9", brief_id: "abcdef12-3456-7890", payload: { bad: true } })]}
+        initialVideo={[]}
+      />,
+    );
+    // brief link falls back to the brief_id slice; client shows the em dash.
+    expect(screen.getByRole("link", { name: "abcdef12" })).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+  });
+
+  it("bulk-archives the selected rows", async () => {
+    const user = userEvent.setup();
+    render(
+      <LaunchesManager
+        initialImage={[
+          row({ id: "l1", payload: { brief_id_human: "br-1", client: null } }),
+          row({ id: "l2", payload: { brief_id_human: "br-2", client: null } }),
+        ]}
+        initialVideo={[]}
+      />,
+    );
+    // Select all rows on the page via the header checkbox.
+    await user.click(screen.getByRole("checkbox", { name: /select all rows/i }));
+    // The bulk action bar appears; click its Archive.
+    const bar = screen.getByRole("region", { name: /bulk actions/i });
+    await user.click(within(bar).getByRole("button", { name: /archive/i }));
+    // Confirm in the dialog.
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: /^archive$/i }));
+    await waitFor(() => expect(archiveLaunch).toHaveBeenCalledTimes(2));
+  });
 });

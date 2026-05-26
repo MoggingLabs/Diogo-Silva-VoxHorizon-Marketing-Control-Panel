@@ -47,4 +47,19 @@ describe("AdEntityGraph", () => {
     expect(list.children[0]).toHaveAttribute("data-testid", "ad-entity-camp1");
     expect(screen.getByText("camp-1")).toBeInTheDocument();
   });
+
+  it("tolerates an unknown kind (sort + indent fallback)", () => {
+    render(
+      <AdEntityGraph
+        entities={[
+          entity({ id: "weird", kind: "widget" as never, meta_id: "w-1" }),
+          entity({ id: "camp1", kind: "campaign", meta_id: "camp-1" }),
+        ]}
+      />,
+    );
+    const list = screen.getByTestId("ad-entity-graph");
+    // Known campaign sorts ahead of the unknown kind (fallback weight 99).
+    expect(list.children[0]).toHaveAttribute("data-testid", "ad-entity-camp1");
+    expect(screen.getByText("w-1")).toBeInTheDocument();
+  });
 });

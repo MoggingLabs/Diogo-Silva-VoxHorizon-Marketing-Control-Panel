@@ -182,4 +182,109 @@ describe("VariantPlanEditor", () => {
     expect(screen.queryByRole("button", { name: /save plan/i })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /add cell/i })).not.toBeInTheDocument();
   });
+
+  it("edits a cell's label on blur (PATCH)", async () => {
+    const fetchSpy = spyOnFetch();
+    fetchSpy.mockResolvedValue(jsonResponse({ cell: { id: "cell1", label: "B" } }));
+    const user = userEvent.setup();
+    render(
+      <VariantPlanEditor
+        pipelineId="p1"
+        planExists
+        testVariable="creative"
+        hypothesis={null}
+        initialCells={cells}
+        creatives={creatives}
+        copyVariants={copyVariants}
+      />,
+    );
+    const labelInput = screen.getByLabelText(/cell 0 label/i);
+    await user.clear(labelInput);
+    await user.type(labelInput, "B");
+    await user.tab(); // blur -> patch
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const [url, init] = fetchSpy.mock.calls[0]!;
+    expect(String(url)).toBe("/api/pipelines/p1/variant-plan/cells/cell1");
+    expect(init?.method).toBe("PATCH");
+  });
+
+  it("toasts an error when saving the plan fails", async () => {
+    const fetchSpy = spyOnFetch();
+    fetchSpy.mockResolvedValue(jsonResponse({ error: "boom" }, { status: 500 }));
+    const user = userEvent.setup();
+    render(
+      <VariantPlanEditor
+        pipelineId="p1"
+        planExists
+        testVariable="creative"
+        hypothesis={null}
+        initialCells={cells}
+        creatives={creatives}
+        copyVariants={copyVariants}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /save plan/i }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+  });
+
+  it("toasts an error when removing a cell fails", async () => {
+    const fetchSpy = spyOnFetch();
+    fetchSpy.mockResolvedValue(jsonResponse({ error: "nope" }, { status: 500 }));
+    const user = userEvent.setup();
+    render(
+      <VariantPlanEditor
+        pipelineId="p1"
+        planExists
+        testVariable="creative"
+        hypothesis={null}
+        initialCells={cells}
+        creatives={creatives}
+        copyVariants={copyVariants}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /remove cell 0/i }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+  });
+
+  it("toasts an error when adding a cell fails", async () => {
+    const fetchSpy = spyOnFetch();
+    fetchSpy.mockResolvedValue(jsonResponse({ error: "nope" }, { status: 500 }));
+    const user = userEvent.setup();
+    render(
+      <VariantPlanEditor
+        pipelineId="p1"
+        planExists
+        testVariable="creative"
+        hypothesis={null}
+        initialCells={cells}
+        creatives={creatives}
+        copyVariants={copyVariants}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /add cell/i }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+  });
+
+  it("creates the plan (planExists=false) via PUT and toasts success", async () => {
+    const fetchSpy = spyOnFetch();
+    fetchSpy.mockResolvedValue(
+      jsonResponse({ plan: { id: "vpNew", status: "draft" } }, { status: 201 }),
+    );
+    const user = userEvent.setup();
+    render(
+      <VariantPlanEditor
+        pipelineId="p1"
+        planExists={false}
+        testVariable={null}
+        hypothesis={null}
+        initialCells={[]}
+        creatives={creatives}
+        copyVariants={copyVariants}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: /create plan/i }));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    expect((fetchSpy.mock.calls[0]![1] as RequestInit).method).toBe("PUT");
+    expect(toastSuccess).toHaveBeenCalled();
+  });
 });

@@ -11,8 +11,9 @@ vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: routerRefresh, push: vi.fn(), replace: vi.fn() }),
 }));
 
+const toastError = vi.fn();
 vi.mock("sonner", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: { success: vi.fn(), error: (...a: unknown[]) => toastError(...a) },
 }));
 
 const archiveLaunch = vi.fn(async () => undefined);
@@ -31,6 +32,7 @@ beforeEach(() => {
   archiveLaunch.mockClear();
   restoreLaunch.mockClear();
   updateLaunch.mockClear();
+  toastError.mockClear();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -69,5 +71,13 @@ describe("LaunchPackageActions", () => {
     expect(screen.queryByRole("button", { name: /edit notes/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /restore launch/i }));
     await waitFor(() => expect(restoreLaunch).toHaveBeenCalledWith("image", "l1"));
+  });
+
+  it("toasts an error when restore fails", async () => {
+    restoreLaunch.mockRejectedValueOnce(new Error("restore boom"));
+    const user = userEvent.setup();
+    render(<LaunchPackageActions format="image" launchId="l1" decidedNotes={null} archived />);
+    await user.click(screen.getByRole("button", { name: /restore launch/i }));
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
   });
 });

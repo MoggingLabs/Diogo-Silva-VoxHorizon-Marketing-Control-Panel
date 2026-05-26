@@ -96,6 +96,59 @@ describe("PATCH /api/pipelines/:id/variant-plan/cells/:cellId", () => {
     const res = await PATCH(patchReq({ label: "A" }), { params });
     expect(res.status).toBe(404);
   });
+
+  it("200 applies all editable fields (index/creative/copy/audience)", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: {
+        select: { single: { data: { id: cellId, variant_plan_id: "vp1" }, error: null } },
+        update: { single: { data: { id: cellId, cell_index: 2 }, error: null } },
+      },
+      events: { insert: { data: null, error: null } },
+    });
+    const res = await PATCH(
+      patchReq({
+        cell_index: 2,
+        creative_id: "33333333-3333-4333-8333-333333333333",
+        copy_variant_id: "44444444-4444-4444-8444-444444444444",
+        audience: { country: "US" },
+      }),
+      { params },
+    );
+    expect(res.status).toBe(200);
+  });
+
+  it("409 duplicate_cell_index on a unique violation", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: {
+        select: { single: { data: { id: cellId, variant_plan_id: "vp1" }, error: null } },
+        update: {
+          single: { data: null, error: { message: "duplicate key value violates unique" } },
+        },
+      },
+    });
+    const res = await PATCH(patchReq({ cell_index: 0 }), { params });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toBe("duplicate_cell_index");
+  });
+
+  it("500 on a non-unique DB error during update", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: {
+        select: { single: { data: { id: cellId, variant_plan_id: "vp1" }, error: null } },
+        update: { single: { data: null, error: { message: "connection lost" } } },
+      },
+    });
+    const res = await PATCH(patchReq({ label: "A" }), { params });
+    expect(res.status).toBe(500);
+  });
+
+  it("400 on a bad uuid", async () => {
+    const res = await PATCH(patchReq({ creative_id: "nope" }), { params });
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("DELETE /api/pipelines/:id/variant-plan/cells/:cellId", () => {
@@ -137,5 +190,17 @@ describe("DELETE /api/pipelines/:id/variant-plan/cells/:cellId", () => {
     });
     const res = await DELETE(delReq(), { params });
     expect(res.status).toBe(404);
+  });
+
+  it("500 on a DB error during hard-delete", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: {
+        select: { single: { data: { id: cellId, variant_plan_id: "vp1" }, error: null } },
+        delete: { single: { data: null, error: { message: "boom" } } },
+      },
+    });
+    const res = await DELETE(delReq(), { params });
+    expect(res.status).toBe(500);
   });
 });

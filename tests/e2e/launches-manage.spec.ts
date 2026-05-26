@@ -56,13 +56,15 @@ for (const format of ["image", "video"] as const) {
       const launchId = await seedPushedLaunch(briefId, format);
       const detailHref = `${DETAIL_PREFIX[format]}/${launchId}`;
 
-      // Step 2. Edit the operator notes on the detail page.
+      // Step 2. Edit the operator notes on the detail page. Scope the textarea
+      // lookup to the dialog -- "notes" appears elsewhere on the page too.
       await page.goto(detailHref);
       await page.getByRole("button", { name: /edit notes/i }).click();
-      await expect(page.getByRole("dialog")).toBeVisible();
+      const editDialog = page.getByRole("dialog");
+      await expect(editDialog).toBeVisible();
       const note = `e2e edit ${Date.now()}`;
-      await page.getByLabel(/notes/i).fill(note);
-      await page.getByRole("button", { name: /^save$/i }).click();
+      await editDialog.getByLabel("Notes", { exact: true }).fill(note);
+      await editDialog.getByRole("button", { name: /^save$/i }).click();
       await expect(page.getByRole("dialog")).toHaveCount(0, { timeout: 15_000 });
       await expect.poll(async () => notesValue(format, launchId), { timeout: 15_000 }).toBe(note);
 

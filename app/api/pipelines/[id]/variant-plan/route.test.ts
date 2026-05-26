@@ -123,4 +123,26 @@ describe("PUT /api/pipelines/:id/variant-plan", () => {
     const res = await PUT(bad, { params });
     expect(res.status).toBe(400);
   });
+
+  it("500 when the update fails on an existing plan", async () => {
+    currentSupabase = mockClient({
+      variant_plan: {
+        select: { single: { data: { id: "vp1", status: "draft" }, error: null } },
+        update: { single: { data: null, error: { message: "db down" } } },
+      },
+    });
+    const res = await PUT(putReq({ test_variable: "copy" }), { params });
+    expect(res.status).toBe(500);
+  });
+
+  it("500 when the insert fails creating a new plan", async () => {
+    currentSupabase = mockClient({
+      variant_plan: {
+        select: { single: { data: null, error: null } },
+        insert: { single: { data: null, error: { message: "insert failed" } } },
+      },
+    });
+    const res = await PUT(putReq({ test_variable: "creative" }), { params });
+    expect(res.status).toBe(500);
+  });
 });

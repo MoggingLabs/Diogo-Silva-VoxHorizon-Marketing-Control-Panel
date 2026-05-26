@@ -97,4 +97,28 @@ describe("POST /api/pipelines/:id/variant-plan/cells", () => {
     const res = await POST(postReq({ creative_id: "not-a-uuid" }), { params });
     expect(res.status).toBe(400);
   });
+
+  it("400 on invalid JSON", async () => {
+    const bad = new NextRequest(
+      new Request(`http://localhost/api/pipelines/${id}/variant-plan/cells`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{bad",
+      }),
+    );
+    const res = await POST(bad, { params });
+    expect(res.status).toBe(400);
+  });
+
+  it("500 on a non-unique DB error during insert", async () => {
+    currentSupabase = mockClient({
+      variant_plan: { select: { single: { data: { id: "vp1", status: "draft" }, error: null } } },
+      variant_plan_cell: {
+        select: { single: { data: { cell_index: 0 }, error: null } },
+        insert: { single: { data: null, error: { message: "connection reset" } } },
+      },
+    });
+    const res = await POST(postReq({ cell_index: 1 }), { params });
+    expect(res.status).toBe(500);
+  });
 });
