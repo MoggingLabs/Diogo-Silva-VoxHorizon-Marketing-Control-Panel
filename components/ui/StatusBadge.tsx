@@ -7,11 +7,21 @@ import {
   CircleDashed,
   Clock,
   FileText,
+  Hammer,
+  Image as ImageIcon,
+  Layers,
+  Lightbulb,
   Loader2,
+  PenLine,
   Radio,
+  Rocket,
   Send,
   ShieldAlert,
+  ShieldCheck,
   SkipForward,
+  Sparkles,
+  TrendingDown,
+  Video as VideoIcon,
   XCircle,
   type LucideIcon,
 } from "lucide-react";
@@ -113,6 +123,44 @@ const STATUS_MAP: Record<string, StatusSpec> = {
   archived: { semantic: "muted", icon: CircleDashed },
   skipped: { semantic: "muted", icon: SkipForward },
   inactive: { semantic: "muted", icon: CircleDashed },
+
+  // Pipeline lifecycle stages (mapped onto the semantic palette so the
+  // PipelineList + detail header + PhaseStepper + OperatorConsole all read
+  // the same colour for the same stage). Each gets a stage-specific icon for
+  // glanceable recognition; the underlying semantic is conservative:
+  // mid-flow stages are "info", manager-gates are "warning", terminal-good
+  // is "success", terminal-bad uses the existing destructive entries above.
+  configuration: { semantic: "info", icon: FileText, label: "Configuration" },
+  ideation: { semantic: "info", icon: Lightbulb, label: "Ideation" },
+  // `review` is in needs-attention above; reuse the warning palette with the
+  // happier-on-the-eye AlertTriangle so the brief-review gate still reads as
+  // "operator action needed".
+  generation: { semantic: "info", icon: Loader2, label: "Generation", spin: true },
+  creative_qa: { semantic: "warning", icon: ShieldCheck, label: "Creative QA" },
+  compliance_review: { semantic: "warning", icon: ShieldAlert, label: "Compliance" },
+  copy: { semantic: "info", icon: PenLine, label: "Copy" },
+  spec_validation: { semantic: "warning", icon: Hammer, label: "Spec validation" },
+  variant_plan: { semantic: "warning", icon: Layers, label: "Variant plan" },
+  finalize_assets: { semantic: "info", icon: Sparkles, label: "Finalize" },
+  launch_handoff: { semantic: "warning", icon: Rocket, label: "Launch" },
+  monitor: { semantic: "info", icon: Radio, label: "Monitor" },
+
+  // Pipeline format chips share the badge surface so the operator reads the
+  // same chip styling across the pipeline list, the detail header, and the
+  // dashboard kanban kind pill. Image / Video / Both map to neutral-info /
+  // info / success — semantically "image=default", "video=accent",
+  // "both=both, blessed".
+  image: { semantic: "info", icon: ImageIcon, label: "Image" },
+  video: { semantic: "info", icon: VideoIcon, label: "Video" },
+  both: { semantic: "success", icon: Sparkles, label: "Image + Video" },
+
+  // Monitor verdicts (kill / watch / keep). The decision palette mirrors the
+  // traffic-light semantics already used elsewhere - keep=success,
+  // watch=warning, kill=destructive - so the operator reads one consistent
+  // colour for "good / attention / stop".
+  keep: { semantic: "success", icon: CheckCircle2, label: "Keep" },
+  watch: { semantic: "warning", icon: AlertTriangle, label: "Watch" },
+  kill: { semantic: "destructive", icon: TrendingDown, label: "Kill" },
 };
 
 function normalize(status: string): string {
