@@ -219,4 +219,51 @@ describe("CreativesGrid", () => {
     });
     expect(await screen.findByText(/Failed to load archived creatives/i)).toBeInTheDocument();
   });
+
+  it("exports the visible creatives via the toolbar Export button", async () => {
+    const RealBlob = globalThis.Blob;
+    const captured: { content: string; type: string }[] = [];
+    vi.stubGlobal(
+      "Blob",
+      class MockBlob {
+        content: string;
+        type: string;
+        constructor(parts: BlobPart[], options?: BlobPropertyBag) {
+          this.content = parts.map(String).join("");
+          this.type = options?.type ?? "";
+          captured.push({ content: this.content, type: this.type });
+        }
+      },
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:mock");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => {});
+
+    try {
+      const user = userEvent.setup();
+      render(
+        <CreativesGrid
+          initialRows={[
+            row({ id: "c1", kind: "image", concept: "Hero hook" }),
+            row({ id: "v1", kind: "video", href: "/creatives/manage/video/v1" }),
+          ]}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: /^export$/i }));
+      await user.click(await screen.findByText("Export as CSV"));
+      expect(captured).toHaveLength(1);
+      const lines = captured[0]!.content.split("\r\n");
+      expect(lines[0]).toBe("Brief,Concept,Format,Status,Version,Created");
+      expect(lines.length).toBeGreaterThan(1);
+    } finally {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      globalThis.Blob = RealBlob;
+    }
+  });
+
+  it("disables the Export button when no rows are visible", () => {
+    render(<CreativesGrid initialRows={[]} />);
+    expect(screen.getByRole("button", { name: /^export$/i })).toBeDisabled();
+  });
 });
