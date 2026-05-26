@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import { ConfirmArchive } from "@/components/shared/ConfirmArchive";
 import { CrudDrawer } from "@/components/shared/CrudDrawer";
+import { ManagedGatePanels } from "@/components/creative/ManagedGatePanels";
 import { VideoDecisionButtons } from "@/components/creative/VideoDecisionButtons";
 import { VideoIterationThread } from "@/components/creative/VideoIterationThread";
 import { Button } from "@/components/ui/button";
@@ -305,46 +306,14 @@ export function VideoCreativeManage({
           </Section>
 
           <Section title="QA / Spec / Compliance">
-            <GatePanel label="QA">
-              {qa.length === 0 ? (
-                <Empty>No QA results.</Empty>
-              ) : (
-                qa.map((r) => (
-                  <GateRow
-                    key={r.id}
-                    status={String(r.status ?? "unknown")}
-                    primary={`Attempt ${String(r.attempt ?? "?")}`}
-                  />
-                ))
-              )}
-            </GatePanel>
-            <GatePanel label="Spec">
-              {spec.length === 0 ? (
-                <Empty>No spec checks.</Empty>
-              ) : (
-                spec.map((r) => (
-                  <GateRow
-                    key={r.id}
-                    status={String(r.status ?? "unknown")}
-                    primary={`${String(r.platform ?? "—")} · ${String(r.placement ?? "—")}`}
-                  />
-                ))
-              )}
-            </GatePanel>
-            <GatePanel label="Compliance">
-              {compliance.length === 0 ? (
-                <Empty>No compliance findings.</Empty>
-              ) : (
-                compliance.map((r) => (
-                  <GateRow
-                    key={r.id}
-                    status={String(r.verdict ?? "unknown")}
-                    primary={String(r.rule_id ?? "—")}
-                    note={r.overridden ? "overridden" : undefined}
-                  />
-                ))
-              )}
-            </GatePanel>
+            <ManagedGatePanels
+              creativeId={creative.id}
+              pipelineId={creative.pipeline_id}
+              surface="video"
+              qa={qa}
+              spec={spec}
+              compliance={compliance}
+            />
             <GatePanel label="Stage state">
               {stageState.length === 0 ? (
                 <Empty>No gate state.</Empty>
@@ -358,19 +327,18 @@ export function VideoCreativeManage({
                 ))
               )}
             </GatePanel>
-            {pipelineHref ? (
-              <p className="text-[11px] text-muted-foreground">
-                These gates are read-only here. Use{" "}
-                <Link href={pipelineHref as Route} className="underline underline-offset-4">
-                  the pipeline review
-                </Link>{" "}
-                to re-run QA or override compliance/spec.
-              </p>
-            ) : (
-              <p className="text-[11px] text-muted-foreground">
-                These gates mutate only through their decision/override routes.
-              </p>
-            )}
+            <p className="text-[11px] text-muted-foreground">
+              Gate transitions (stage state) flow through the decision routes only.
+              {pipelineHref ? (
+                <>
+                  {" "}
+                  <Link href={pipelineHref as Route} className="underline underline-offset-4">
+                    Open the pipeline review
+                  </Link>{" "}
+                  for the full gate flow.
+                </>
+              ) : null}
+            </p>
           </Section>
         </aside>
       </div>

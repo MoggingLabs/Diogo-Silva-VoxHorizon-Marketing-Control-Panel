@@ -5,15 +5,17 @@ import { useRouter } from "next/navigation";
 import { Info, TrendingUp, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { EditableValue } from "@/components/ui/EditableValue";
 import {
   classify,
   summarizeKpis,
   realCpl,
+  PERF_IMAGE_TABLE,
   VERDICT_LABEL,
   VERDICT_TONE,
   DEFAULT_THRESHOLDS,
   type DecisionThresholds,
-  type PerfRow,
+  type PerfRowWithId,
   type Verdict,
 } from "@/lib/monitor/thresholds";
 import { cn } from "@/lib/utils";
@@ -29,7 +31,7 @@ import { cn } from "@/lib/utils";
  */
 export type MonitorDashboardProps = {
   pipelineId: string;
-  rows: PerfRow[];
+  rows: PerfRowWithId[];
   /** Client CPL target overrides the default threshold band. */
   cplTarget?: number | null;
 };
@@ -125,8 +127,30 @@ export function MonitorDashboard({ pipelineId, rows, cplTarget }: MonitorDashboa
                     className="border-b border-border last:border-0"
                   >
                     <td className="px-3 py-2 font-mono text-xs">{row.campaign_id}</td>
-                    <td className="px-3 py-2">{money(row.spend ?? 0)}</td>
-                    <td className="px-3 py-2">{row.leads_ghl ?? 0}</td>
+                    <td className="px-3 py-2">
+                      <EditableValue
+                        tableName={PERF_IMAGE_TABLE}
+                        rowId={row.id}
+                        field="spend"
+                        type="number"
+                        value={row.spend}
+                        placeholder="0"
+                        ariaLabel={`Correct spend for ${row.campaign_id}`}
+                        onSaved={() => router.refresh()}
+                      />
+                    </td>
+                    <td className="px-3 py-2">
+                      <EditableValue
+                        tableName={PERF_IMAGE_TABLE}
+                        rowId={row.id}
+                        field="leads_ghl"
+                        type="number"
+                        value={row.leads_ghl}
+                        placeholder="0"
+                        ariaLabel={`Correct GHL leads for ${row.campaign_id}`}
+                        onSaved={() => router.refresh()}
+                      />
+                    </td>
                     <td className="px-3 py-2">{cpl === null ? "—" : money(cpl)}</td>
                     <td className="px-3 py-2">
                       <span
@@ -147,6 +171,11 @@ export function MonitorDashboard({ pipelineId, rows, cplTarget }: MonitorDashboa
           </tbody>
         </table>
       </div>
+
+      <p className="text-[11px] text-muted-foreground" data-testid="monitor-overlay-hint">
+        Spend and GHL leads are worker-owned. Click a value to record an operator correction; the
+        overlay never edits the source perf row.
+      </p>
 
       {error ? (
         <p role="alert" className="text-xs text-destructive" data-testid="monitor-error">

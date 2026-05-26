@@ -4,6 +4,9 @@ import {
   archiveCreative,
   listImageCreatives,
   listVideoCreatives,
+  overrideCompliance,
+  overrideSpec,
+  rerunQa,
   restoreCreative,
   updateImageCreative,
   updateVideoCreative,
@@ -130,5 +133,74 @@ describe("archiveCreative / restoreCreative", () => {
   it("falls back to statusText when the error body is empty", async () => {
     fetchMock.mockResolvedValueOnce(new Response("", { status: 503, statusText: "Service Down" }));
     await expect(archiveCreative("image", "c1")).rejects.toThrow(/Service Down/);
+  });
+});
+
+describe("rerunQa (append-only QA re-run)", () => {
+  it("POSTs to the QA route with the surface and returns the result", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ok: true, rollup: "passed", results: [], errors: [] }),
+    );
+    const out = await rerunQa("c1", { surface: "image" });
+    expect(out.rollup).toBe("passed");
+    expect(fetchMock).toHaveBeenCalledWith("/api/creatives/c1/qa", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ surface: "image" }),
+      cache: "no-store",
+    });
+  });
+
+  it("defaults to an empty body when no opts are given", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ok: true, rollup: "pending", results: [], errors: [] }),
+    );
+    await rerunQa("c1");
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).body).toBe("{}");
+  });
+
+  it("throws the inlined error on a non-2xx", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "worker_unreachable" }, { status: 502 }));
+    await expect(rerunQa("c1")).rejects.toThrow(/worker_unreachable/);
+  });
+});
+
+describe("overrideSpec (override-route only)", () => {
+  it("POSTs the corrected placement result to the spec route", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    await overrideSpec("c1", { placement: "feed", status: "pass", reason: "ok" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/creatives/c1/spec", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ placement: "feed", status: "pass", reason: "ok" }),
+      cache: "no-store",
+    });
+  });
+
+  it("throws the inlined error on a non-2xx", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "validation_failed" }, { status: 422 }));
+    await expect(
+      overrideSpec("c1", { placement: "feed", status: "pass", reason: "" }),
+    ).rejects.toThrow(/validation_failed/);
+  });
+});
+
+describe("overrideCompliance (existing pipeline route)", () => {
+  it("POSTs to the pipeline compliance-override route", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }));
+    await overrideCompliance("pp1", { creative_id: "c1", override_note: "reviewed" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/pipelines/pp1/compliance/override", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ creative_id: "c1", override_note: "reviewed" }),
+      cache: "no-store",
+    });
+  });
+
+  it("throws the inlined error on a non-2xx", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not found" }, { status: 404 }));
+    await expect(
+      overrideCompliance("pp1", { creative_id: "c1", override_note: "x" }),
+    ).rejects.toThrow(/not found/);
   });
 });

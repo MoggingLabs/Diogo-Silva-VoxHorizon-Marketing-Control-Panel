@@ -10,6 +10,72 @@ export type WorkerHealth = {
   [key: string]: unknown;
 };
 
+/**
+ * One creative to (re-)QA. Mirrors the worker's `QAItem` (qa_compliance.py):
+ * the operator supplies the `creative_id` + the surface; the worker fetches the
+ * bytes / probes the MP4 itself and computes the verdict (the operator never
+ * asserts a pass). `image_b64`/`overlay_region` are optional fast-paths.
+ */
+export type WorkerQAItem = {
+  creative_id: string;
+  surface?: "image" | "video";
+  vertical?: string | null;
+  ratio?: string;
+};
+
+/** Body for `POST /work/pipeline/tools/qa_run`. */
+export type WorkerQARunInput = {
+  pipeline_id: string;
+  items: WorkerQAItem[];
+};
+
+/** Per-creative result row in the qa_run response. */
+export type WorkerQAResult = {
+  creative_id: string;
+  surface: "image" | "video";
+  verdict: string;
+  status: string;
+  attempt: number;
+  rerender_recommended: boolean;
+  defect_count: number;
+};
+
+/** Response from `POST /work/pipeline/tools/qa_run`. */
+export type WorkerQARunResponse = {
+  ok: boolean;
+  pipeline_id: string;
+  stage: "creative_qa";
+  rollup: string;
+  results: WorkerQAResult[];
+  errors: Array<{ creative_id: string; error: string }>;
+};
+
+/** One per-placement spec result. Mirrors the worker's `SpecResult`. */
+export type WorkerSpecResult = {
+  creative_id: string;
+  platform?: "meta" | "google" | "tiktok";
+  placement: string;
+  ratio?: string | null;
+  status: "pending" | "pass" | "warn" | "fail" | "exception";
+  checks?: Record<string, unknown>;
+  derived_path_supabase?: string | null;
+  derived_path_drive?: string | null;
+};
+
+/** Body for `POST /work/pipeline/tools/spec_result`. */
+export type WorkerSpecInput = {
+  pipeline_id: string;
+  results: WorkerSpecResult[];
+};
+
+/** Response from `POST /work/pipeline/tools/spec_result`. */
+export type WorkerSpecResponse = {
+  ok?: boolean;
+  pipeline_id?: string;
+  stage?: string;
+  [key: string]: unknown;
+};
+
 export class WorkerError extends Error {
   constructor(
     message: string,
@@ -55,10 +121,7 @@ async function fetchWithTimeout(
  * Throws `WorkerError` on non-2xx responses or network/abort errors after
  * the retry.
  */
-export async function callWorker<T = unknown>(
-  path: string,
-  init: RequestInit = {},
-): Promise<T> {
+export async function callWorker<T = unknown>(path: string, init: RequestInit = {}): Promise<T> {
   const base = cleanEnv("WORKER_URL").replace(/\/$/, "");
   const secret = cleanEnv("WORKER_SHARED_SECRET");
   const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
@@ -107,11 +170,39 @@ export async function callWorker<T = unknown>(
   }
 
   if (lastError instanceof WorkerError) throw lastError;
-  throw new WorkerError(
-    `Worker request to ${path} failed after retry`,
-    undefined,
-    lastError,
-  );
+  throw new WorkerError(`Worker request to ${path} failed after retry`, undefined, lastError);
+}
+
+/**
+ * Re-run creative QA for a batch via `POST /work/pipeline/tools/qa_run`.
+ *
+ * APPEND-ONLY guardrail: the worker INSERTs a NEW `qa_result` attempt
+ * (`unique(creative_id, attempt)`) and rolls the verdict onto
+ * `creative_stage_state(creative_qa)`; it never edits a prior attempt. The
+ * dashboard's "re-run QA" action is this call — corrective evidence is a new
+ * row, the immutable audit history stays intact (migration 0041).
+ */
+export async function qaRun(body: WorkerQARunInput): Promise<WorkerQARunResponse> {
+  return await callWorker<WorkerQARunResponse>("/work/pipeline/tools/qa_run", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * (Re-)submit per-placement spec results via `POST /work/pipeline/tools/spec_result`.
+ *
+ * OVERRIDE-ROUTE guardrail: `spec_check` is worker-upserted (idempotent on
+ * `(creative_id, platform, placement)`) and the gate rolls onto
+ * `creative_stage_state(spec_validation)`. A manager spec override is a
+ * corrected result submitted through this route + the DB rollup, never a raw
+ * UPDATE of the source row from the browser.
+ */
+export async function specRun(body: WorkerSpecInput): Promise<WorkerSpecResponse> {
+  return await callWorker<WorkerSpecResponse>("/work/pipeline/tools/spec_result", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 }
 
 /**
@@ -119,4 +210,6 @@ export async function callWorker<T = unknown>(
  */
 export const worker = {
   health: () => callWorker<WorkerHealth>("/work/health"),
+  qaRun,
+  specRun,
 };
