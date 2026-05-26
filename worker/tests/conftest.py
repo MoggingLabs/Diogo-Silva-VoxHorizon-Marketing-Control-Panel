@@ -86,6 +86,16 @@ class _FakeQuery:
         self._filters.append((col, val))
         return self
 
+    def in_(self, col: str, vals: list[Any]) -> "_FakeQuery":
+        """``column in (...)`` filter -- mirrors the supabase-py ``in_``.
+
+        Encoded as a special tuple so ``_matches`` checks set membership rather
+        than equality. Used by the silent-failure work_queue facade for
+        token-scoped UPDATEs that constrain ``status in ('claimed','running')``.
+        """
+        self._filters.append((col, ("__in__", tuple(vals))))
+        return self
+
     def order(self, col: str, *, desc: bool = False) -> "_FakeQuery":
         self._order = (col, desc)
         return self
@@ -120,7 +130,17 @@ class _FakeQuery:
 
     # -- internals ---------------------------------------------------------
     def _matches(self, row: dict[str, Any]) -> bool:
-        return all(row.get(c) == v for c, v in self._filters)
+        for col, val in self._filters:
+            if (
+                isinstance(val, tuple)
+                and len(val) == 2
+                and val[0] == "__in__"
+            ):
+                if row.get(col) not in val[1]:
+                    return False
+            elif row.get(col) != val:
+                return False
+        return True
 
     def _do_insert(self) -> SimpleNamespace:
         rows = self._insert_data if isinstance(self._insert_data, list) else [self._insert_data]
