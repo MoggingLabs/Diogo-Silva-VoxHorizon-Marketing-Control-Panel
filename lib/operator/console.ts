@@ -45,18 +45,42 @@ const EVENTS_PER_RUN = 30;
 export async function getOperatorRuns(limit = 25): Promise<OperatorRun[]> {
   const supabase = createAdminClient();
 
-  // Active, non-archived runs, newest activity first. We over-fetch a little and
-  // filter to operator-driven in app code (config_draft is jsonb; a JSON arrow
-  // filter is brittle across PostgREST versions, and the active set is small).
+  // Active, non-archived runs, newest activity first. Silent-failure PR-4:
+  // `pipelines.status` was dropped (migration 0051) -- derived_status now
+  // comes from `v_pipeline_dispatch_state`. We over-fetch a little and filter
+  // to operator-driven in app code (config_draft is jsonb; a JSON arrow filter
+  // is brittle across PostgREST versions, and the active set is small).
   const { data: rows } = await supabase
     .from("pipelines")
-    .select("id, status, format_choice, client_id, config_draft, created_at, updated_at")
+    .select("id, format_choice, client_id, config_draft, created_at, updated_at")
     .is("deleted_at", null)
-    .not("status", "in", `(${TERMINAL.join(",")})`)
     .order("updated_at", { ascending: false })
     .limit(limit * 2);
 
-  const operatorRows = (rows ?? []).filter((r) => isOperatorDriven(r.config_draft)).slice(0, limit);
+  const candidateRows = (rows ?? []).filter((r) => isOperatorDriven(r.config_draft));
+  if (candidateRows.length === 0) return [];
+
+  // Fetch the derived statuses for the candidate set in one round-trip, then
+  // drop the terminal rows (done / cancelled) so the console only lists
+  // ACTIVE runs.
+  const candidateIds = candidateRows.map((r) => r.id);
+  const { data: dispatchRows } = await supabase
+    .from("v_pipeline_dispatch_state")
+    .select("pipeline_id, derived_status")
+    .in("pipeline_id", candidateIds);
+  const statusById = new Map<string, PipelineStatus>();
+  for (const dr of dispatchRows ?? []) {
+    if (!dr.pipeline_id) continue;
+    statusById.set(dr.pipeline_id, (dr.derived_status ?? "configuration") as PipelineStatus);
+  }
+
+  const operatorRows = candidateRows
+    .map((r) => ({
+      ...r,
+      status: statusById.get(r.id) ?? ("configuration" as PipelineStatus),
+    }))
+    .filter((r) => !TERMINAL.includes(r.status))
+    .slice(0, limit);
 
   if (operatorRows.length === 0) return [];
 
@@ -118,7 +142,7 @@ export async function getOperatorRuns(limit = 25): Promise<OperatorRun[]> {
 
   return operatorRows.map((r) => ({
     id: r.id,
-    status: r.status as PipelineStatus,
+    status: r.status,
     format_choice: r.format_choice,
     client_id: r.client_id,
     clientName: r.client_id ? (clientNames[r.client_id] ?? null) : null,

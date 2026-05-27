@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { ChatRequest } from "@/lib/chat";
 import { chatStream } from "@/lib/hermes/client";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -57,11 +58,13 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // Confirm the pipeline exists + is still in configuration.
+  // Confirm the pipeline exists + is still in configuration. Silent-failure
+  // PR-4: read derived status from the reducer (`pipelines.status` was dropped
+  // in 0051).
   const supabase = createAdminClient();
   const { data: pipeline, error: fetchErr } = await supabase
     .from("pipelines")
-    .select("id, status, format_choice")
+    .select("id, format_choice")
     .eq("id", id)
     .maybeSingle();
   if (fetchErr) {
@@ -70,9 +73,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "configuration") {
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "configuration") {
     return NextResponse.json(
-      { error: "config locked", current_status: pipeline.status },
+      { error: "config locked", current_status: derivedStatus },
       { status: 409 },
     );
   }

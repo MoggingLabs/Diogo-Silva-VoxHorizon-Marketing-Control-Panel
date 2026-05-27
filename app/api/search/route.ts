@@ -211,18 +211,34 @@ export async function GET(req: NextRequest) {
   );
 
   // --- pipelines (exact id only; no human-readable name column) ------------
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051). Read
+  // derived_status from the canonical view (v_pipeline_dispatch_state) instead.
   if (isUuid) {
     tasks.push(
       (async () => {
         const { data } = await supabase
           .from("pipelines")
-          .select("id, status, format_choice")
+          .select("id, format_choice")
           .eq("id", q)
           .limit(PER_KIND_LIMIT);
-        return (data ?? []).map((r) => ({
+        const rows = data ?? [];
+        if (rows.length === 0)
+          return [] as Array<{ kind: "pipeline"; id: string; label: string; href: string }>;
+        const { data: vRows } = await supabase
+          .from("v_pipeline_dispatch_state")
+          .select("pipeline_id, derived_status")
+          .in(
+            "pipeline_id",
+            rows.map((r) => r.id),
+          );
+        const statusById = new Map<string, string>();
+        for (const v of vRows ?? []) {
+          if (v.pipeline_id) statusById.set(v.pipeline_id, v.derived_status ?? "configuration");
+        }
+        return rows.map((r) => ({
           kind: "pipeline" as const,
           id: r.id,
-          label: `Pipeline ${r.format_choice} / ${r.status}`,
+          label: `Pipeline ${r.format_choice} / ${statusById.get(r.id) ?? "configuration"}`,
           href: `/pipeline/${r.id}`,
         }));
       })(),

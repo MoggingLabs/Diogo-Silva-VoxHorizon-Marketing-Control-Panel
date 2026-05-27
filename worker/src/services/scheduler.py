@@ -42,7 +42,6 @@ import structlog
 
 from ..config import Settings, get_settings
 from . import observability, work_queue
-from .operator_dispatch_watchdog import StuckDispatch, find_stuck_dispatches
 from .work_item_watchdog import (
     StaleConsumer,
     StuckWorkItem,
@@ -122,120 +121,14 @@ def load_reconciliation_targets() -> list[ReconcileTarget]:
     return []
 
 
-# ---------------------------------------------------------------------------
-# Job: dispatch watchdog
-# ---------------------------------------------------------------------------
-
-
-def _open_dispatch_rows(sb: Any) -> list[dict[str, Any]]:
-    """Read the open (``dispatched``/``running``) operator_dispatches rows."""
-    resp = (
-        sb.table("operator_dispatches")
-        .select(
-            "id, dispatch_id, pipeline_id, stage, expected_status, status, "
-            "dispatched_at, last_heartbeat_at"
-        )
-        .in_("status", ["dispatched", "running"])
-        .execute()
-    )
-    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
-
-
-def _mark_timed_out(sb: Any, *, dispatch_id: str, pipeline_id: str) -> None:
-    """Stamp a stuck dispatch ``timed_out`` so it is never re-judged.
-
-    Mirrors the terminal-close payload the ``/work/pipeline/tools/signal`` route
-    writes (status + completed_at) so a watchdog-closed row is indistinguishable
-    from an operator-closed one to every downstream reader.
-    """
-    now = datetime.now(timezone.utc).isoformat()
-    sb.table("operator_dispatches").update(
-        {"status": "timed_out", "completed_at": now, "last_heartbeat_at": now}
-    ).eq("pipeline_id", pipeline_id).eq("dispatch_id", dispatch_id).execute()
-
-
-def _resume_instruction(stuck: StuckDispatch) -> str:
-    """Build the re-dispatch instruction for a stuck operator run.
-
-    The operator is stateless per dispatch and re-reads live pipeline state, and
-    its per-stage work is skip-done idempotent (see the watchdog module
-    docstring), so a generic "resume from where you left off" is safe -- no
-    duplicate spend, no double work.
-    """
-    stage = stuck.stage or "the current stage"
-    return (
-        f"Resume pipeline {stuck.pipeline_id}: the previous dispatch for "
-        f"{stage} stalled (idle {stuck.idle_seconds:.0f}s) and was timed out. "
-        "Re-read the live pipeline state and continue; already-completed work is "
-        "skipped automatically."
-    )
-
-
-async def run_dispatch_watchdog_once(settings: Settings) -> int:
-    """One pass of the stuck-dispatch watchdog. Returns rows re-dispatched.
-
-    Reads the open ``operator_dispatches`` rows, asks the pure
-    :func:`find_stuck_dispatches` core which are wedged past the timeout, then for
-    each: marks it ``timed_out`` and re-dispatches the operator (idempotent
-    resume). Bounded by ``scheduler_watchdog_max_redispatch`` per pass so a
-    backlog can't fan out an unbounded burst of docker execs.
-    """
-    from ..supabase_client import get_supabase_admin  # lazy: never forces a client
-    from .operator_bridge import OperatorBridgeError, get_operator_bridge
-
-    sb = get_supabase_admin()
-    rows = _open_dispatch_rows(sb)
-    stuck = find_stuck_dispatches(
-        rows,
-        timeout=timedelta(seconds=settings.scheduler_watchdog_timeout_s),
-    )
-    if not stuck:
-        log.info("watchdog_no_stuck_dispatches", open_rows=len(rows))
-        return 0
-
-    bridge = get_operator_bridge()
-    redispatched = 0
-    for item in stuck[: settings.scheduler_watchdog_max_redispatch]:
-        # Mark timed_out FIRST so a re-dispatch that itself stalls is judged from
-        # its own fresh row, not this one (no thrash on the same dispatch_id).
-        try:
-            _mark_timed_out(
-                sb, dispatch_id=item.dispatch_id, pipeline_id=item.pipeline_id
-            )
-        except Exception as exc:  # noqa: BLE001 -- one bad row never sinks the pass
-            log.warning(
-                "watchdog_mark_timed_out_failed",
-                dispatch_id=item.dispatch_id,
-                pipeline_id=item.pipeline_id,
-                error=str(exc),
-            )
-            continue
-
-        try:
-            await bridge.dispatch(_resume_instruction(item), item.pipeline_id)
-            redispatched += 1
-            log.info(
-                "watchdog_redispatched",
-                dispatch_id=item.dispatch_id,
-                pipeline_id=item.pipeline_id,
-                stage=item.stage,
-                idle_seconds=round(item.idle_seconds, 1),
-            )
-        except OperatorBridgeError as exc:
-            log.warning(
-                "watchdog_redispatch_failed",
-                dispatch_id=item.dispatch_id,
-                pipeline_id=item.pipeline_id,
-                error=str(exc),
-            )
-
-    log.info(
-        "watchdog_pass_done",
-        stuck=len(stuck),
-        redispatched=redispatched,
-        open_rows=len(rows),
-    )
-    return redispatched
+# Silent-failure PR-4: the legacy per-domain `run_dispatch_watchdog_once`
+# and `run_outbox_relay_once` jobs were retired in PR-3 (the unified
+# `run_work_item_watchdog_once` covers BOTH responsibilities -- stuck operator
+# dispatches AND outbox-style retries ride the same kind enum + the same
+# heartbeat-stale rotation). PR-4 deletes the underlying functions plus the
+# legacy modules they pulled in (operator_bridge, operator_dispatch_watchdog,
+# outbox_relay). The legacy tables they read from were renamed `_legacy_*`
+# by migration 0051.
 
 
 # ---------------------------------------------------------------------------
@@ -539,74 +432,30 @@ async def deliver_ops_alerts(
 # ---------------------------------------------------------------------------
 
 
-def _all_dispatch_rows(sb: Any) -> list[dict[str, Any]]:
-    resp = (
-        sb.table("operator_dispatches")
-        .select("dispatch_id, id, pipeline_id, status, dispatched_at, last_heartbeat_at")
-        .execute()
-    )
-    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
-
-
-def _all_outbox_rows(sb: Any) -> list[dict[str, Any]]:
-    resp = (
-        sb.table("integration_outbox")
-        .select("idempotency_key, id, pipeline_id, status, created_at")
-        .execute()
-    )
-    return resp.data if (resp is not None and isinstance(resp.data, list)) else []
-
-
 async def run_observability_once(settings: Settings) -> dict[str, int]:
     """One pass of the observability watchdogs. Returns the stuck counts.
 
-    Classifies stuck operator dispatches + stuck outbox rows via the pure cores
-    in :mod:`services.observability`, logs a structured alert line per stuck item
-    (greppable by ``pipeline_id``), AND -- E5.6 -- DELIVERS a Slack ops alert when
-    a problem is detected. The findings (stuck dispatches + a metrics snapshot
-    carrying the outbox dead-letter pile / depth / breaker map / cost-vs-cap) are
-    folded into :func:`evaluate_alert_conditions`; any firing condition is paged
-    to the ops channel via :func:`deliver_ops_alerts` (throttled, best-effort).
-    The alert step is wrapped so it never raises -- a single bad tick (or a Slack
-    outage) never disturbs the supervised loop, and the structured logs always
-    emit regardless (log-based alerting keeps working).
+    Silent-failure PR-4: the legacy per-domain readers
+    (``_all_dispatch_rows``/``_all_outbox_rows``) were removed -- the
+    operator_dispatches + integration_outbox tables were renamed `_legacy_*`
+    in migration 0051 and nothing writes to them anymore. The unified
+    `run_work_item_watchdog_once` covers the equivalent surface against the
+    `work_item` queue. This tick now only DELIVERS the alert conditions the
+    metrics snapshot reports -- the structured logs the legacy watchdogs
+    emitted are gone with their data sources.
     """
-    from ..supabase_client import get_supabase_admin
-
-    sb = get_supabase_admin()
-    now = datetime.now(timezone.utc)
-
-    stuck_disp = observability.stuck_dispatches(
-        _all_dispatch_rows(sb),
-        now=now,
-        timeout_s=settings.scheduler_observability_dispatch_timeout_s,
-    )
-    stuck_ob = observability.stuck_outbox(
-        _all_outbox_rows(sb),
-        now=now,
-        timeout_s=settings.scheduler_observability_outbox_timeout_s,
-    )
-
-    for item in stuck_disp:
-        log.warning(
-            "observability_stuck_dispatch",
-            ref=item.ref,
-            pipeline_id=item.pipeline_id,
-            age_s=round(item.age_s, 1),
-        )
-    for item in stuck_ob:
-        log.warning(
-            "observability_stuck_outbox",
-            ref=item.ref,
-            pipeline_id=item.pipeline_id,
-            age_s=round(item.age_s, 1),
-        )
+    sb = None
+    stuck_disp: list[Any] = []
+    stuck_ob: list[Any] = []
 
     # E5.6: turn the findings into ops alerts + DELIVER them (best-effort). The
     # metrics snapshot supplies the outbox dead-letter/depth, breaker map, and
-    # cost-vs-cap; stuck dispatches come from the watchdog above. The whole step
-    # is wrapped so an alerting failure never disturbs the loop.
+    # cost-vs-cap. The whole step is wrapped so an alerting failure never
+    # disturbs the loop.
     try:
+        from ..supabase_client import get_supabase_admin
+
+        sb = get_supabase_admin()
         snapshot = observability.metrics_snapshot(sb)
         conditions = evaluate_alert_conditions(
             settings, stuck_dispatches=stuck_disp, metrics=snapshot
@@ -821,32 +670,11 @@ def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
         log.warning("kie_reconcile_attempt_bump_failed", task_id=task_id, error=str(exc))
 
 
-# ---------------------------------------------------------------------------
-# Job: transactional-outbox relay (E5.1 / #510)
-# ---------------------------------------------------------------------------
-#
-# Drains the ``integration_outbox`` (the durable external-write queue): claims
-# due rows, performs the registered side effect, records success or backs off /
-# dead-letters on failure. Bounded per pass (``scheduler_outbox_max_per_pass``)
-# like every other cron core. The pure pass lives in :mod:`services.outbox_relay`
-# (injectable handlers, no I/O of its own); this is the thin scheduler seam that
-# supplies the wired handler set.
-
-
-async def run_outbox_relay_once(settings: Settings) -> int:
-    """One pass of the transactional-outbox relay. Returns rows resolved.
-
-    Thin wrapper over :func:`services.outbox_relay.run_outbox_relay_once` that
-    supplies the wired ``(integration, op) -> handler`` map. "Resolved" counts
-    the rows this pass took to a terminal-ish outcome (done + dead-lettered);
-    backed-off + skipped rows are not counted (they recur next pass). Imported
-    lazily so the scheduler module never forces the relay's imports at import
-    time and tests can patch it on either module.
-    """
-    from .outbox_relay import default_handlers, run_outbox_relay_once as _relay_pass
-
-    result = await _relay_pass(settings, handlers=default_handlers())
-    return result.done + result.dead_lettered
+# Silent-failure PR-4: the legacy `run_outbox_relay_once` (and the
+# `outbox_relay` module it delegated to) were deleted. The unified
+# `run_work_item_watchdog_once` below owns the equivalent surface against the
+# `work_item` queue, and the legacy `integration_outbox` table was renamed
+# `_legacy_*` by migration 0051.
 
 
 # ---------------------------------------------------------------------------
@@ -1154,13 +982,13 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
     returns an empty :class:`Scheduler` (``task_count == 0``) -- the app boots
     normally with no loops. Otherwise it spawns one supervised loop per job.
 
-    Silent-failure PR-3 cutover: the per-domain ``dispatch_watchdog`` and
-    ``outbox_relay`` loops were retired -- the unified ``work_item_watchdog``
+    Silent-failure PR-4 cutover: the per-domain ``dispatch_watchdog`` and
+    ``outbox_relay`` loops are gone -- the unified ``work_item_watchdog``
     owns both responsibilities now (any stuck dispatch is a stuck work_item;
-    any failed outbox row rides the same retry chain). PR-4 deletes the
-    underlying ``run_dispatch_watchdog_once`` and ``run_outbox_relay_once``
-    functions; for now they stay exported so any external caller keeps
-    compiling.
+    any failed outbox row rides the same retry chain). The underlying
+    ``run_dispatch_watchdog_once`` and ``run_outbox_relay_once`` functions
+    plus the legacy modules they pulled in (``operator_bridge``,
+    ``operator_dispatch_watchdog``, ``outbox_relay``) are deleted.
 
     Must be called from inside a running event loop (the FastAPI lifespan).
     """
@@ -1178,11 +1006,11 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
 
     loop = asyncio.get_event_loop()
     tasks: list[asyncio.Task[Any]] = [
-        # Silent-failure PR-3 cutover: `dispatch_watchdog` + `outbox_relay`
-        # were retired -- the unified `work_item_watchdog` covers BOTH
-        # responsibilities now (stuck dispatches AND outbox-style retries
-        # ride the same kind enum + the same heartbeat-stale rotation).
-        # The functions are still exported so PR-4 can delete them cleanly.
+        # Silent-failure PR-4: the per-domain `dispatch_watchdog` +
+        # `outbox_relay` loops + their underlying modules are gone -- the
+        # unified `work_item_watchdog` covers BOTH responsibilities now (stuck
+        # dispatches AND outbox-style retries ride the same kind enum + the
+        # same heartbeat-stale rotation).
         loop.create_task(
             _interval_loop(
                 "observability",
@@ -1232,10 +1060,8 @@ __all__ = [
     "evaluate_alert_conditions",
     "load_reconciliation_targets",
     "reset_alert_throttle",
-    "run_dispatch_watchdog_once",
     "run_kie_reconcile_once",
     "run_observability_once",
-    "run_outbox_relay_once",
     "run_reconciliation_once",
     "run_work_item_watchdog_once",
     "start_scheduler",

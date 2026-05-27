@@ -54,7 +54,17 @@ export type SupabaseTableConfig = {
   delete?: SupabaseMockResult & { single?: SupabaseMockResult };
 };
 
-export type SupabaseMockConfig = Record<string, SupabaseTableConfig>;
+/**
+ * Per-RPC behaviour for the mock. Maps an RPC name to its resolved result.
+ * Silent-failure PR-4 introduced `compute_pipeline_status(id)` so routes can
+ * derive the dropped `pipelines.status` column on the fly; tests configure it
+ * here so a route that calls the RPC sees the right stage.
+ */
+export type SupabaseRpcConfig = Record<string, SupabaseMockResult>;
+
+export type SupabaseMockConfig = Record<string, SupabaseTableConfig> & {
+  rpc?: SupabaseRpcConfig;
+};
 
 const DEFAULT_RESULT: SupabaseMockResult = { data: null, error: null };
 
@@ -181,7 +191,7 @@ export function mockSupabaseClient(
 ) {
   const signer = options.storageSign ?? ((path: string) => `https://signed.test/${path}`);
   const fromSpy = vi.fn((table: string) => {
-    const tableConfig = config[table];
+    const tableConfig = (config as Record<string, SupabaseTableConfig | undefined>)[table];
     const builder: Record<string | symbol, unknown> = {};
 
     builder.select = vi.fn(() => buildChain("select", tableConfig));
@@ -193,11 +203,51 @@ export function mockSupabaseClient(
     return builder;
   });
 
+  // Silent-failure PR-4: routes call `compute_pipeline_status(id)` to derive
+  // the status of a pipeline (the column was dropped). The mock surfaces an
+  // `rpc(name, args)` resolver so tests can plug a stage in via the explicit
+  // `rpc:` config. Back-compat shim: if no explicit RPC result is configured
+  // but the pipelines-table mock data carries `status`, we use that as the
+  // RPC reply so the (many) tests that pre-date the column drop keep working
+  // without per-test edits.
+  const rpcConfig: SupabaseRpcConfig = config.rpc ?? {};
+  function inferPipelineStatus(): unknown | undefined {
+    const pipelinesCfg = (config as Record<string, SupabaseTableConfig | undefined>).pipelines;
+    if (!pipelinesCfg) return undefined;
+    const single = pipelinesCfg.select?.single ?? pipelinesCfg.select;
+    const data = single?.data as
+      | Record<string, unknown>
+      | Array<Record<string, unknown>>
+      | null
+      | undefined;
+    if (!data) return undefined;
+    if (Array.isArray(data)) {
+      // Row arrays sometimes seed list responses; if every row has a status,
+      // we cannot disambiguate across pipelines, so do not infer in that case.
+      return undefined;
+    }
+    return data.status;
+  }
+  const rpcSpy = vi.fn((name: string) => {
+    const cfg = rpcConfig[name];
+    if (cfg) {
+      return Promise.resolve({ data: cfg.data ?? null, error: cfg.error ?? null });
+    }
+    if (name === "compute_pipeline_status") {
+      const inferred = inferPipelineStatus();
+      if (typeof inferred === "string") {
+        return Promise.resolve({ data: inferred, error: null });
+      }
+    }
+    return Promise.resolve({ data: null, error: null });
+  });
+
   const channelSpy = vi.fn(() => buildChannel());
   const removeChannelSpy = vi.fn(() => Promise.resolve("ok"));
 
   return {
     from: fromSpy,
+    rpc: rpcSpy,
     storage: buildStorage(signer),
     channel: channelSpy,
     removeChannel: removeChannelSpy,
@@ -209,7 +259,7 @@ export function mockSupabaseClient(
         Promise.resolve({ data: { session: null }, error: null } as SupabaseMockResult),
       ),
     },
-    _spies: { from: fromSpy, channel: channelSpy, removeChannel: removeChannelSpy },
+    _spies: { from: fromSpy, rpc: rpcSpy, channel: channelSpy, removeChannel: removeChannelSpy },
   };
 }
 

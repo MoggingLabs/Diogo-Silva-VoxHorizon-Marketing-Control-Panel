@@ -311,12 +311,10 @@ def worker_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
     from src.config import get_settings
     from src.routes import health as health_mod
-    from src.services.operator_bridge import reset_operator_bridge
     from src.services.queue import reset_queue
 
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
     health_mod._reset_bridge()
 
     # Pre-seed a fake Hermes bridge so create_app() / the /work/health route
@@ -331,7 +329,6 @@ def worker_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
     health_mod._reset_bridge()
 
 

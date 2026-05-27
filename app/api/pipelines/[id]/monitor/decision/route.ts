@@ -1,11 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { MonitorDecisionInput } from "@/lib/pipeline/decision-schemas";
 import {
   type PipelineEventInsert,
   type PipelineInsert,
   type PipelineUpdate,
 } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 
@@ -58,9 +60,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "monitor") {
+  // Silent-failure PR-4: read derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "monitor") {
     return NextResponse.json(
-      { error: "invalid_state", current: pipeline.status, expected: "monitor" },
+      { error: "invalid_state", current: derivedStatus, expected: "monitor" },
       { status: 409 },
     );
   }
@@ -72,17 +77,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
-  // Silent-failure PR-3: write the done status alongside the strict
-  // event emission.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The stage_advanced event below is the canonical status write.
   const update: PipelineUpdate = {
-    status: "done",
     advanced_at: { ...advancedAt, done: now } as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", id)
-    .eq("status", "monitor")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -151,7 +154,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   });
 
   return NextResponse.json({
-    pipeline: updated,
+    pipeline: { ...updated, status: "done" as PipelineStatus },
     decision,
     ...(spawnedPipelineId ? { spawned_pipeline_id: spawnedPipelineId } : {}),
     ...(spawnError ? { spawn_error: spawnError } : {}),

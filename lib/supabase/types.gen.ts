@@ -1817,6 +1817,10 @@ export type Database = {
         ]
       }
       pipelines: {
+        // Silent-failure PR-4: `status` was dropped (migration 0051). The
+        // canonical answer comes from `compute_pipeline_status(id)` -- see
+        // `lib/pipeline/derived-status.ts` for the helper every route uses
+        // to hydrate the field on the curated `Pipeline` view model.
         Row: {
           advanced_at: Json
           approval: Json | null
@@ -1831,7 +1835,6 @@ export type Database = {
           image_brief_id: string | null
           launch_package_id: string | null
           picks: Json
-          status: Database["public"]["Enums"]["pipeline_status_enum"]
           updated_at: string
           video_brief_id: string | null
         }
@@ -1849,7 +1852,6 @@ export type Database = {
           image_brief_id?: string | null
           launch_package_id?: string | null
           picks?: Json
-          status?: Database["public"]["Enums"]["pipeline_status_enum"]
           updated_at?: string
           video_brief_id?: string | null
         }
@@ -1867,7 +1869,6 @@ export type Database = {
           image_brief_id?: string | null
           launch_package_id?: string | null
           picks?: Json
-          status?: Database["public"]["Enums"]["pipeline_status_enum"]
           updated_at?: string
           video_brief_id?: string | null
         }

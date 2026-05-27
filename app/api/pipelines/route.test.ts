@@ -256,7 +256,14 @@ describe("GET /api/pipelines", () => {
   });
 
   it("applies status, client_id, cursor, and limit filters", async () => {
+    // Silent-failure PR-4: `?status=` filtering reads derived_status from
+    // `v_pipeline_dispatch_state` (the dropped column's replacement). Seed
+    // the view with one matching id so the route falls through to the
+    // pipelines table call where the other filters land.
     currentSupabase = mockSupabaseClient({
+      v_pipeline_dispatch_state: {
+        select: { data: [{ pipeline_id: "p1", derived_status: "ideation" }], error: null },
+      },
       pipelines: { select: { data: [], error: null } },
     });
 
@@ -270,19 +277,35 @@ describe("GET /api/pipelines", () => {
 
     expect(res.status).toBe(200);
 
-    // Inspect the query chain produced by `from('pipelines').select(...)`.
-    const fromResult = currentSupabase._spies.from.mock.results[0]?.value as
-      | Record<string, ReturnType<typeof vi.fn>>
-      | undefined;
-    if (!fromResult) throw new Error("from() was never called");
-    const selectFn = fromResult.select;
-    if (!selectFn) throw new Error("from(...).select was never invoked");
-    const selectChain = selectFn.mock.results[0]?.value as
-      | Record<string, ReturnType<typeof vi.fn>>
-      | undefined;
-    if (!selectChain) throw new Error("select() returned no chain");
+    // Silent-failure PR-4: `?status=` filtering routes through
+    // `v_pipeline_dispatch_state.derived_status` (the dropped column's
+    // event-sourced replacement). The pipelines table call applies the
+    // `client_id` + `cursor` filters + `limit`.
+    const fromCalls = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
+    expect(fromCalls).toContain("v_pipeline_dispatch_state");
+    expect(fromCalls).toContain("pipelines");
 
-    expect(selectChain.eq).toHaveBeenCalledWith("status", "ideation");
+    // Find the v_pipeline_dispatch_state chain and assert the derived-status
+    // filter landed on it.
+    const viewCallIdx = fromCalls.indexOf("v_pipeline_dispatch_state");
+    const viewResult = currentSupabase._spies.from.mock.results[viewCallIdx]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const viewChain = viewResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    if (!viewChain) throw new Error("view select() returned no chain");
+    expect(viewChain.eq).toHaveBeenCalledWith("derived_status", "ideation");
+
+    // The pipelines call carries client_id + cursor + limit.
+    const pipelinesCallIdx = fromCalls.indexOf("pipelines");
+    const pipelinesResult = currentSupabase._spies.from.mock.results[pipelinesCallIdx]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    const selectChain = pipelinesResult?.select?.mock.results[0]?.value as
+      | Record<string, ReturnType<typeof vi.fn>>
+      | undefined;
+    if (!selectChain) throw new Error("pipelines select() returned no chain");
     expect(selectChain.eq).toHaveBeenCalledWith(
       "client_id",
       "22222222-2222-4222-8222-222222222222",

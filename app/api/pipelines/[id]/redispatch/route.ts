@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database } from "@/lib/supabase/types.gen";
 import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
@@ -45,12 +46,12 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
   const supabase = createAdminClient();
 
-  // 1. Load the pipeline. Re-derive the stage from `compute_pipeline_status`
-  //    would also work, but the route also needs `config_draft` for the
-  //    operator-driven check so we read the row directly.
+  // 1. Load the pipeline. We need `config_draft` for the operator-driven
+  //    check; `status` was dropped in migration 0051 so we derive it from
+  //    the reducer.
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status, config_draft")
+    .select("id, config_draft")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
@@ -59,12 +60,13 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
 
   // 2. Terminal pipelines have nothing to redispatch -- the operator daemon
   //    propagates pipeline_cancelled to every open work_item, so a cancelled
   //    pipeline's queue is empty by definition.
-  if (pipeline.status === "cancelled" || pipeline.status === "done") {
-    return NextResponse.json({ error: "invalid_state", from: pipeline.status }, { status: 409 });
+  if (derivedStatus === "cancelled" || derivedStatus === "done") {
+    return NextResponse.json({ error: "invalid_state", from: derivedStatus }, { status: 409 });
   }
 
   // 3. Redispatch is only meaningful for operator-driven pipelines: the
@@ -107,7 +109,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   const stage =
     (typeof payload.stage === "string" && payload.stage.length > 0
       ? payload.stage
-      : pipeline.status) ?? "configuration";
+      : derivedStatus) ?? "configuration";
 
   const instruction =
     typeof payload.instruction === "string" && payload.instruction.length > 0

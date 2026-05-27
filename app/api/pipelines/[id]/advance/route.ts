@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { BriefPayload, type BriefInsert } from "@/lib/briefs";
 import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import {
   PER_CREATIVE_STAGES,
   activeTracksLocal,
@@ -21,6 +22,16 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { VideoBriefInput, type VideoBriefInsertRow } from "@/lib/video-briefs";
 import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
+
+/**
+ * Silent-failure PR-4: the row type the helpers below see after the route's
+ * top-level read. `pipelines.status` was dropped (migration 0051); this
+ * intermediate carries the derived status injected from the reducer so the
+ * advance flows + the response envelope keep the pre-drop shape.
+ */
+type PipelineRowWithStatus = Database["public"]["Tables"]["pipelines"]["Row"] & {
+  status: PipelineStatus;
+};
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -74,7 +85,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
   const supabase = createAdminClient();
 
-  const { data: pipeline, error: readErr } = await supabase
+  const { data: row, error: readErr } = await supabase
     .from("pipelines")
     .select("*")
     .eq("id", id)
@@ -82,9 +93,18 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   if (readErr) {
     return NextResponse.json({ error: readErr.message }, { status: 500 });
   }
-  if (!pipeline) {
+  if (!row) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
+
+  // Silent-failure PR-4: `pipelines.status` was dropped. Read the derived
+  // status from the reducer and inject it onto the row so the advance
+  // helpers below keep the pre-drop shape (`pipeline.status` access).
+  const derived = await getDerivedStatus(supabase, id);
+  const pipeline: PipelineRowWithStatus = {
+    ...row,
+    status: derived ?? ("configuration" as PipelineStatus),
+  };
 
   if (pipeline.status === "configuration") {
     return advanceFromConfiguration(supabase, pipeline);
@@ -95,15 +115,15 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   // Per-creative gated stages (creative_qa, compliance_review, copy,
   // spec_validation): the server re-computes the per-creative rollup from
   // creative_stage_state and HARD-BLOCKS the advance until the gate clears.
-  // Compliance is the HARD gate — it (and launch) never auto-advance: a failed
+  // Compliance is the HARD gate -- it (and launch) never auto-advance: a failed
   // creative without an audited override keeps the rollup uncleared, so this
   // route refuses with 422.
   if (PER_CREATIVE_STAGES.has(pipeline.status as PipelineStatus)) {
     return advanceFromPerCreativeStage(supabase, pipeline);
   }
-  // finalize_assets → launch_handoff: an AGENT_WORK/AUTO stage with no DB
-  // trigger (only generation→creative_qa is trigger-driven, see 0024). Without
-  // a wired transition the pipeline STALLS at finalize_assets — the UI falls
+  // finalize_assets -> launch_handoff: an AGENT_WORK/AUTO stage with no DB
+  // trigger (only generation->creative_qa is trigger-driven, see 0024). Without
+  // a wired transition the pipeline STALLS at finalize_assets -- the UI falls
   // through to a placeholder and nothing advances it. The gate is "every
   // in-scope creative is finalize_verified" (the operator's finalize_result /
   // finalize_drive tools stamp it), re-derived server-side here.
@@ -134,7 +154,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
  */
 async function advanceFromFinalizeAssets(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
 ): Promise<NextResponse> {
   const tracks = activeTracksLocal(pipeline.format_choice as PipelineFormat);
 
@@ -190,9 +210,12 @@ async function advanceFromFinalizeAssets(
     );
   }
 
-  // Silent-failure PR-3: emit the stage_advanced event strictly (5xx on
-  // failure). The `pipelines.status` write stays as the cache update until
-  // PR-4 drops the column.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The stage_advanced event below is the SOLE source of truth -- the reducer
+  // resolves the pipeline's status from it. We still bump advanced_at for the
+  // UI's per-stage timestamp; the legacy `status` column write is gone, and
+  // so is the `.eq("status", "finalize_assets")` CAS (we pre-checked the
+  // derived status before entering this helper).
   const now = new Date().toISOString();
   const advancedAt =
     pipeline.advanced_at &&
@@ -201,14 +224,12 @@ async function advanceFromFinalizeAssets(
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
   const update: PipelineUpdate = {
-    status: "launch_handoff",
     advanced_at: { ...advancedAt, launch_handoff: now } as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "finalize_assets")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -235,7 +256,10 @@ async function advanceFromFinalizeAssets(
     );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // The reducer now resolves to 'launch_handoff' from the event we just
+  // wrote. Hydrate the response so the caller sees the same shape.
+  const responsePipeline = { ...updated, status: "launch_handoff" as PipelineStatus };
+  return NextResponse.json({ pipeline: responsePipeline });
 }
 
 /**
@@ -316,7 +340,7 @@ async function killedCreativeIds(
  */
 async function advanceFromPerCreativeStage(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
 ): Promise<NextResponse> {
   const status = pipeline.status as PipelineStatus;
 
@@ -391,7 +415,7 @@ async function advanceFromPerCreativeStage(
  */
 async function computeCopyGate(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
 ): Promise<
   { ok: true; cleared: boolean; total: number; short: number } | { ok: false; message: string }
 > {
@@ -480,14 +504,14 @@ async function computeCopyGate(
  */
 async function commitPerCreativeAdvance(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
   status: PipelineStatus,
   cleared: boolean,
 ): Promise<NextResponse> {
   const next = nextStage(status);
   if (!next) {
     // Unreachable for the per-creative stages (all have a successor), but keep
-    // the type narrow and fail loudly rather than write a null status.
+    // the type narrow and fail loudly rather than emit no event.
     return NextResponse.json({ error: `no successor stage for ${status}` }, { status: 422 });
   }
 
@@ -499,20 +523,18 @@ async function commitPerCreativeAdvance(
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
   const nextAdvancedAt = { ...advancedAt, [next]: now };
-  // Silent-failure PR-3: emit the `stage_advanced` event strictly (5xx on
-  // failure -- no console.warn swallow). The reducer derives the canonical
-  // status from the event stream; we ALSO update `pipelines.status` so the
-  // (cache) column stays in sync until PR-4 drops it. CAS on the current
-  // status so a concurrent advance no-ops cleanly.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The stage_advanced event below is the SOLE source of truth. We still bump
+  // `advanced_at` (the per-stage timestamp the UI surfaces) but no longer
+  // write `status` and no longer apply the `.eq("status", X)` CAS guard --
+  // the derived status was already pre-checked in the caller.
   const update: PipelineUpdate = {
-    status: next,
     advanced_at: nextAdvancedAt as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", status)
     .select()
     .single();
   if (updateErr || !updated) {
@@ -524,7 +546,7 @@ async function commitPerCreativeAdvance(
 
   // Emit the stage_advanced event -- the reducer's load-bearing input. No
   // longer swallowed: a failed insert means the audit log diverges from the
-  // status cache (the cure for the original silent-failure class).
+  // derived status (the cure for the original silent-failure class).
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -539,7 +561,10 @@ async function commitPerCreativeAdvance(
     );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  // The reducer resolves the pipeline's status from the event we just wrote.
+  // Hydrate the response so callers see the post-advance status.
+  const responsePipeline = { ...updated, status: next };
+  return NextResponse.json({ pipeline: responsePipeline });
 }
 
 /**
@@ -548,7 +573,7 @@ async function commitPerCreativeAdvance(
  */
 async function advanceFromConfiguration(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
 ): Promise<NextResponse> {
   // 1. Gate: do we have the required payloads at all?
   const gate = canAdvance({
@@ -576,15 +601,16 @@ async function advanceFromConfiguration(
       !Array.isArray(pipeline.advanced_at)
         ? (pipeline.advanced_at as Record<string, string>)
         : {};
+    // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+    // Bump `advanced_at`; the stage_advanced event below is the canonical
+    // status update.
     const opUpdate: PipelineUpdate = {
-      status: "ideation",
       advanced_at: { ...prevAdvancedAt, ideation: nowOp } as unknown as Json,
     };
     const { data: opUpdated, error: opErr } = await supabase
       .from("pipelines")
       .update(opUpdate)
       .eq("id", pipeline.id)
-      .eq("status", "configuration")
       .select()
       .single();
     if (opErr || !opUpdated) {
@@ -619,7 +645,7 @@ async function advanceFromConfiguration(
       );
     }
     return NextResponse.json({
-      pipeline: opUpdated,
+      pipeline: { ...opUpdated, status: "ideation" as PipelineStatus },
       image_brief_id: pipeline.image_brief_id,
       video_brief_id: pipeline.video_brief_id,
     });
@@ -788,8 +814,10 @@ async function advanceFromConfiguration(
       ? (pipeline.advanced_at as Record<string, string>)
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, ideation: now };
+  // Silent-failure PR-4: drop `status` from the UPDATE and the CAS guard
+  // (`pipelines.status` was dropped in 0051). The stage_advanced event is
+  // the canonical status write.
   const update: PipelineUpdate = {
-    status: "ideation",
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
     advanced_at: nextAdvancedAt as unknown as Json,
@@ -798,7 +826,6 @@ async function advanceFromConfiguration(
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "configuration")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -869,7 +896,7 @@ async function advanceFromConfiguration(
   }
 
   return NextResponse.json({
-    pipeline: updated,
+    pipeline: { ...updated, status: "ideation" as PipelineStatus },
     image_brief_id: imageBriefId,
     video_brief_id: videoBriefId,
   });
@@ -886,7 +913,7 @@ async function advanceFromConfiguration(
  */
 async function advanceFromIdeation(
   supabase: SupabaseClient,
-  pipeline: Database["public"]["Tables"]["pipelines"]["Row"],
+  pipeline: PipelineRowWithStatus,
 ): Promise<NextResponse> {
   // 1. Read the per-track pick arrays from the jsonb column. Defensive
   //    parse — the column defaults to `{}` and an older row might have
@@ -923,15 +950,16 @@ async function advanceFromIdeation(
       ? (pipeline.advanced_at as Record<string, string>)
       : {}) ?? {};
   const nextAdvancedAt = { ...advancedAt, review: now };
+  // Silent-failure PR-4: drop `status` from the UPDATE and the CAS guard
+  // (`pipelines.status` was dropped in 0051). The stage_advanced event is
+  // the canonical status write.
   const update: PipelineUpdate = {
-    status: "review",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "ideation")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -941,8 +969,8 @@ async function advanceFromIdeation(
     );
   }
 
-  // 3. Silent-failure PR-3: emit the stage_advanced event strictly (5xx on
-  //    failure). This is the reducer's load-bearing input.
+  // 3. Silent-failure PR-4: emit the stage_advanced event strictly (5xx on
+  //    failure). This is the reducer's SOLE source of truth for status now.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
     kind: "stage_advanced",
@@ -960,7 +988,7 @@ async function advanceFromIdeation(
     );
   }
 
-  return NextResponse.json({ pipeline: updated });
+  return NextResponse.json({ pipeline: { ...updated, status: "review" as PipelineStatus } });
 }
 
 /**

@@ -41,8 +41,21 @@ function withRpc(
   client: SupabaseClientMock,
   fn: (name: string) => { data: unknown; error: { message: string } | null },
 ): SupabaseClientMock {
-  (client as unknown as { rpc: ReturnType<typeof vi.fn> }).rpc = vi.fn((name: string) =>
-    Promise.resolve(fn(name)),
+  // Silent-failure PR-4: preserve the prior `rpc` spy for the derived-status
+  // reducer so the route's `getDerivedStatus` call resolves from the table
+  // mock (the route uses `compute_pipeline_status(id)` after migration 0051
+  // dropped the `pipelines.status` column).
+  const previousRpc = (client as unknown as { rpc?: (...args: unknown[]) => Promise<unknown> }).rpc;
+  (client as unknown as { rpc: ReturnType<typeof vi.fn> }).rpc = vi.fn(
+    (name: string, args?: unknown) => {
+      if (name === "compute_pipeline_status" && previousRpc) {
+        return previousRpc(name, args) as Promise<{
+          data: unknown;
+          error: { message: string } | null;
+        }>;
+      }
+      return Promise.resolve(fn(name));
+    },
   );
   return client;
 }

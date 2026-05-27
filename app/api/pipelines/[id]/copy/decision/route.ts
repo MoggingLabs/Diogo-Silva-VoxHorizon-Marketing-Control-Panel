@@ -5,6 +5,7 @@ import {
   type CopyVariantUpdate,
   type VideoCopyVariantUpdate,
 } from "@/lib/copy/schemas";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { createAdminClient } from "@/lib/supabase/admin";
 
 export const runtime = "nodejs";
@@ -52,7 +53,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status")
+    .select("id")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
@@ -61,9 +62,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "copy") {
+  // Silent-failure PR-4: read derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "copy") {
     return NextResponse.json(
-      { error: "invalid_state", current: pipeline.status, expected: "copy" },
+      { error: "invalid_state", current: derivedStatus, expected: "copy" },
       { status: 409 },
     );
   }

@@ -1,29 +1,15 @@
 import "server-only";
 
-import type { PipelineStatus } from "@/lib/pipeline/types";
-
 /**
- * Server-side helper to re-task the Hermes "operator" agent.
+ * Operator instructions + the operator-driven-pipeline predicate.
  *
- * The operator runs the image-ad pipeline like a hired employee. The
- * dashboard's role is supervision: the manager kicks off a run and signs off
- * at the stage gates, and each gate re-tasks the operator for the next stage.
- * The actual nudge is a fire-and-forget POST to the worker's
- * `POST {WORKER_URL}/work/pipeline/tools/dispatch` endpoint (Wave A), which
- * runs `hermes chat -q <instruction> --pass-session-id <pipeline_id>` inside
- * the operator container and returns immediately.
- *
- * This module owns the single source of truth for:
- *   - the worker call (bearer auth, swallow-on-404, never block the caller);
- *   - the canonical instruction strings the gates use to re-task the operator.
- *
- * Every call site (`/api/pipelines/operator` kickoff, `.../advance`,
- * `.../picks`, `.../review/decision`) goes through `dispatchOperator` so the
- * auth + failure semantics stay identical to the existing
- * `fireWorkerIdeation` / `fireWorkerGeneration` helpers: if the worker isn't
- * configured (WORKER_URL / WORKER_SHARED_SECRET unset) we skip silently, a
- * 404 means "endpoint not deployed yet" and is swallowed, and anything else
- * throws so the caller's `.catch()` can log it without failing the request.
+ * Silent-failure PR-4 cutover: the legacy fire-and-forget `dispatchOperator`
+ * helper + `DispatchEnvelope` type were removed. Routes now enqueue
+ * operator_dispatch work_items via `lib/work-queue/enqueue`; the
+ * operator-daemon claims the queued row and docker-execs into the operator
+ * container. The two surfaces still exported here are the natural-language
+ * instruction strings the daemon dispatches with and the
+ * `isOperatorDriven` predicate the routes branch on.
  */
 
 export type OperatorStage =
@@ -112,58 +98,4 @@ export function isOperatorDriven(configDraft: unknown): boolean {
   return (
     typeof draft.operator_instruction === "string" && draft.operator_instruction.trim().length > 0
   );
-}
-
-/**
- * Fire-and-forget POST to the worker's operator dispatch endpoint. Resolves
- * once the worker has acknowledged the kick (the worker itself runs the
- * operator in the background). Mirrors `fireWorkerIdeation`'s contract:
- *
- *   - returns early (no-op) when WORKER_URL / WORKER_SHARED_SECRET are unset,
- *     so unit tests and local dev don't need a live worker;
- *   - swallows a 404 (endpoint not deployed) silently;
- *   - throws on any other non-2xx so the caller's `.catch()` can log it.
- *
- * Call sites should `void dispatchOperator(...).catch((e) => console.warn(...))`
- * — a worker outage must never block a stage transition or kickoff, since the
- * pipeline row + events are the primary artifacts.
- */
-/**
- * Typed dispatch envelope. The operator asserts `pipeline.status ===
- * expected_status` on read and stops (no-op) if it mismatches — this kills the
- * stale/duplicate-dispatch race (the stage already advanced or was raced).
- */
-export type DispatchEnvelope = {
-  stage?: OperatorStage;
-  expectedStatus?: PipelineStatus;
-  dispatchId?: string;
-};
-
-export async function dispatchOperator(
-  pipelineId: string,
-  instruction: string,
-  envelope: DispatchEnvelope = {},
-): Promise<void> {
-  const base = process.env.WORKER_URL?.replace(/\/$/, "");
-  const secret = process.env.WORKER_SHARED_SECRET;
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/tools/dispatch`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      pipeline_id: pipelineId,
-      instruction,
-      stage: envelope.stage,
-      expected_status: envelope.expectedStatus,
-      dispatch_id: envelope.dispatchId,
-    }),
-    cache: "no-store",
-  });
-  if (!res.ok && res.status !== 404) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/tools/dispatch -> ${res.status}: ${text.slice(0, 200)}`);
-  }
 }

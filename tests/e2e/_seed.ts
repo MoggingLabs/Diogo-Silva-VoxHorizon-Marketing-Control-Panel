@@ -236,6 +236,11 @@ export type SeedPipelineOpts = {
  * active (`deleted_at` null). Pass `deleted_at` to seed an already-archived
  * row. The `pipelines` row is the orchestration root; the archive e2e seeds
  * one, archives it, then restores it.
+ *
+ * Silent-failure PR-4: `pipelines.status` was dropped (migration 0051). When
+ * the caller asks for a non-configuration starting stage, we emit a
+ * `pipeline_events(kind='stage_advanced', stage=<opts.status>)` row -- the
+ * reducer folds it into the canonical derived status the dashboard reads.
  */
 export async function seedPipeline(clientId: string, opts: SeedPipelineOpts = {}): Promise<string> {
   const admin = adminClient();
@@ -244,13 +249,24 @@ export async function seedPipeline(clientId: string, opts: SeedPipelineOpts = {}
     .insert({
       client_id: clientId,
       format_choice: opts.format_choice ?? "image",
-      status: opts.status ?? "configuration",
       deleted_at: opts.deleted_at ?? null,
     })
     .select("id")
     .single();
   if (error || !data) {
     throw new Error(`seedPipeline failed: ${error?.message ?? "no row returned"}`);
+  }
+  if (opts.status && opts.status !== "configuration") {
+    const kind = opts.status === "cancelled" ? "pipeline_cancelled" : "stage_advanced";
+    const { error: evErr } = await admin.from("pipeline_events").insert({
+      pipeline_id: data.id,
+      kind,
+      stage: opts.status,
+      payload: { seeded: true },
+    });
+    if (evErr) {
+      throw new Error(`seedPipeline status-seed failed: ${evErr.message}`);
+    }
   }
   return data.id;
 }

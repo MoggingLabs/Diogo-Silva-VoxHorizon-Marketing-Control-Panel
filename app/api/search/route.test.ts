@@ -94,9 +94,14 @@ describe("GET /api/search", () => {
   });
 
   it("resolves a pipeline by exact id when q is a uuid", async () => {
+    // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+    // the search route reads `derived_status` from `v_pipeline_dispatch_state`.
     currentSupabase = mockClient({
       pipelines: {
-        select: { data: [{ id: UUID, status: "ideation", format_choice: "image" }] },
+        select: { data: [{ id: UUID, format_choice: "image" }] },
+      },
+      v_pipeline_dispatch_state: {
+        select: { data: [{ pipeline_id: UUID, derived_status: "ideation" }] },
       },
     });
     const res = await GET(req(UUID));

@@ -314,27 +314,6 @@ def test_start_scheduler_retires_legacy_watchdogs(
     assert "scheduler:work_item_watchdog" in names
 
 
-async def test_run_outbox_relay_once_wrapper_returns_resolved_count(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The scheduler wrapper supplies the wired handlers + returns done+dead."""
-    from src.services import outbox_relay
-
-    captured: dict[str, object] = {}
-
-    async def _fake_pass(settings, *, handlers):  # noqa: ANN001, ANN202
-        captured["handlers"] = handlers
-        return outbox_relay.OutboxPassResult(
-            claimed=3, done=2, retried=0, dead_lettered=1, skipped=0
-        )
-
-    monkeypatch.setattr(outbox_relay, "run_outbox_relay_once", _fake_pass)
-
-    resolved = await scheduler.run_outbox_relay_once(get_settings())
-    # "resolved" = done + dead_lettered (terminal-ish outcomes).
-    assert resolved == 3
-    # The wrapper passed the real wired handler set (the two default ops).
-    assert set(captured["handlers"]) == {  # type: ignore[arg-type]
-        ("meta", "record_launch"),
-        ("drive", "finalize_verified"),
-    }
+# Silent-failure PR-4: the `run_outbox_relay_once` scheduler wrapper +
+# the `outbox_relay` module it delegated to were deleted. The unified
+# `work_item_watchdog` covers the equivalent surface now.

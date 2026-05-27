@@ -382,19 +382,25 @@ async function emitTaskChain(
 // ---------------------------------------------------------------------------
 
 /**
- * Direct status setter. Bypasses the state-machine routes entirely — the
- * caller is responsible for any consistency invariants (e.g. setting
- * `picks` before flipping to `review`). Mostly useful when a spec wants
- * to land on a downstream stage without exercising the upstream UI.
- *
- * Returns the post-update row so the spec can verify what the server has.
+ * Direct status setter. Silent-failure PR-4: `pipelines.status` was dropped
+ * (migration 0051). The canonical answer is now the event-sourced reducer
+ * `compute_pipeline_status(id)`, so seeding a status means inserting a
+ * `pipeline_events(kind='stage_advanced', stage=<target>)` row -- which the
+ * reducer folds into the derived status the dashboard reads. Bypasses the
+ * state-machine routes entirely; the caller is responsible for any
+ * upstream consistency (e.g. `picks` before flipping to `review`). Cancelled
+ * is a terminal escape and uses `kind='pipeline_cancelled'` so the reducer's
+ * terminal-escape branch fires.
  */
 export async function seedPipelineStatus(
   pipelineId: string,
   status: Database["public"]["Enums"]["pipeline_status_enum"],
 ): Promise<void> {
   const admin = getAdminClient();
-  const { error } = await admin.from("pipelines").update({ status }).eq("id", pipelineId);
+  const kind = status === "cancelled" ? "pipeline_cancelled" : "stage_advanced";
+  const { error } = await admin
+    .from("pipeline_events")
+    .insert({ pipeline_id: pipelineId, kind, stage: status, payload: { seeded: true } as Json });
   if (error) {
     throw new Error(`seedPipelineStatus failed: ${error.message}`);
   }

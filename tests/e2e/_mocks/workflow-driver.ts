@@ -194,15 +194,15 @@ export function qaPassItems(
   }));
 }
 
-/** Read a pipeline's current status straight from the DB (server truth). */
+/** Read a pipeline's current status straight from the DB (server truth).
+ *  Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+ *  the canonical answer comes from the `compute_pipeline_status(id)` RPC,
+ *  which folds the event stream into a `pipeline_status_enum` value.
+ */
 export async function readPipelineStatus(pipelineId: string): Promise<string | null> {
   const admin = getAdminClient();
-  const { data } = await admin
-    .from("pipelines")
-    .select("status")
-    .eq("id", pipelineId)
-    .maybeSingle();
-  return data?.status ?? null;
+  const { data } = await admin.rpc("compute_pipeline_status", { p_pipeline_id: pipelineId });
+  return (typeof data === "string" ? data : null) ?? null;
 }
 
 /** Read every `stage_advanced` event's stage for a pipeline, in fire order. */

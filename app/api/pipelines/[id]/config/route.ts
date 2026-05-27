@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { PipelineFormat } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
@@ -117,7 +118,7 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
   // to clobber the post-advance state.
   const { data: existing, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status, config_draft, format_choice")
+    .select("id, config_draft, format_choice")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
@@ -126,9 +127,12 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
   if (!existing) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (existing.status !== "configuration") {
+  // Silent-failure PR-4: read derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, existing.id);
+  if (derivedStatus !== "configuration") {
     return NextResponse.json(
-      { error: "config locked", current_status: existing.status },
+      { error: "config locked", current_status: derivedStatus },
       { status: 409 },
     );
   }
@@ -156,14 +160,13 @@ export async function PATCH(req: NextRequest, ctx: RouteContext) {
   if (data.format_choice !== undefined) update.format_choice = data.format_choice;
   if (data.client_id !== undefined) update.client_id = data.client_id;
 
+  // Silent-failure PR-4: the `.eq("status", "configuration")` CAS guard was
+  // removed (`pipelines.status` was dropped in 0051). The derived-status
+  // pre-check above is the race guard now.
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", id)
-    // Re-assert the status guard at the DB level so a concurrent advance
-    // doesn't race past our pre-read check (single-operator v1, but cheap
-    // belt-and-suspenders).
-    .eq("status", "configuration")
     .select()
     .single();
   if (updateErr || !updated) {
