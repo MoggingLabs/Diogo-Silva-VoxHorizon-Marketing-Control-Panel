@@ -528,7 +528,7 @@ def test_persist_submitted_render_inserts_row(monkeypatch: pytest.MonkeyPatch) -
         task_id="veo-persist", is_veo=True, prompt="a roof"
     )
     assert wrote is True
-    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
     assert len(rows) == 1
     assert rows[0]["task_id"] == "veo-persist"
     assert rows[0]["status"] == "submitted"
@@ -539,11 +539,11 @@ def test_persist_submitted_render_idempotent(monkeypatch: pytest.MonkeyPatch) ->
     from tests.conftest import FakeSupabase
 
     sb = FakeSupabase()
-    sb.set_single("video_render_tasks", {"task_id": "dup"})
+    sb.set_single("_legacy_video_render_tasks", {"task_id": "dup"})
     monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
     wrote = vid_mod.persist_submitted_render(task_id="dup", is_veo=False)
     assert wrote is False
-    assert not [r for n, r in sb.inserts if n == "video_render_tasks"]
+    assert not [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
 
 
 def test_persist_submitted_render_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -576,5 +576,5 @@ def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = KieVideoClient(api_key="k", transport=_transport(handler))
     asyncio.run(client.generate_video("p"))
-    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
     assert rows and rows[0]["task_id"] == "veo-sp"

@@ -561,10 +561,10 @@ def test_metrics_happy(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
     fake_supabase.seed(
-        "integration_outbox",
+        "_legacy_integration_outbox",
         [{"status": "pending"}, {"status": "inflight"}],
     )
-    fake_supabase.seed("operator_dispatches", [{"status": "running"}])
+    fake_supabase.seed("_legacy_operator_dispatches", [{"status": "running"}])
     resp = client.get("/work/metrics", headers=auth_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -592,7 +592,7 @@ def test_metrics_401(client: TestClient, fake_supabase: FakeSupabase) -> None:
 
 
 def _outbox_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
-    return [row for name, row in sb.inserts if name == "integration_outbox"]
+    return [row for name, row in sb.inserts if name == "_legacy_integration_outbox"]
 
 
 def test_launch_enqueues_meta_outbox_row_in_handler(

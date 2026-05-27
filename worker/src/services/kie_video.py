@@ -642,7 +642,14 @@ def _safe_json(resp: httpx.Response) -> Any:
 # Name of the durable record table for in-flight kie video renders (migration
 # 0033). Kept here next to the submit path that writes it; the callback receiver
 # + the reconciliation sweep read it.
-RENDER_TASKS_TABLE = "video_render_tasks"
+#
+# Silent-failure PR-4 / migration 0051: the table was renamed
+# ``_legacy_video_render_tasks``. The kie video submit/callback path is not yet
+# migrated to the ``work_item`` queue (work_item_kind has ``kie_video_render``
+# reserved); until that lands the writes/reads go to the renamed table.
+# TODO(follow-up issue): migrate kie video renders onto the work_item queue and
+# delete this constant + ``persist_submitted_render`` + the reconciliation sweep.
+RENDER_TASKS_TABLE = "_legacy_video_render_tasks"
 
 
 def persist_submitted_render(

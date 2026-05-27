@@ -289,11 +289,20 @@ _OUTBOX_REPORT_STATUSES = ("pending", "inflight", "failed", "dead")
 
 
 def _count_outbox_by_status(supabase: Any) -> dict[str, int]:
-    """Count integration_outbox rows per reported status (resilient)."""
+    """Count integration_outbox rows per reported status (resilient).
+
+    Silent-failure PR-4 / migration 0051: the table was renamed to
+    ``_legacy_integration_outbox``. The outbox surface lives on the
+    ``work_item`` queue now (kinds ``outbox_meta_record_launch`` /
+    ``outbox_drive_finalize_verified`` / ``outbox_ghl_send``); the legacy
+    table is read here for one-quarter retention so any in-flight rows
+    enqueued before the cutover are still counted on /work/metrics.
+    TODO(follow-up issue): wire this off ``work_item`` and drop the read.
+    """
     counts = {s: 0 for s in _OUTBOX_REPORT_STATUSES}
     try:
         resp = (
-            supabase.table("integration_outbox")
+            supabase.table("_legacy_integration_outbox")
             .select("status")
             .execute()
         )
@@ -302,16 +311,24 @@ def _count_outbox_by_status(supabase: Any) -> dict[str, int]:
             status = row.get("status") if isinstance(row, dict) else None
             if status in counts:
                 counts[status] += 1
-    except Exception as e:  # noqa: BLE001 — metrics never raise
+    except Exception as e:  # noqa: BLE001 -- metrics never raise
         log.warning("metrics_outbox_read_failed", error=str(e))
     return counts
 
 
 def _count_open_dispatches(supabase: Any) -> int:
-    """Count operator_dispatches still open (dispatched/running) (resilient)."""
+    """Count operator_dispatches still open (dispatched/running) (resilient).
+
+    Silent-failure PR-4 / migration 0051: the table was renamed to
+    ``_legacy_operator_dispatches``. The operator dispatch surface lives on
+    the ``work_item`` queue (kind ``operator_dispatch``) and the daemon owns
+    its lifecycle now; the legacy table is read here only for one-quarter
+    retention so any in-flight pre-cutover rows are still counted.
+    TODO(follow-up issue): wire this off ``work_item`` and drop the read.
+    """
     try:
         resp = (
-            supabase.table("operator_dispatches")
+            supabase.table("_legacy_operator_dispatches")
             .select("status")
             .execute()
         )
@@ -321,6 +338,6 @@ def _count_open_dispatches(supabase: Any) -> int:
             for row in rows
             if isinstance(row, dict) and row.get("status") in _OPEN_DISPATCH_STATUSES
         )
-    except Exception as e:  # noqa: BLE001 — metrics never raise
+    except Exception as e:  # noqa: BLE001 -- metrics never raise
         log.warning("metrics_dispatch_read_failed", error=str(e))
         return 0

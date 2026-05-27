@@ -556,9 +556,17 @@ async def run_reconciliation_once(settings: Settings) -> int:
 
 
 def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
-    """Read up to ``limit`` still-``submitted`` video render task rows (oldest first)."""
+    """Read up to ``limit`` still-``submitted`` video render task rows (oldest first).
+
+    Silent-failure PR-4 / migration 0051: the table was renamed
+    ``_legacy_video_render_tasks``. The kie video submit/callback path was not
+    migrated to the ``work_item`` queue in this PR, so the reconciliation sweep
+    keeps reading the renamed table during the one-quarter retention window.
+    TODO(follow-up issue): migrate kie video renders to ``work_item`` kind
+    ``kie_video_render`` and delete this surface.
+    """
     resp = (
-        sb.table("video_render_tasks")
+        sb.table("_legacy_video_render_tasks")
         .select("id, task_id, is_veo, creative_id, brief_id, theme, status, attempts")
         .eq("status", "submitted")
         .order("submitted_at", desc=False)
@@ -634,7 +642,7 @@ async def run_kie_reconcile_once(settings: Settings) -> int:
                 clip_id=stored.get("clip_id"),
             )
         elif status.state == RENDER_FAILED:
-            sb.table("video_render_tasks").update(
+            sb.table("_legacy_video_render_tasks").update(
                 {
                     "status": "failed",
                     "error": status.error or "kie reported a render failure",
@@ -654,7 +662,7 @@ def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
     """Stamp a still-pending render's last-checked time + bump its attempt count."""
     try:
         existing = (
-            sb.table("video_render_tasks")
+            sb.table("_legacy_video_render_tasks")
             .select("attempts")
             .eq("task_id", task_id)
             .maybe_single()
@@ -663,7 +671,7 @@ def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
         attempts = 0
         if existing is not None and isinstance(existing.data, dict):
             attempts = int(existing.data.get("attempts") or 0)
-        sb.table("video_render_tasks").update(
+        sb.table("_legacy_video_render_tasks").update(
             {"attempts": attempts + 1, "updated_at": now_iso}
         ).eq("task_id", task_id).execute()
     except Exception as exc:  # noqa: BLE001 -- bookkeeping never aborts the sweep

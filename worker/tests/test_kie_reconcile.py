@@ -79,7 +79,7 @@ async def test_reconcile_records_completed_render(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [
             {
                 "task_id": "veo-done",
@@ -98,7 +98,7 @@ async def test_reconcile_records_completed_render(
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 1
     assert _stub_store == ["veo-done"]
-    upd = [r for n, r in sb.updates if n == "video_render_tasks"]
+    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
     assert upd and upd[-1]["status"] == "completed"
     assert upd[-1]["clip_id"] == "clip-veo-done"
 
@@ -110,7 +110,7 @@ async def test_reconcile_marks_failed_render(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [{"task_id": "veo-f", "is_veo": True, "status": "submitted"}],
     )
     _install_kie(
@@ -120,7 +120,7 @@ async def test_reconcile_marks_failed_render(
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 1
     assert _stub_store == []  # a failure never stores
-    upd = [r for n, r in sb.updates if n == "video_render_tasks"]
+    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
     assert upd and upd[-1]["status"] == "failed"
     assert upd[-1]["error"] == "quota"
 
@@ -132,7 +132,7 @@ async def test_reconcile_leaves_pending_and_bumps_attempt(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [{"task_id": "veo-p", "is_veo": True, "status": "submitted", "attempts": 1}],
     )
     _install_kie(monkeypatch, {"veo-p": RenderStatus("veo-p", "pending")})
@@ -140,7 +140,7 @@ async def test_reconcile_leaves_pending_and_bumps_attempt(
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 0  # nothing terminal this pass
     assert _stub_store == []
-    upd = [r for n, r in sb.updates if n == "video_render_tasks"]
+    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
     # The pending render's attempt was bumped (1 -> 2), status untouched.
     assert upd and upd[-1]["attempts"] == 2
     assert all("status" not in u for u in upd)
@@ -160,7 +160,7 @@ async def test_reconcile_bounded_per_pass(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [
             {"task_id": f"veo-{i}", "is_veo": True, "status": "submitted"}
             for i in range(5)
@@ -187,7 +187,7 @@ async def test_reconcile_poll_failure_skips_row(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [
             {"task_id": "veo-boom", "is_veo": True, "status": "submitted"},
             {"task_id": "veo-good", "is_veo": True, "status": "submitted"},
@@ -214,7 +214,7 @@ async def test_reconcile_store_failure_bumps_attempt(
 ) -> None:
     sb = _patch_supabase
     sb.seed(
-        "video_render_tasks",
+        "_legacy_video_render_tasks",
         [{"task_id": "veo-sf", "is_veo": True, "status": "submitted"}],
     )
     _install_kie(
@@ -228,7 +228,7 @@ async def test_reconcile_store_failure_bumps_attempt(
 
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 0  # store failed -> not marked completed
-    upd = [r for n, r in sb.updates if n == "video_render_tasks"]
+    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
     # The render stays open (attempt bumped), recoverable next pass.
     assert all("status" not in u or u.get("status") != "completed" for u in upd)
 
@@ -240,7 +240,7 @@ async def test_reconcile_skips_row_without_task_id(
 ) -> None:
     """A malformed open row (no task_id) is skipped, not crashed on."""
     sb = _patch_supabase
-    sb.seed("video_render_tasks", [{"task_id": "", "is_veo": True, "status": "submitted"}])
+    sb.seed("_legacy_video_render_tasks", [{"task_id": "", "is_veo": True, "status": "submitted"}])
     _install_kie(monkeypatch, {})
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 0

@@ -58,7 +58,11 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-RENDER_TASKS_TABLE = "video_render_tasks"
+# Silent-failure PR-4 / migration 0051: the table was renamed to
+# ``_legacy_video_render_tasks``. Kie video renders are not yet on the
+# ``work_item`` queue, so the callback receiver keeps resolving rows from
+# the renamed table. TODO(follow-up issue): migrate to work_item.
+RENDER_TASKS_TABLE = "_legacy_video_render_tasks"
 
 
 class KieCallbackBody(BaseModel):

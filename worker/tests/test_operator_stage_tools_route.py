@@ -640,7 +640,7 @@ def test_signal_opens_dispatch_row(
     body = resp.json()
     assert body["status"] == "running"
     assert body["terminal"] is False
-    inserted = [r for t, r in stage_sb.inserts if t == "operator_dispatches"]
+    inserted = [r for t, r in stage_sb.inserts if t == "_legacy_operator_dispatches"]
     assert inserted and inserted[0]["status"] == "running"
     assert inserted[0]["stage"] == "copy"
     assert "last_heartbeat_at" in inserted[0]
@@ -659,7 +659,7 @@ def test_signal_terminal_close_stamps_completed_at(
     body = resp.json()
     assert body["status"] == "completed"
     assert body["terminal"] is True
-    inserted = [r for t, r in stage_sb.inserts if t == "operator_dispatches"]
+    inserted = [r for t, r in stage_sb.inserts if t == "_legacy_operator_dispatches"]
     assert "completed_at" in inserted[0]
 
 
@@ -695,7 +695,7 @@ def test_signal_idempotent_updates_existing_row(
 ) -> None:
     stage_sb.set_single("pipelines", _pipeline_row())
     stage_sb.seed(
-        "operator_dispatches",
+        "_legacy_operator_dispatches",
         [{"id": "od-1", "pipeline_id": "p-1", "dispatch_id": "d-5", "status": "dispatched"}],
     )
     resp = client.post(
@@ -706,8 +706,8 @@ def test_signal_idempotent_updates_existing_row(
     assert resp.status_code == 200, resp.text
     assert resp.json()["dispatch_row_id"] == "od-1"
     # Updated in place, not a duplicate insert.
-    assert all(t != "operator_dispatches" for t, _ in stage_sb.inserts)
-    updated = [r for t, r in stage_sb.updates if t == "operator_dispatches"]
+    assert all(t != "_legacy_operator_dispatches" for t, _ in stage_sb.inserts)
+    updated = [r for t, r in stage_sb.updates if t == "_legacy_operator_dispatches"]
     assert updated and updated[0]["status"] == "completed"
 
 

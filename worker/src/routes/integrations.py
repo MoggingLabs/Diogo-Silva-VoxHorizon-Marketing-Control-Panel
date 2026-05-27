@@ -122,7 +122,7 @@ def enqueue_outbox(
     """
     sb = get_supabase_admin()
     existing = (
-        sb.table("integration_outbox")
+        sb.table("_legacy_integration_outbox")
         .select("id")
         .eq("idempotency_key", idempotency_key)
         .maybe_single()
@@ -132,7 +132,7 @@ def enqueue_outbox(
         log.info("outbox_enqueue_deduped", idempotency_key=idempotency_key, op=op)
         return False
     try:
-        sb.table("integration_outbox").insert(
+        sb.table("_legacy_integration_outbox").insert(
             {
                 "pipeline_id": pipeline_id,
                 "integration": integration,

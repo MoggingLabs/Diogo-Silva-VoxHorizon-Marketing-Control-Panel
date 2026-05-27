@@ -964,7 +964,7 @@ def _existing_dispatch(
 ) -> dict[str, Any] | None:
     """Return the existing operator_dispatches row for the unique key, or None."""
     resp = (
-        sb.table("operator_dispatches")
+        sb.table("_legacy_operator_dispatches")
         .select("id, status")
         .eq("pipeline_id", pipeline_id)
         .eq("dispatch_id", dispatch_id)
@@ -1007,7 +1007,7 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
         sb, pipeline_id=body.pipeline_id, dispatch_id=body.dispatch_id
     )
     if existing is not None:
-        sb.table("operator_dispatches").update(payload).eq(
+        sb.table("_legacy_operator_dispatches").update(payload).eq(
             "id", existing["id"]
         ).execute()
         dispatch_row_id = existing["id"]
@@ -1020,7 +1020,7 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
             "stage": body.stage or "configuration",
             **payload,
         }
-        created = sb.table("operator_dispatches").insert(insert_row).execute().data
+        created = sb.table("_legacy_operator_dispatches").insert(insert_row).execute().data
         dispatch_row_id = (
             created[0]["id"] if isinstance(created, list) and created else None
         )

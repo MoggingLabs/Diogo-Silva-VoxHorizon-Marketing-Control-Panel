@@ -77,7 +77,7 @@ def _seed_open_render(sb: FakeSupabase, task_id: str, **over: object) -> None:
         "creative_id": "vc-1",
     }
     row.update(over)
-    sb.set_single("video_render_tasks", row)
+    sb.set_single("_legacy_video_render_tasks", row)
 
 
 @pytest.fixture
@@ -117,7 +117,7 @@ def test_callback_happy_records_and_completes(
     assert body["status"] == "completed"
     assert body["clip_id"] == "clip-veo-ok"
     # The render row was marked completed with the clip.
-    upd = [r for n, r in fake_supabase.updates if n == "video_render_tasks"]
+    upd = [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
     assert upd and upd[-1]["status"] == "completed"
     assert upd[-1]["clip_id"] == "clip-veo-ok"
     # The clip was stored from the callback's result url.
@@ -141,7 +141,7 @@ def test_callback_bad_signature_401(
     )
     assert resp.status_code == 401
     # Nothing recorded on a rejected signature.
-    assert not [r for n, r in fake_supabase.updates if n == "video_render_tasks"]
+    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
     assert "task_id" not in _stub_store
 
 
@@ -197,7 +197,7 @@ def test_callback_duplicate_is_noop_200(
     assert body["status"] == "completed"
     # No download/store attempted, no new write.
     assert "task_id" not in _stub_store
-    assert not [r for n, r in fake_supabase.updates if n == "video_render_tasks"]
+    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
 
 
 def test_callback_duplicate_failed_is_noop_200(
@@ -220,7 +220,7 @@ def test_callback_unknown_task_404(
     fake_supabase: FakeSupabase,
     _stub_store: dict[str, object],
 ) -> None:
-    fake_supabase.set_single("video_render_tasks", None)
+    fake_supabase.set_single("_legacy_video_render_tasks", None)
     resp = client.post(
         "/work/video/kie-callback",
         headers=_headers("veo-unknown"),
@@ -261,7 +261,7 @@ def test_callback_failure_marks_failed(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "failed"
-    upd = [r for n, r in fake_supabase.updates if n == "video_render_tasks"]
+    upd = [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
     assert upd and upd[-1]["status"] == "failed"
     assert upd[-1]["error"] == "unsafe content"
     # A failure never downloads/stores.
