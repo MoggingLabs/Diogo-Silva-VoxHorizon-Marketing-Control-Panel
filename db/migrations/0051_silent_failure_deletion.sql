@@ -64,7 +64,149 @@ alter table if exists video_render_tasks  rename to _legacy_video_render_tasks;
 
 
 -- ============================================================================
--- 2. Drop pipelines.status.
+-- 2. Replace the generation-closure trigger function.
+-- ============================================================================
+--
+-- The trigger from migration 0046 (`pipeline_events_auto_advance_done()`) READS
+-- `pipelines.status` and WRITES `status = 'creative_qa'` to advance. Both go
+-- away with the column drop below, so we replace the function FIRST with a
+-- version that:
+--   * reads the derived status from `compute_pipeline_status(new.pipeline_id)`
+--     (the reducer over `pipeline_events`),
+--   * writes `advanced_at.creative_qa` ONLY (no status column write),
+--   * emits the `stage_advanced -> creative_qa` event the reducer folds in.
+--
+-- Behaviour-preserving relative to 0046: the closure heuristic, the all-failed
+-- guard, the QA-gate seeding for image + video creatives, and the
+-- stage_advanced emission are byte-identical. The only difference is the
+-- status read/write seam.
+
+create or replace function pipeline_events_auto_advance_done()
+  returns trigger
+  language plpgsql
+  set search_path = public, pg_temp
+as $$
+declare
+  v_cutoff_id uuid;
+  v_cutoff_ts timestamptz;
+  v_queued bigint;
+  v_running bigint;
+  v_done bigint;
+  v_error bigint;
+  v_expected bigint;
+  v_pipeline_status pipeline_status_enum;
+  v_already_advanced int;
+  v_now timestamptz := now();
+begin
+  if new.kind not in ('task_done', 'task_error') then
+    return new;
+  end if;
+  if new.stage is distinct from 'generation' then
+    return new;
+  end if;
+
+  -- Silent-failure PR-4: the canonical status is the reducer's output now.
+  v_pipeline_status := compute_pipeline_status(new.pipeline_id);
+  if v_pipeline_status is null or v_pipeline_status <> 'generation' then
+    return new;
+  end if;
+
+  select id, created_at into v_cutoff_id, v_cutoff_ts
+    from pipeline_events
+   where pipeline_id = new.pipeline_id
+     and kind = 'stage_advanced'
+     and stage = 'generation'
+   order by created_at desc, id desc
+   limit 1;
+  if v_cutoff_id is null then
+    return new;
+  end if;
+
+  select
+      count(*) filter (where kind = 'task_queued'),
+      count(*) filter (where kind = 'task_running'),
+      count(*) filter (where kind = 'task_done'),
+      count(*) filter (where kind = 'task_error')
+    into v_queued, v_running, v_done, v_error
+    from pipeline_events
+   where pipeline_id = new.pipeline_id
+     and stage = 'generation'
+     and id <> v_cutoff_id
+     and created_at >= v_cutoff_ts;
+
+  -- Closure heuristic (Ekko emits queued+running+done; operator emits running+done).
+  v_expected := greatest(coalesce(v_queued, 0), coalesce(v_running, 0));
+  -- Not closed yet, OR an all-failed batch (v_done = 0) which must NOT advance.
+  if v_expected = 0 or (v_done + v_error) < v_expected or v_done < 1 then
+    return new;
+  end if;
+
+  -- Idempotent: if creative_qa was already advanced (a previous task_done in
+  -- the same batch closed it), the reducer would have returned creative_qa
+  -- above. Belt-and-braces: check for an existing creative_qa stage_advanced
+  -- event keyed to the same generation cutoff so we never seed twice.
+  select count(*) into v_already_advanced
+    from pipeline_events
+   where pipeline_id = new.pipeline_id
+     and kind = 'stage_advanced'
+     and stage = 'creative_qa'
+     and created_at >= v_cutoff_ts;
+  if v_already_advanced > 0 then
+    return new;
+  end if;
+
+  -- Silent-failure PR-4: no `pipelines.status` write; the stage_advanced
+  -- event below is the canonical status source. We still bump `advanced_at`
+  -- (the per-stage timestamp the UI surfaces).
+  update pipelines
+     set advanced_at = coalesce(advanced_at, '{}'::jsonb)
+                       || jsonb_build_object('creative_qa', to_jsonb(v_now)),
+         updated_at = v_now
+   where id = new.pipeline_id;
+
+  -- Seed the per-creative QA gate for each final IMAGE creative (idempotent).
+  insert into creative_stage_state (pipeline_id, creative_id, stage, status)
+  select p.id, c.id, 'creative_qa', 'pending'
+    from pipelines p
+    join creatives c
+      on c.brief_id = p.image_brief_id
+     and c.type = 'image'
+     and c.version like 'v1%'
+     and c.deleted_at is null
+   where p.id = new.pipeline_id
+  on conflict (creative_id, stage) do nothing;
+
+  -- Seed the per-creative QA gate for each final VIDEO creative (idempotent).
+  insert into creative_stage_state (pipeline_id, creative_id, stage, status)
+  select p.id, vc.id, 'creative_qa', 'pending'
+    from pipelines p
+    join video_creatives vc
+      on vc.brief_id = p.video_brief_id
+     and vc.status = 'captioned'
+     and vc.deleted_at is null
+   where p.id = new.pipeline_id
+  on conflict (creative_id, stage) do nothing;
+
+  insert into pipeline_events (pipeline_id, kind, stage, payload)
+  values (
+    new.pipeline_id,
+    'stage_advanced',
+    'creative_qa',
+    jsonb_build_object(
+      'reason', 'auto_advance',
+      'from', 'generation',
+      'task_done_count', v_done,
+      'task_error_count', v_error
+    )
+  );
+
+  return new;
+end;
+$$;
+
+
+-- ============================================================================
+-- 3. Drop pipelines.status.
 -- ============================================================================
 --
 -- The load-bearing change. PR-3 kept the column as a write-only cache so
@@ -72,9 +214,10 @@ alter table if exists video_render_tasks  rename to _legacy_video_render_tasks;
 -- every reader to compute_pipeline_status(id) / v_pipeline_dispatch_state and
 -- drops the column.
 --
--- There is no trigger or constraint pinning the column. The realtime
--- publication on `pipelines` will reflect the dropped column on next refresh;
--- subscribers were already migrated to read derived_status from the view.
+-- The generation-closure trigger that previously read + wrote the column was
+-- replaced above. The realtime publication on `pipelines` will reflect the
+-- dropped column on next refresh; subscribers were already migrated to read
+-- derived_status from the view.
 --
 -- Verification before drop (run manually before this migration is applied):
 --   select * from information_schema.view_column_usage
@@ -84,7 +227,7 @@ alter table if exists video_render_tasks  rename to _legacy_video_render_tasks;
 alter table pipelines drop column status;
 
 -- ============================================================================
--- 3. Smoke.
+-- 4. Smoke.
 -- ============================================================================
 --
 -- Verify the reducer + the canonical view still resolve cleanly with the

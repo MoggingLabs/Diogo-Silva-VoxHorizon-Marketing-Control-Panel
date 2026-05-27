@@ -496,12 +496,14 @@ async function runAllFailedGenerationStaysPut(
   admin: ReturnType<typeof getTestAdminClient>,
   clientId: string,
 ): Promise<void> {
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+  // the `stage_advanced -> generation` event below (emitted right after the
+  // row insert) is what the reducer folds into the derived status.
   const { data: created, error } = await admin
     .from("pipelines")
     .insert({
       client_id: clientId,
       format_choice: "image",
-      status: "generation",
       advanced_at: { generation: new Date().toISOString() },
     } as never)
     .select("id")

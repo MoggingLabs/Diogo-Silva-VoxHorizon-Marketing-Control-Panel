@@ -67,12 +67,19 @@ def _seed_video_brief(cur, client_id: str) -> str:
 def _seed_pipeline_in_generation(
     cur, client_id: str, *, image_brief_id: str | None, video_brief_id: str | None
 ) -> str:
-    """A pipeline sitting in `generation` (where the close trigger acts)."""
+    """A pipeline sitting in `generation` (where the close trigger acts).
+
+    Silent-failure PR-4: ``pipelines.status`` was dropped (migration 0051);
+    the canonical answer is the event-sourced reducer
+    ``compute_pipeline_status(id)``. The accompanying ``_emit_generation_closure``
+    helper writes the ``stage_advanced -> generation`` event the reducer reads,
+    so we only insert the row here (no status column).
+    """
     cur.execute(
         """
         insert into pipelines (format_choice, client_id, image_brief_id,
-                               video_brief_id, status)
-        values (%s, %s, %s, %s, 'generation')
+                               video_brief_id)
+        values (%s, %s, %s, %s)
         returning id
         """,
         (
@@ -130,7 +137,12 @@ def _qa_creative_ids(cur, pipeline_id: str) -> set[str]:
 
 
 def _status(cur, pipeline_id: str) -> str:
-    cur.execute("select status from pipelines where id = %s", (pipeline_id,))
+    """Read the derived status via the reducer RPC.
+
+    Silent-failure PR-4: ``pipelines.status`` was dropped (migration 0051);
+    ``compute_pipeline_status(id)`` is the canonical answer.
+    """
+    cur.execute("select compute_pipeline_status(%s)", (pipeline_id,))
     return str(cur.fetchone()[0])
 
 

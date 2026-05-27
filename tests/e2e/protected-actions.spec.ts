@@ -49,14 +49,17 @@ test.describe("protected-artifact managed actions", () => {
       status: "draft",
     });
     const pipelineId = await seedPipeline(clientId, { format_choice: "image" });
-    // Flip directly to `monitor` so the page renders MonitorDashboard. The
-    // `SeedPipelineOpts.status` enum only spans the legacy stages; the rebuild
-    // 12-stage enum (including `monitor`) is set via the admin client.
+    // Flip directly to `monitor` so the page renders MonitorDashboard.
+    // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+    // we emit a `stage_advanced -> monitor` event so the reducer resolves
+    // to monitor.
     {
-      const { error } = await admin
-        .from("pipelines")
-        .update({ status: "monitor" } as never)
-        .eq("id", pipelineId);
+      const { error } = await admin.from("pipeline_events").insert({
+        pipeline_id: pipelineId,
+        kind: "stage_advanced",
+        stage: "monitor",
+        payload: { seeded: true },
+      } as never);
       if (error) throw new Error(`flip pipeline to monitor failed: ${error.message}`);
     }
 
