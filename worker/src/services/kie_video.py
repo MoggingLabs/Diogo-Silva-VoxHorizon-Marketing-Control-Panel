@@ -549,6 +549,13 @@ class KieVideoClient:
         # abort the submit (the worker boots without Supabase configured), it
         # just forfeits the safety net for this one render.
         persist_submitted_render(task_id=task_id, is_veo=is_veo, prompt=prompt)
+        # Silent-failure PR-4: also enqueue a work_item(kind='kie_video_render')
+        # so the durable render record lives on the unified queue -- the callback
+        # closes it to completed/failed, and the watchdog handles rotation if the
+        # callback never arrives (max attempts -> dead-letter).
+        persist_submitted_render_work_item(
+            task_id=task_id, is_veo=is_veo, prompt=prompt
+        )
         return task_id, is_veo
 
     async def _poll(
@@ -701,4 +708,66 @@ def persist_submitted_render(
         return True
     except Exception as exc:  # noqa: BLE001 -- safety-net write never aborts a submit
         log.warning("kie_render_persist_failed", task_id=task_id, error=str(exc))
+        return False
+
+
+def kie_render_idempotency_key(task_id: str) -> str:
+    """Stable work_item idempotency key for a kie render task_id.
+
+    Shared by the submit producer + the callback closer so both sides write the
+    same key and the UNIQUE constraint collapses any duplicate-submit race to
+    one row.
+    """
+    return f"kie:render:{task_id}"
+
+
+def persist_submitted_render_work_item(
+    *,
+    task_id: str,
+    is_veo: bool,
+    prompt: str | None = None,
+    creative_id: str | None = None,
+    brief_id: str | None = None,
+    segment_idx: int | None = None,
+    theme: str | None = None,
+) -> bool:
+    """Enqueue a ``work_item(kind='kie_video_render')`` for a submitted render.
+
+    Silent-failure PR-4 mirror of :func:`persist_submitted_render` on the
+    unified ``work_item`` queue: the callback closes it to completed/failed and
+    the watchdog handles rotation if the callback never arrives (the work_item
+    inherits the watchdog's stuck-row rotation + dead-lettering, so a dropped
+    callback can no longer silently lose a billed render). Best-effort + never
+    raises -- the worker boots without Supabase configured and a render's
+    submit must not fail because the safety-net write did. Idempotent via
+    ``kie_render_idempotency_key``.
+    """
+    try:
+        from ..supabase_client import get_supabase_admin
+        from .work_queue import enqueue_work_item
+
+        sb = get_supabase_admin()
+        enqueue_work_item(
+            sb,
+            kind="kie_video_render",
+            payload={
+                "task_id": task_id,
+                "is_veo": is_veo,
+                "prompt": prompt,
+                "creative_id": creative_id,
+                "brief_id": brief_id,
+                "segment_idx": segment_idx,
+                "theme": theme,
+            },
+            idempotency_key=kie_render_idempotency_key(task_id),
+            created_by="worker.kie_video.submit",
+            creative_id=creative_id,
+            brief_id=brief_id,
+        )
+        log.info("kie_render_work_item_enqueued", task_id=task_id, is_veo=is_veo)
+        return True
+    except Exception as exc:  # noqa: BLE001 -- safety-net write never aborts a submit
+        log.warning(
+            "kie_render_work_item_enqueue_failed", task_id=task_id, error=str(exc)
+        )
         return False

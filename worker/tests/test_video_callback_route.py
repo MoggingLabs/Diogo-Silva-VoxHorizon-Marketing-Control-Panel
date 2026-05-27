@@ -123,6 +123,12 @@ def test_callback_happy_records_and_completes(
     # The clip was stored from the callback's result url.
     assert _stub_store["urls"] == ["https://kie/veo-ok.mp4"]
     assert _stub_store["theme"] == "roofing"
+    # Silent-failure PR-4: the callback also closes the work_item by its
+    # idempotency_key (kie:render:<task_id>).
+    wi = [r for n, r in fake_supabase.updates if n == "work_item"]
+    assert wi and wi[-1]["status"] == "completed"
+    assert wi[-1]["claim_token"] is None
+    assert wi[-1]["result"]["clip_id"] == "clip-veo-ok"
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +272,12 @@ def test_callback_failure_marks_failed(
     assert upd[-1]["error"] == "unsafe content"
     # A failure never downloads/stores.
     assert "task_id" not in _stub_store
+    # Silent-failure PR-4: a failure callback also closes the work_item as
+    # failed with a named error_kind.
+    wi = [r for n, r in fake_supabase.updates if n == "work_item"]
+    assert wi and wi[-1]["status"] == "failed"
+    assert wi[-1]["error_kind"] == "kie_render_failed"
+    assert wi[-1]["error_detail"]["message"] == "unsafe content"
 
 
 def test_callback_success_without_urls_422(
