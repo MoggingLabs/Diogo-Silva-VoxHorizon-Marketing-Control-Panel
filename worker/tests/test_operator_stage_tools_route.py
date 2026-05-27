@@ -621,6 +621,10 @@ def test_monitor_routes_video_pipeline_to_campaign_perf_video(
 # ===========================================================================
 
 
+def _signal_work_item_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
+    return [r for t, r in sb.inserts if t == "work_item"]
+
+
 def test_signal_opens_dispatch_row(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
@@ -640,13 +644,17 @@ def test_signal_opens_dispatch_row(
     body = resp.json()
     assert body["status"] == "running"
     assert body["terminal"] is False
-    inserted = [r for t, r in stage_sb.inserts if t == "_legacy_operator_dispatches"]
-    assert inserted and inserted[0]["status"] == "running"
-    assert inserted[0]["stage"] == "copy"
-    assert "last_heartbeat_at" in inserted[0]
+    # Silent-failure PR-4: the signal lands on the work_item queue, not the
+    # legacy operator_dispatches table.
+    inserted = _signal_work_item_inserts(stage_sb)
+    assert inserted and inserted[0]["kind"] == "operator_dispatch"
+    assert inserted[0]["payload"]["db_status"] == "running"
+    assert inserted[0]["payload"]["stage"] == "copy"
+    assert inserted[0]["payload"]["signal"] == "running"
+    assert inserted[0]["created_by"] == "worker.operator_stage_tools.signal_dispatch"
 
 
-def test_signal_terminal_close_stamps_completed_at(
+def test_signal_terminal_close_marks_terminal_payload(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
     stage_sb.set_single("pipelines", _pipeline_row())
@@ -659,8 +667,8 @@ def test_signal_terminal_close_stamps_completed_at(
     body = resp.json()
     assert body["status"] == "completed"
     assert body["terminal"] is True
-    inserted = [r for t, r in stage_sb.inserts if t == "_legacy_operator_dispatches"]
-    assert "completed_at" in inserted[0]
+    inserted = _signal_work_item_inserts(stage_sb)
+    assert inserted and inserted[0]["payload"]["terminal"] is True
 
 
 def test_signal_stale_maps_to_completed(
@@ -690,13 +698,20 @@ def test_signal_error_maps_to_failed(
     assert body["terminal"] is True
 
 
-def test_signal_idempotent_updates_existing_row(
+def test_signal_idempotent_on_duplicate_signal(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
+    """A repeated identical signal does not enqueue a second work_item."""
     stage_sb.set_single("pipelines", _pipeline_row())
-    stage_sb.seed(
-        "_legacy_operator_dispatches",
-        [{"id": "od-1", "pipeline_id": "p-1", "dispatch_id": "d-5", "status": "dispatched"}],
+    # Seed the work_item that the first signal would have inserted so the
+    # idempotency probe finds it on the next call.
+    stage_sb.set_single(
+        "work_item",
+        {
+            "id": "wi-existing",
+            "idempotency_key": "op-disp:p-1:d-5:completed",
+            "status": "queued",
+        },
     )
     resp = client.post(
         "/work/pipeline/tools/signal",
@@ -704,11 +719,9 @@ def test_signal_idempotent_updates_existing_row(
         json={"pipeline_id": "p-1", "dispatch_id": "d-5", "status": "completed", "stage": "copy"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["dispatch_row_id"] == "od-1"
-    # Updated in place, not a duplicate insert.
-    assert all(t != "_legacy_operator_dispatches" for t, _ in stage_sb.inserts)
-    updated = [r for t, r in stage_sb.updates if t == "_legacy_operator_dispatches"]
-    assert updated and updated[0]["status"] == "completed"
+    # The idempotency probe hit; no new work_item insert (re-uses the existing).
+    assert _signal_work_item_inserts(stage_sb) == []
+    assert resp.json()["dispatch_row_id"] == "wi-existing"
 
 
 def test_signal_422_on_bad_status(
