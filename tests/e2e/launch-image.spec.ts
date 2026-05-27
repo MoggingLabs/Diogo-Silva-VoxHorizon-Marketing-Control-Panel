@@ -91,8 +91,12 @@ test.describe("image launch package", () => {
     await expect(approveBtn).toBeVisible();
     await approveBtn.click();
 
+    // Mirrors the launch-video equivalent: the router.refresh() re-render of
+    // the Supabase-heavy launch detail page can exceed 15s on a busy CI
+    // runner (especially on a re-run where the runner is already warm with
+    // images). 30s removes the flake without masking a real hang.
     await expect(page.getByText("Approved", { exact: true })).toBeVisible({
-      timeout: 15_000,
+      timeout: 30_000,
     });
     // Gate disappears after a non-posted transition.
     await expect(page.getByRole("button", { name: /^approve$/i })).toHaveCount(0);
