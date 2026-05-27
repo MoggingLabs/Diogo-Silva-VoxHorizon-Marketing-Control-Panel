@@ -282,6 +282,20 @@ class FakeSupabase:
 
     def rpc(self, fn: str, params: dict[str, Any]) -> _FakeRpc:
         self.rpc_calls.append((fn, dict(params)))
+        # Silent-failure PR-4: ``compute_pipeline_status`` (migration 0050) is
+        # the canonical pipeline-status source after 0051 dropped the column.
+        # The fake folds the pipelines.single_overrides ``status`` field into
+        # the RPC response so existing tests that seed
+        # ``set_single("pipelines", {..., "status": ...})`` keep working
+        # without growing a parallel rpc fixture.
+        if fn == "compute_pipeline_status":
+            pipeline_row = self.single_overrides.get("pipelines")
+            if callable(pipeline_row):
+                pipeline_row = pipeline_row()
+            status: Any = None
+            if isinstance(pipeline_row, dict):
+                status = pipeline_row.get("status")
+            return _FakeRpc(status)
         return _FakeRpc(self.rpc_return)
 
     @property

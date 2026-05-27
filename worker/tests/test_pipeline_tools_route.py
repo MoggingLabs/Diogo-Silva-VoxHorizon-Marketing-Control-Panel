@@ -99,6 +99,16 @@ class _ToolsSupabase:
 
     def rpc(self, fn: str, params: dict) -> "_ToolsRpc":
         self.rpc_calls.append((fn, params))
+        # Silent-failure PR-4: ``compute_pipeline_status`` (migration 0050) is
+        # the canonical pipeline-status source after 0051 dropped the column.
+        # The fake folds the pipeline_row's ``status`` field into the RPC
+        # response so existing tests keep their `pipeline_row['status']`
+        # seeds without growing a parallel rpc fixture.
+        if fn == "compute_pipeline_status":
+            status = None
+            if isinstance(self.pipeline_row, dict):
+                status = self.pipeline_row.get("status")
+            return _ToolsRpc(status)
         return _ToolsRpc(self.rpc_return)
 
     @property

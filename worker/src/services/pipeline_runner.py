@@ -478,12 +478,18 @@ def fetch_pipeline(pipeline_id: str) -> dict[str, Any] | None:
 
     The route layer raises 404; this helper stays None-returning so
     callers in tests don't have to mock an exception path.
+
+    Silent-failure PR-4: ``pipelines.status`` was dropped in migration 0051;
+    the canonical answer is the ``compute_pipeline_status`` RPC over
+    ``pipeline_events``. We hydrate ``status`` onto the returned row so
+    downstream callers (which keyed off ``row["status"]`` for stage gating
+    + the operator read response) see the same dict shape they used to.
     """
     sb = get_supabase_admin()
     resp = (
         sb.table("pipelines")
         .select(
-            "id, status, format_choice, client_id, image_brief_id, "
+            "id, format_choice, client_id, image_brief_id, "
             "video_brief_id, config_draft, picks, advanced_at, created_at"
         )
         .eq("id", pipeline_id)
@@ -492,10 +498,41 @@ def fetch_pipeline(pipeline_id: str) -> dict[str, Any] | None:
     )
     # supabase-py returns None from ``maybe_single().execute()`` when no row
     # matches (rather than a response with ``data=None``); guard it so a
-    # missing pipeline resolves to None (→ route 404) instead of raising.
+    # missing pipeline resolves to None (-> route 404) instead of raising.
     row = resp.data if resp is not None else None
-    if isinstance(row, dict):
-        return row
+    if not isinstance(row, dict):
+        return None
+    # Hydrate derived status from the reducer RPC. The function is ``stable``
+    # so it's cheap; a single round-trip per pipeline read mirrors the
+    # ``hydratePipelineStatus`` helper used by the dashboard routes.
+    row["status"] = _derived_status(sb, pipeline_id)
+    return row
+
+
+def _derived_status(sb: Any, pipeline_id: str) -> str | None:
+    """Read the derived pipeline status via the ``compute_pipeline_status`` RPC.
+
+    Returns the enum value as a string (``'configuration'``, ``'generation'``,
+    ..., ``'cancelled'``, ``'done'``) or ``None`` if the read fails. The
+    reducer defaults to ``'configuration'`` for an empty event stream so a
+    real pipeline id never returns ``None`` from a successful call.
+    """
+    try:
+        resp = sb.rpc(
+            "compute_pipeline_status", {"p_pipeline_id": pipeline_id}
+        ).execute()
+    except Exception as exc:  # noqa: BLE001 -- a read failure resolves to None
+        log.warning(
+            "compute_pipeline_status_failed",
+            pipeline_id=pipeline_id,
+            error=str(exc),
+        )
+        return None
+    data = resp.data if resp is not None else None
+    if isinstance(data, str):
+        return data
+    if isinstance(data, list) and data and isinstance(data[0], str):
+        return data[0]
     return None
 
 
@@ -534,34 +571,20 @@ class PipelineCancelled(Exception):
 
 
 def pipeline_is_cancelled(pipeline_id: str) -> bool:
-    """Return True iff ``pipelines.status`` is currently ``'cancelled'``.
+    """Return True iff the derived pipeline status is ``'cancelled'``.
 
-    Safe to call between substages — one indexed primary-key lookup per
-    invocation. Failures (Supabase down, row missing) return ``False`` so
-    a transient read error never aborts a running pipeline; the
-    authoritative side is the next emit_pipeline_event call which will
-    fail loudly if Supabase is truly unreachable.
+    Silent-failure PR-4: ``pipelines.status`` was dropped in migration 0051;
+    we now ask the ``compute_pipeline_status`` reducer (which returns
+    ``'cancelled'`` whenever the timeline carries any
+    ``pipeline_cancelled`` event). Safe to call between substages -- one
+    cheap stable-function RPC per invocation. Failures (Supabase down, row
+    missing) return ``False`` so a transient read error never aborts a
+    running pipeline; the authoritative side is the next emit_pipeline_event
+    call which will fail loudly if Supabase is truly unreachable.
     """
     sb = get_supabase_admin()
-    try:
-        resp = (
-            sb.table("pipelines")
-            .select("status")
-            .eq("id", pipeline_id)
-            .maybe_single()
-            .execute()
-        )
-    except Exception as e:  # noqa: BLE001
-        log.warning(
-            "pipeline_status_read_failed",
-            pipeline_id=pipeline_id,
-            error=str(e),
-        )
-        return False
-    row = resp.data
-    if not isinstance(row, dict):
-        return False
-    return row.get("status") == "cancelled"
+    status = _derived_status(sb, pipeline_id)
+    return status == "cancelled"
 
 
 def picks_from_pipeline(pipeline: dict[str, Any]) -> tuple[list[str], list[str]]:
