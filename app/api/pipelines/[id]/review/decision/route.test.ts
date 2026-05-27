@@ -17,16 +17,6 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
 
-// `vi.hoisted` so the spy exists when the hoisted `vi.mock` factory runs.
-const { dispatchOperator } = vi.hoisted(() => ({
-  dispatchOperator: vi.fn<(id: string, instruction: string) => Promise<void>>(async () => {}),
-}));
-vi.mock("@/lib/operator/dispatch", async () => {
-  const actual =
-    await vi.importActual<typeof import("@/lib/operator/dispatch")>("@/lib/operator/dispatch");
-  return { ...actual, dispatchOperator };
-});
-
 const { enqueueWorkItem } = vi.hoisted(() => ({
   enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(
     async () => ({ id: "wi-1", duplicate: false }),
@@ -45,7 +35,6 @@ function req(url: string, init: RequestInit = {}): NextRequest {
 
 beforeEach(() => {
   currentSupabase = mockClient();
-  dispatchOperator.mockClear();
   enqueueWorkItem.mockReset();
   enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
   delete process.env.WORKER_URL;
@@ -86,7 +75,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     expect(res.status).toBe(200);
   });
 
-  it("re-tasks the operator to render finals on approval", async () => {
+  it("enqueues the operator_dispatch work_item on approval (silent-failure PR-3)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: {
@@ -97,14 +86,13 @@ describe("POST /api/pipelines/:id/review/decision", () => {
               format_choice: "image",
               picks: { image: ["c1"] },
               advanced_at: {},
-              // Operator-driven pipeline → the operator renders finals (the
-              // deterministic /work/pipeline/generation producer is skipped).
+              // Operator-driven pipeline -> the operator renders finals.
               config_draft: { operator_driven: true },
             },
             error: null,
           },
         },
-        update: { single: { data: { id, status: "generation" }, error: null } },
+        update: { data: { id, status: "generation" }, error: null },
       },
       pipeline_events: { insert: { data: null, error: null } },
     });
@@ -117,13 +105,16 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     );
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 5));
-    expect(dispatchOperator).toHaveBeenCalledTimes(1);
-    const [pid, instruction] = dispatchOperator.mock.calls[0]!;
-    expect(pid).toBe(id);
-    expect(instruction.toLowerCase()).toContain("final");
+    // Silent-failure PR-3: the legacy fire-and-forget dispatchOperator is
+    // gone -- the operator-daemon claims the queued work_item from the
+    // canonical queue. We assert via the enqueue spy.
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect((opts.payload as Record<string, unknown>).stage).toBe("generation");
   });
 
-  it("does NOT re-task the operator on rejection", async () => {
+  it("does NOT enqueue any work_item on rejection", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: {
@@ -138,7 +129,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
             error: null,
           },
         },
-        update: { single: { data: { id, status: "cancelled" }, error: null } },
+        update: { data: { id, status: "cancelled" }, error: null },
       },
       pipeline_events: { insert: { data: null, error: null } },
     });
@@ -151,7 +142,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     );
     expect(res.status).toBe(200);
     await new Promise((r) => setTimeout(r, 5));
-    expect(dispatchOperator).not.toHaveBeenCalled();
+    expect(enqueueWorkItem).not.toHaveBeenCalled();
   });
 
   it("approved_with_changes (200)", async () => {
@@ -282,7 +273,9 @@ describe("POST /api/pipelines/:id/review/decision", () => {
             error: null,
           },
         },
-        update: { single: { data: null, error: { message: "no" } } },
+        // Silent-failure PR-3: the route awaits the chain directly; the
+        // error rides the base-result on update.
+        update: { data: null, error: { message: "no" } },
       },
     });
     const res = await POST(
@@ -310,7 +303,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
             error: null,
           },
         },
-        update: { single: { data: null, error: { message: "no" } } },
+        update: { data: null, error: { message: "no" } },
       },
     });
     const res = await POST(
@@ -323,8 +316,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("warns when reject event insert fails (still 200)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("500 when reject pipeline_cancelled event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: {
@@ -333,7 +325,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
             error: null,
           },
         },
-        update: { single: { data: { id, status: "cancelled" }, error: null } },
+        update: { data: { id, status: "cancelled" }, error: null },
       },
       pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
     });
@@ -344,13 +336,15 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       }),
       { params },
     );
-    expect(res.status).toBe(200);
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    // The pipeline_cancelled event is the load-bearing input to the
+    // reducer AND the cancel-propagate trigger; a failed insert no longer
+    // console.warns and returns 200.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
   });
 
-  it("warns when approve event insert fails", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("500 when approve stage_advanced event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: {
@@ -365,7 +359,7 @@ describe("POST /api/pipelines/:id/review/decision", () => {
             error: null,
           },
         },
-        update: { single: { data: { id }, error: null } },
+        update: { data: { id }, error: null },
       },
       pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
     });
@@ -376,9 +370,9 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       }),
       { params },
     );
-    expect(res.status).toBe(200);
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
   });
 
   it("kicks worker successfully (200)", async () => {
@@ -411,79 +405,18 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       { params },
     );
     expect(res.status).toBe(200);
-    // Regular (non-operator) pipeline: the deterministic generation producer
-    // runs and the operator is NOT dispatched (no double render).
+    // Regular (non-operator) pipeline: the work_item enqueue happens; the
+    // legacy fire-and-forget operator dispatch is gone (silent-failure
+    // PR-3) and the daemon-claimed queue is the only producer.
     await new Promise((r) => setTimeout(r, 5));
-    expect(dispatchOperator).not.toHaveBeenCalled();
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("worker_generation");
   });
 
-  it("warns when worker kick fails (still 200)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("oops", { status: 500 }));
-    currentSupabase = mockClient({
-      pipelines: {
-        select: {
-          single: {
-            data: {
-              id,
-              status: "review",
-              format_choice: "image",
-              picks: { image: ["c1"] },
-              advanced_at: {},
-            },
-            error: null,
-          },
-        },
-        update: { single: { data: { id }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-    });
-    const res = await POST(
-      req(`http://localhost/api/pipelines/${id}/review/decision`, {
-        method: "POST",
-        body: JSON.stringify({ decision: "approved" }),
-      }),
-      { params },
-    );
-    expect(res.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
-  });
-
-  it("does not throw on worker 404", async () => {
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(null, { status: 404 }));
-    currentSupabase = mockClient({
-      pipelines: {
-        select: {
-          single: {
-            data: {
-              id,
-              status: "review",
-              format_choice: "image",
-              picks: { image: ["c1"] },
-              advanced_at: {},
-            },
-            error: null,
-          },
-        },
-        update: { single: { data: { id }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-    });
-    const res = await POST(
-      req(`http://localhost/api/pipelines/${id}/review/decision`, {
-        method: "POST",
-        body: JSON.stringify({ decision: "approved" }),
-      }),
-      { params },
-    );
-    expect(res.status).toBe(200);
-  });
+  // Silent-failure PR-3 cutover: the legacy "worker 404 is swallowed"
+  // assertion is gone -- the route no longer fetch()es the worker. The
+  // work_item enqueue is the only producer and the worker polls the queue.
 
   it("treats malformed picks (array) as zero counts", async () => {
     currentSupabase = mockClient({
@@ -567,9 +500,8 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       expect(res.status).toBe(500);
       const body = await res.json();
       expect(String(body.error)).toContain("work_item enqueue failed");
-      // Legacy dispatch must NOT fire when the enqueue failed.
-      await new Promise((r) => setTimeout(r, 5));
-      expect(dispatchOperator).not.toHaveBeenCalled();
+      // The enqueue was the sole producer of the operator dispatch; nothing
+      // else fired (silent-failure PR-3: legacy fire-and-forget is gone).
     });
 
     it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {

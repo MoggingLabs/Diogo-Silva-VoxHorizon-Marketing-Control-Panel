@@ -1,8 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 
-import { dispatchOperator, operatorInstruction } from "@/lib/operator/dispatch";
-import { type PipelineEventInsert, type PipelineInsert } from "@/lib/pipeline/schemas";
+import { operatorInstruction } from "@/lib/operator/dispatch";
+import { type PipelineInsert } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
 import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
@@ -27,14 +27,17 @@ export const dynamic = "force-dynamic";
  *     image-ad flow).
  *   - `client_id` — optional; the operator/manager can assign one later.
  *
- * Flow (mirrors the create route, plus the dispatch):
+ * Flow (silent-failure PR-3 cutover):
  *   1. Insert the pipelines row (status defaults to `configuration`; we seed
  *      `advanced_at.configuration` and store the instruction in config_draft).
- *   2. Emit the bootstrap `stage_advanced` event so the timeline renders.
- *   3. Emit an `operator_dispatched` event so the narration view shows the
- *      handoff immediately (before the operator's own events arrive).
- *   4. Fire-and-forget the worker dispatch. A worker outage does not fail the
- *      request — the pipeline already exists and the manager can retry.
+ *      The pipeline row creation is NOT a stage transition -- the bootstrap
+ *      `stage_advanced` event the auto-emit trigger writes on the matching
+ *      work_item enqueue covers the timeline.
+ *   2. Synchronously enqueue the operator_dispatch work_item. The auto-emit
+ *      trigger then writes the canonical `stage_advanced` + `operator_dispatched`
+ *      `pipeline_events` rows; the operator-daemon claims the queued row and
+ *      docker-execs into the operator container. Enqueue failure rolls the
+ *      pipeline back so silent-failure cannot leak a half-state.
  *
  * Returns the created pipeline with status 201 (same envelope as the create
  * route) so the kickoff UI can redirect straight to the detail page.
@@ -116,35 +119,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: insertErr?.message ?? "insert failed" }, { status: 500 });
   }
 
-  // Bootstrap timeline event + the operator-handoff marker. Both are
-  // best-effort: the pipeline row is the primary artifact, so a failed event
-  // insert is logged and swallowed rather than rolled back.
-  const events: PipelineEventInsert[] = [
-    {
-      pipeline_id: pipeline.id,
-      kind: "stage_advanced",
-      stage: "configuration",
-      payload: { format_choice, client_id: client_id ?? null } as Json,
-    },
-    {
-      pipeline_id: pipeline.id,
-      kind: "operator_dispatched",
-      stage: "configuration",
-      payload: { instruction, reason: "kickoff" } as Json,
-    },
-  ];
-  const { error: evErr } = await supabase.from("pipeline_events").insert(events);
-  if (evErr) {
-    console.warn(`[pipelines.operator] event insert failed: ${evErr.message}`);
-  }
-
-  // Synchronously enqueue the operator dispatch work_item BEFORE the legacy
-  // fire-and-forget so the queue row exists by the time HTTP returns. This is
-  // the silent-failure foundational redesign's load-bearing invariant -- a
-  // route can no longer claim "operator dispatched" without a backing row
-  // (and the auto-emit trigger's `pipeline_events` row). Enqueue throws ->
-  // route returns 500 and rolls back the pipeline insert so a half-state
-  // cannot leak. PR-3 removes the legacy fire below.
+  // Silent-failure PR-3 cutover: the auto-emit trigger on the work_item
+  // enqueue below writes the canonical `stage_advanced` + `operator_dispatched`
+  // `pipeline_events` rows -- the route no longer races the trigger by writing
+  // them itself. The operator-daemon claims the queued row from the worker's
+  // REST surface and docker-execs into the operator container; the legacy
+  // fire-and-forget `dispatchOperator` is gone.
   try {
     await enqueueWorkItem({
       kind: "operator_dispatch",
@@ -161,16 +141,6 @@ export async function POST(req: NextRequest) {
     await supabase.from("pipelines").delete().eq("id", pipeline.id);
     return NextResponse.json({ error: `work_item enqueue failed: ${String(e)}` }, { status: 500 });
   }
-
-  // Kick the operator. Fire-and-forget -- a worker outage must not fail the
-  // kickoff (the pipeline exists; the manager can re-dispatch from the gate).
-  // PR-3 removes this once the operator daemon owns the queue.
-  void dispatchOperator(
-    pipeline.id,
-    operatorInstruction("configuration", pipeline.id, instruction),
-  ).catch((e) => {
-    console.warn(`[pipelines.operator] operator dispatch failed for ${pipeline.id}: ${String(e)}`);
-  });
 
   return NextResponse.json({ pipeline }, { status: 201 });
 }

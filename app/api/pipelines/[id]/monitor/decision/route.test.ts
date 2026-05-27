@@ -130,23 +130,22 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     warn.mockRestore();
   });
 
-  it("still returns spawned_pipeline_id when lineage events fail to insert", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("500 when lineage / stage_advanced events fail to insert (silent-failure PR-3: no longer swallowed)", async () => {
     const childId = "44444444-4444-4444-8444-444444444444";
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: scaleParent(), error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
+        update: { data: { id, status: "done" }, error: null },
         insert: { single: { data: { id: childId }, error: null } },
       },
       pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
     });
     const res = await POST(req({ decision: "scale" }), { params });
-    expect(res.status).toBe(200);
-    const json = await res.json();
-    expect(json.spawned_pipeline_id).toBe(childId);
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    // Silent-failure PR-3: the stage_advanced event is load-bearing for
+    // the reducer; a failed insert is now surfaced as 5xx.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
   });
 
   it("kill does not spawn a next-brief pipeline", async () => {
@@ -196,7 +195,8 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "monitor", advanced_at: null }, error: null } },
-        update: { single: { data: null, error: { message: "no" } } },
+        // Silent-failure PR-3: error rides the base-result on update.
+        update: { data: null, error: { message: "no" } },
       },
     });
     const res = await POST(req({ decision: "kill" }), { params });
@@ -219,22 +219,20 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     );
   });
 
-  it("warns when event insert + worker kick fail (still 200)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response("x", { status: 500 }));
+  it("500 when stage_advanced event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "monitor", advanced_at: {} }, error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
+        update: { data: { id, status: "done" }, error: null },
       },
       pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
     });
     const res = await POST(req({ decision: "scale" }), { params });
-    expect(res.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(warn).toHaveBeenCalled();
-    warn.mockRestore();
+    // Silent-failure PR-3: the stage_advanced event is the reducer's
+    // load-bearing input -- the route 5xxs on a failed insert rather
+    // than console.warn-swallowing it.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
   });
 });

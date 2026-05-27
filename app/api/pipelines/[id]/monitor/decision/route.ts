@@ -72,6 +72,8 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
+  // Silent-failure PR-3: write the done status alongside the strict
+  // event emission.
   const update: PipelineUpdate = {
     status: "done",
     advanced_at: { ...advancedAt, done: now } as unknown as Json,
@@ -90,6 +92,22 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
+  // Emit the canonical stage_advanced event (reducer's load-bearing input)
+  // AND the monitor_decision audit event. Both are strict (no swallow).
+  const stageEvent: PipelineEventInsert = {
+    pipeline_id: id,
+    kind: "stage_advanced",
+    stage: "done",
+    payload: { from: "monitor", decision } as Json,
+  };
+  const { error: stageEvErr } = await supabase.from("pipeline_events").insert(stageEvent);
+  if (stageEvErr) {
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${stageEvErr.message}` },
+      { status: 500 },
+    );
+  }
+
   const event: PipelineEventInsert = {
     pipeline_id: id,
     kind: "monitor_decision",
@@ -98,7 +116,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.monitor.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `monitor_decision event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   // The monitor → next-brief loop (P5.5, #368). A `scale` verdict means this

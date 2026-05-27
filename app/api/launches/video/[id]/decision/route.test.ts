@@ -127,4 +127,27 @@ describe("POST /api/launches/video/:id/decision", () => {
     );
     expect(res.status).toBe(500);
   });
+
+  // Silent-failure PR-3 cutover: the event-insert failure now surfaces as
+  // 5xx instead of the legacy unchecked-await swallow. Mirrors the
+  // image-side launch-decision test.
+  it("500 events.insert fail", async () => {
+    currentSupabase = mockClient({
+      video_launch_packages: {
+        select: { single: { data: { id, status: "posted" }, error: null } },
+        update: { single: { data: { id, status: "approved" }, error: null } },
+      },
+      events: { insert: { data: null, error: { message: "events insert boom" } } },
+    });
+    const res = await POST(
+      req(`http://localhost/api/launches/video/${id}/decision`, {
+        method: "POST",
+        body: JSON.stringify({ decision: "approved" }),
+      }),
+      { params },
+    );
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error?: string };
+    expect(body.error).toContain("video_launch_package_decided event insert failed");
+  });
 });

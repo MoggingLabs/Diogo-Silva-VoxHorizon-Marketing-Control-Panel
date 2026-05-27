@@ -150,8 +150,7 @@ describe("POST /api/creatives/:id/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("warns but returns 200 when event insert fails", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  it("500 when event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
     currentSupabase = mockClient({
       creatives: {
         select: { single: { data: { id, status: "draft" }, error: null } },
@@ -166,8 +165,9 @@ describe("POST /api/creatives/:id/decision", () => {
       }),
       { params },
     );
-    expect(res.status).toBe(200);
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("events down"));
-    warn.mockRestore();
+    // Silent-failure PR-3: the audit-log write is no longer best-effort.
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("events down");
   });
 });

@@ -278,14 +278,20 @@ def test_start_scheduler_includes_kie_reconcile_loop(
     asyncio.run(_run())
     get_settings.cache_clear()
     assert "scheduler:kie_reconcile" in names
-    # The pre-existing loops are still wired (regression guard).
-    assert "scheduler:dispatch_watchdog" in names
+    # The unified work_item_watchdog is still wired (regression guard).
+    assert "scheduler:work_item_watchdog" in names
 
 
-def test_start_scheduler_includes_outbox_relay_loop(
+def test_start_scheduler_retires_legacy_watchdogs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """start_scheduler wires the transactional-outbox relay loop (E5.1 / #510)."""
+    """Silent-failure PR-3 cutover: dispatch_watchdog + outbox_relay are gone.
+
+    The unified work_item_watchdog covers both responsibilities now -- a
+    stuck operator dispatch is a stuck work_item, and any failed outbox row
+    rides the same retry chain. The two legacy loops MUST no longer be in
+    the scheduler's task set.
+    """
     import asyncio
 
     monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
@@ -301,7 +307,11 @@ def test_start_scheduler_includes_outbox_relay_loop(
 
     asyncio.run(_run())
     get_settings.cache_clear()
-    assert "scheduler:outbox_relay" in names
+    # The legacy loops are retired.
+    assert "scheduler:dispatch_watchdog" not in names
+    assert "scheduler:outbox_relay" not in names
+    # The unified work_item_watchdog covers both now.
+    assert "scheduler:work_item_watchdog" in names
 
 
 async def test_run_outbox_relay_once_wrapper_returns_resolved_count(

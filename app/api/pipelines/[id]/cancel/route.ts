@@ -76,6 +76,11 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, cancelled: now };
 
+  // Silent-failure PR-3: write the cancel status alongside the strict
+  // `pipeline_cancelled` event emission. The event fires the
+  // cancel-propagate trigger from migration 0050 (every open work_item for
+  // the pipeline is cancelled in the same transaction) AND drives the
+  // reducer's terminal-escape branch.
   const update: PipelineUpdate = {
     status: "cancelled",
     advanced_at: nextAdvancedAt as unknown as Json,
@@ -95,11 +100,11 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // Emit the timeline event. Failure is non-fatal — the row is the
-  // primary artifact and the dashboard re-derives state from it.
+  // Emit the canonical cancel event. Load-bearing input to the
+  // cancel-propagate trigger AND the reducer; no longer swallowed.
   const event: PipelineEventInsert = {
     pipeline_id: pipeline.id,
-    kind: "stage_advanced",
+    kind: "pipeline_cancelled",
     stage: "cancelled",
     payload: {
       reason: "operator_cancel",
@@ -108,13 +113,13 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.cancel] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `pipeline_cancelled event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
-  // Fan out kanban cancels for every still-active task on this
-  // pipeline. We don't block the response on this — a single sluggish
-  // worker shouldn't drag the cancel response time up — but we do
-  // await the lookup so the result is deterministic for tests.
+  // Fan out kanban cancels for every still-active task on this pipeline.
   await cancelActiveKanbanTasks(supabase, pipeline.id);
 
   return NextResponse.json({ pipeline: updated });

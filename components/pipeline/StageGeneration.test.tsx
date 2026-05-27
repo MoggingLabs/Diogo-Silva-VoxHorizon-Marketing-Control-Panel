@@ -307,7 +307,7 @@ describe("StageGeneration", () => {
       }),
     ];
     render(<StageGeneration pipeline={makePipeline()} initialEvents={events} />);
-    // No file_path → no signing attempt.
+    // No file_path -> no signing attempt.
     expect(signStoragePath).not.toHaveBeenCalled();
   });
 });
