@@ -71,15 +71,18 @@ function fillTable(table: LooseTableConfig): SupabaseTableConfig {
  * `{ rpc: { compute_pipeline_status: { data: "ideation", error: null } } }`
  * to seed the derived status for a test.
  */
+type LooseConfig = {
+  [table: string]: LooseTableConfig | Record<string, SupabaseMockResult> | undefined;
+  rpc?: Record<string, SupabaseMockResult>;
+};
+
 export function mockClient(
-  config: Record<string, LooseTableConfig> & {
-    rpc?: Record<string, SupabaseMockResult>;
-  } = {},
+  config: LooseConfig = {},
   options: { storageSign?: (path: string) => string | null } = {},
 ): SupabaseClientMock {
   const filled: SupabaseMockConfig = {};
   for (const [table, t] of Object.entries(config)) {
-    if (table === "rpc") continue;
+    if (table === "rpc" || t === undefined) continue;
     filled[table] = fillTable(t as LooseTableConfig);
   }
   if (config.rpc) filled.rpc = config.rpc;

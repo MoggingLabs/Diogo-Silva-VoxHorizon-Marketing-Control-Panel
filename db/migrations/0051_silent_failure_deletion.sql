@@ -31,10 +31,32 @@
 -- somehow still hits them. Strip them out of the realtime publication first
 -- so subscribers stop receiving updates immediately (the consumers that
 -- subscribed are gone; this is belt-and-braces).
+--
+-- ``alter publication ... drop table`` lacks the ``if exists`` guard on the
+-- table reference (unlike ``drop table``), so we wrap each drop in a DO
+-- block that checks ``pg_publication_tables`` first; that way a
+-- publication-membership miss (or a missing table on a clean CI database)
+-- is a benign skip instead of a migration abort.
 
-alter publication supabase_realtime drop table if exists operator_dispatches;
-alter publication supabase_realtime drop table if exists integration_outbox;
-alter publication supabase_realtime drop table if exists video_render_tasks;
+do $$
+declare
+  rel text;
+begin
+  foreach rel in array array[
+    'operator_dispatches', 'integration_outbox', 'video_render_tasks'
+  ] loop
+    if exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = rel
+    ) then
+      execute format(
+        'alter publication supabase_realtime drop table public.%I', rel
+      );
+    end if;
+  end loop;
+end$$;
 
 alter table if exists operator_dispatches rename to _legacy_operator_dispatches;
 alter table if exists integration_outbox  rename to _legacy_integration_outbox;
