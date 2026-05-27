@@ -84,9 +84,11 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const supabase = createAdminClient();
 
   // 2. The pipeline must exist (so a bad id 404s instead of silently no-op'ing).
+  //    Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+  //    this route doesn't gate on the status, it only needs row existence.
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status")
+    .select("id")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
