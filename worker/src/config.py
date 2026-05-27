@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     work_item_backoff_cap_s: int = 3_600
     work_item_watchdog_max_per_pass: int = 25
 
+    # === Silent-failure redesign PR-4: outbox consumer ===
+    # The outbox drain loop (``services.outbox_consumer.run_outbox_drain_once``)
+    # claims work_item rows of the outbox-* kinds and dispatches to the
+    # registered handler -- the replacement for the deleted ``outbox_relay``.
+    # Interval mirrors the watchdog cadence so the drain + the rotation observer
+    # tick on the same beat. ``outbox_max_attempts`` is the cap surfaced to the
+    # consumer's structured logs; the watchdog enforces the actual retry chain
+    # via ``work_item_max_attempts`` (kept in sync as defaults of equal value).
+    scheduler_outbox_drain_interval_s: int = 5
+    outbox_max_attempts: int = 5
+
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via
     # chat.postMessage. The bot token is sourced at deploy time from

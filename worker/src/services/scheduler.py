@@ -42,6 +42,7 @@ import structlog
 
 from ..config import Settings, get_settings
 from . import observability, work_queue
+from .outbox_consumer import run_outbox_drain_once
 from .work_item_watchdog import (
     StaleConsumer,
     StuckWorkItem,
@@ -1055,6 +1056,26 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:work_item_watchdog",
         ),
+        # Silent-failure PR-4: outbox consumer (replaces the deleted
+        # ``outbox_relay``). Drains work_item rows of the outbox-* kinds; the
+        # watchdog above retries / dead-letters stuck rows so retry policy
+        # lives in one place. Same cadence as the watchdog.
+        loop.create_task(
+            _interval_loop(
+                "outbox_drain",
+                float(settings.scheduler_outbox_drain_interval_s),
+                lambda: run_outbox_drain_once(
+                    settings,
+                    kinds=[
+                        "outbox_meta_record_launch",
+                        "outbox_drive_finalize_verified",
+                        "outbox_ghl_send",
+                    ],
+                ),
+                initial_delay_s=10.0,
+            ),
+            name="scheduler:outbox_drain",
+        ),
     ]
     log.info("scheduler_started", jobs=len(tasks))
     return Scheduler(tasks)
@@ -1070,6 +1091,7 @@ __all__ = [
     "reset_alert_throttle",
     "run_kie_reconcile_once",
     "run_observability_once",
+    "run_outbox_drain_once",
     "run_reconciliation_once",
     "run_work_item_watchdog_once",
     "start_scheduler",
