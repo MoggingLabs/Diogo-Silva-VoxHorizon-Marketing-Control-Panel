@@ -105,16 +105,21 @@ test.describe("image launch package", () => {
     await page.goto(`/launches/${launchId}`);
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
-    // Click without notes — client-side validation blocks the submit.
+    // Click without notes -- client-side validation blocks the submit. The
+    // gate renders the error inside a role=alert region, but Next's
+    // __next-route-announcer__ ALSO carries role=alert, so a bare
+    // page.getByRole("alert") is a strict-mode violation. Scope the locator
+    // to the gate's own region by anchoring on its required-notes text.
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByRole("alert")).toContainText(/notes are required/i);
+    const gateAlert = page.getByRole("alert").filter({ hasText: /notes are required/i });
+    await expect(gateAlert).toBeVisible();
     // Status unchanged.
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
-    // Provide notes and retry — the launch flips to approved_with_changes.
+    // Provide notes and retry -- the launch flips to approved_with_changes.
     await page.getByLabel(/notes/i).fill("Adjust the body copy then ship.");
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByText(/Approved with changes/i)).toBeVisible({
+    await expect(page.getByText(/Approved with changes/i).first()).toBeVisible({
       timeout: 15_000,
     });
   });
