@@ -70,7 +70,6 @@ from ..auth import verify_secret
 from ..services import video_probe
 from ..services.pipeline_runner import emit_pipeline_event, fetch_pipeline
 from ..services.storage import BUCKET
-from ..services.work_queue import enqueue_work_item
 from ..supabase_client import get_supabase_admin
 
 
@@ -964,27 +963,30 @@ _TERMINAL_DISPATCH = {"completed", "failed", "timed_out"}
 
 @router.post("/work/pipeline/tools/signal", dependencies=[Depends(verify_secret)])
 async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
-    """Record one operator dispatch signal on the unified ``work_item`` queue.
+    """Record one operator dispatch lifecycle signal on the audit log.
 
     Silent-failure PR-4: the legacy ``operator_dispatches`` table (renamed
-    ``_legacy_operator_dispatches`` by 0051) has no consumer anymore -- the
-    operator-daemon owns the dispatch lifecycle natively via
-    ``work_item(kind='operator_dispatch')``. This route now records the
-    operator's narration of a dispatch's lifecycle as a ``work_item`` row of
-    that kind. Idempotent on ``(pipeline_id, dispatch_id, status)`` so a
-    repeated signal (the operator retries) does not double-enqueue. Returns
-    the resolved DB status, preserving the existing response shape so callers
-    (the operator skill) do not break.
+    ``_legacy_operator_dispatches`` by 0051) was BOTH a work queue and an
+    audit trail. The operator-daemon now owns the dispatch *work* lifecycle
+    natively (claims `work_item(kind='operator_dispatch')`, runs hermes,
+    PATCHes terminal status). The operator-skill's narration verbs
+    (`dispatched`/`running`/`completed`/`failed`/`stale`/`waiting`/`partial`/
+    `error`/`timed_out`) are AUDIT EVENTS -- not work units -- so this route
+    records them as `pipeline_events` rows with `kind='operator_signal'`.
+    Treating them as `work_item(kind='operator_dispatch')` would cause the
+    daemon to re-claim each signal and spawn an empty hermes chat, which is
+    the silent-failure class the redesign exists to eliminate.
+
+    Append-only: a repeated signal is a repeated audit entry. The response
+    shape preserves `dispatch_id` + resolved DB `status` + `terminal` for the
+    operator skill; `event_id` replaces the prior `dispatch_row_id`.
     """
     _require_pipeline(body.pipeline_id)
-    sb = get_supabase_admin()
     db_status = _SIGNAL_DB_STATUS[body.status]
     stage = body.stage or "configuration"
 
     payload: dict[str, Any] = {
-        "pipeline_id": body.pipeline_id,
         "dispatch_id": body.dispatch_id,
-        "stage": stage,
         "signal": body.status,
         "db_status": db_status,
         "terminal": db_status in _TERMINAL_DISPATCH,
@@ -998,16 +1000,11 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
     if body.error is not None:
         payload["error"] = body.error
 
-    idempotency_key = (
-        f"op-disp:{body.pipeline_id}:{body.dispatch_id}:{db_status}"
-    )
-    enqueued = enqueue_work_item(
-        sb,
-        kind="operator_dispatch",
+    event_id = emit_pipeline_event(
         pipeline_id=body.pipeline_id,
+        kind="operator_signal",
+        stage=stage,
         payload=payload,
-        idempotency_key=idempotency_key,
-        created_by="worker.operator_stage_tools.signal_dispatch",
     )
 
     log.info(
@@ -1016,15 +1013,13 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
         dispatch_id=body.dispatch_id,
         signal=body.status,
         db_status=db_status,
-        work_item_id=enqueued.get("id") if isinstance(enqueued, dict) else None,
+        event_id=event_id,
     )
     return {
         "ok": True,
         "dispatch_id": body.dispatch_id,
         "status": db_status,
-        "dispatch_row_id": (
-            enqueued.get("id") if isinstance(enqueued, dict) else None
-        ),
+        "event_id": event_id,
         "terminal": db_status in _TERMINAL_DISPATCH,
     }
 
