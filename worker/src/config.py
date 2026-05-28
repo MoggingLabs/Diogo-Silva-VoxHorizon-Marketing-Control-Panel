@@ -108,19 +108,15 @@ class Settings(BaseSettings):
     tailscale_hostname: str = "voxhorizon-worker"
 
     # === Periodic background scheduler (#354) ===
-    # The worker runs three cron cores in supervised asyncio loops (see
-    # services.scheduler): the stuck-dispatch watchdog, the GHL daily
-    # reconciliation, and the observability watchdogs. All knobs are env-backed
-    # with conservative defaults. Set SCHEDULER_ENABLED=false to disable every
-    # loop; the scheduler also auto-skips when Supabase is unconfigured, so
-    # local boots / tests need set nothing.
+    # The worker runs its cron cores in supervised asyncio loops (see
+    # services.scheduler): observability/ops-alert delivery, the GHL daily
+    # reconciliation, the kie video render reconciliation, the unified work_item
+    # watchdog, the outbox drain, and the worker-stage drain. All knobs are
+    # env-backed with conservative defaults. Set SCHEDULER_ENABLED=false to
+    # disable every loop; the scheduler also auto-skips when Supabase is
+    # unconfigured, so local boots / tests need set nothing.
     scheduler_enabled: bool = True
-    scheduler_watchdog_interval_s: float = 60.0
-    scheduler_watchdog_timeout_s: float = 900.0
-    scheduler_watchdog_max_redispatch: int = 5
     scheduler_observability_interval_s: float = 300.0
-    scheduler_observability_dispatch_timeout_s: float = 900.0
-    scheduler_observability_outbox_timeout_s: float = 300.0
     # GHL daily reconciliation: no-op until the client_integrations table exists.
     scheduler_reconcile_interval_s: float = 86_400.0
     scheduler_reconcile_window_days: int = 1
@@ -131,21 +127,6 @@ class Settings(BaseSettings):
     # watchdog so a backlog can't fan out an unbounded burst of record-info GETs.
     scheduler_kie_reconcile_interval_s: float = 120.0
     scheduler_kie_reconcile_max_per_pass: int = 10
-
-    # Transactional-outbox relay (E5.1 / #510): the drainer that claims due
-    # ``integration_outbox`` rows, performs the external side effect, and records
-    # the outcome (see services.outbox_relay). It runs every
-    # ``scheduler_outbox_interval_s`` and is BOUNDED to
-    # ``scheduler_outbox_max_per_pass`` rows per pass -- mirroring the dispatch
-    # watchdog + kie reconcile caps -- so a backlog can't fan out an unbounded
-    # burst of external calls. A failed side effect backs off exponentially
-    # (``base`` doubling, capped at ``cap``) on next_attempt_at and is dead-
-    # lettered (status='dead') after ``scheduler_outbox_max_attempts`` tries.
-    scheduler_outbox_interval_s: float = 30.0
-    scheduler_outbox_max_per_pass: int = 20
-    scheduler_outbox_max_attempts: int = 8
-    scheduler_outbox_backoff_base_s: float = 30.0
-    scheduler_outbox_backoff_cap_s: float = 3_600.0
 
     # === Silent-failure redesign PR-1: unified work_item watchdog ===
     # The new observer runs alongside the legacy per-domain watchdogs in PR-1
@@ -202,27 +183,22 @@ class Settings(BaseSettings):
     dashboard_base_url: str = "https://dashboard.voxhorizon.com"
 
     # === Ops alerting (E5.6 / #526) ===
-    # The observability/dispatch watchdog ticks detect operational problems
-    # (stuck dispatches, a growing/over-threshold outbox dead-letter pile, an
-    # open circuit breaker, cost over its cap) and DELIVER a Slack alert to a
-    # SEPARATE ops channel -- distinct from the approval channel so on-call noise
-    # never drowns the approval queue, and vice versa. The bot token is the same
-    # ``SLACK_BOT_TOKEN`` the approval fan-out uses; only the channel differs.
-    # Optional at boot: when ``SLACK_OPS_CHANNEL_ID`` (or the token) is unset the
-    # alert tick logs ``ops_alert_skipped_no_channel`` and the watchdogs still
-    # emit their structured log lines (log-based alerting keeps working). The
-    # ops-alert delivery is best-effort -- it never raises and never blocks the
-    # supervised scheduler loop.
+    # The observability tick detects operational problems (a growing/over-
+    # threshold outbox dead-letter pile, an open circuit breaker, cost over its
+    # cap) and DELIVERs a Slack alert to a SEPARATE ops channel -- distinct from
+    # the approval channel so on-call noise never drowns the approval queue, and
+    # vice versa. The bot token is the same ``SLACK_BOT_TOKEN`` the approval
+    # fan-out uses; only the channel differs. Optional at boot: when
+    # ``SLACK_OPS_CHANNEL_ID`` (or the token) is unset the alert tick logs
+    # ``ops_alert_skipped_no_channel`` and the structured log lines still emit
+    # (log-based alerting keeps working). The ops-alert delivery is best-effort
+    # -- it never raises and never blocks the supervised scheduler loop.
     slack_ops_channel_id: str | None = None
     # SLO targets / alert thresholds. Each is the boundary at which the matching
     # condition flips to "bad" and (on transition into bad, throttled) pages the
     # ops channel. Conservative defaults far above a healthy steady state so a
     # slow-but-alive system is never paged; see docs/observability.md.
     #
-    #   * stuck-dispatch age: an operator dispatch with no terminal status whose
-    #     newest activity (heartbeat else dispatched_at) is older than this is
-    #     presumed wedged. Mirrors the observability watchdog timeout default.
-    ops_alert_stuck_dispatch_age_s: float = 900.0  # 15 min (SLO: redispatch < 15m)
     #   * outbox dead-letter count: a dead-letter pile (status='dead' + 'failed')
     #     at/above this is a delivery-SLO breach worth paging on.
     ops_alert_outbox_dead_letter_threshold: int = 1  # SLO: zero dead letters
