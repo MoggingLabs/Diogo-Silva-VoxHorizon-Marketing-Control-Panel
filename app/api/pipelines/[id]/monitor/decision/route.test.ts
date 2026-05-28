@@ -34,6 +34,14 @@ const inMonitorStage = () =>
       update: { single: { data: { id, status: "done" }, error: null } },
     },
     pipeline_events: { insert: { data: null, error: null } },
+    // Silent-failure PR-8: the route now enqueues a `worker_monitor` work_item
+    // (instead of fire-and-forgetting at the non-existent /work/pipeline/monitor
+    // endpoint). The enqueue probes then inserts; give it a clean path so the
+    // best-effort forward succeeds without a logged warning.
+    work_item: {
+      select: { single: { data: null, error: null } },
+      insert: { single: { data: { id: "wi-monitor-1" }, error: null } },
+    },
   });
 
 beforeEach(() => {
@@ -203,20 +211,48 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("forwards the verdict to the worker when configured (200)", async () => {
-    process.env.WORKER_URL = "http://worker.local";
-    process.env.WORKER_SHARED_SECRET = "secret";
-    const fetchSpy = vi
-      .spyOn(globalThis, "fetch")
-      .mockResolvedValueOnce(new Response(null, { status: 200 }));
+  it("enqueues a worker_monitor work_item to forward the verdict (200)", async () => {
+    // Silent-failure PR-8: the verdict forward is now a `worker_monitor`
+    // work_item enqueue (the old fire-and-forget hit /work/pipeline/monitor,
+    // which does not exist -- the 404 was swallowed). Assert the route inserts
+    // a `worker_monitor` row so the verdict is tracked + visible; the
+    // worker-stage consumer acknowledges it (the real Meta pause / budget write
+    // is a one-function drop-in there).
     currentSupabase = inMonitorStage();
+    const res = await POST(req({ decision: "kill", campaign_id: "c1" }), { params });
+    expect(res.status).toBe(200);
+    // The route opened a `from('work_item')` builder for the enqueue probe +
+    // insert. Find the builder(s) for that table and assert an insert carrying
+    // the worker_monitor kind + the pipeline id landed.
+    const fromSpy = currentSupabase._spies.from;
+    const workItemCalls = fromSpy.mock.calls.filter((c) => c[0] === "work_item");
+    expect(workItemCalls.length).toBeGreaterThanOrEqual(1);
+    const insertPayloads = fromSpy.mock.results
+      .map((r) => r.value as { insert?: { mock?: { calls: unknown[][] } } })
+      .flatMap((builder) => builder?.insert?.mock?.calls ?? [])
+      .map((callArgs) => callArgs[0] as Record<string, unknown>);
+    expect(insertPayloads).toContainEqual(
+      expect.objectContaining({ kind: "worker_monitor", pipeline_id: id }),
+    );
+  });
+
+  it("still returns 200 when the worker_monitor enqueue fails (best-effort)", async () => {
+    // The run already reached `done`; a worker-queue outage must not undo it.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    currentSupabase = mockClient({
+      pipelines: {
+        select: { single: { data: { id, status: "monitor", advanced_at: {} }, error: null } },
+        update: { single: { data: { id, status: "done" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: null } },
+      work_item: {
+        select: { single: { data: null, error: null } },
+        insert: { single: { data: null, error: { message: "queue down" } } },
+      },
+    });
     const res = await POST(req({ decision: "kill" }), { params });
     expect(res.status).toBe(200);
-    await new Promise((r) => setTimeout(r, 5));
-    expect(fetchSpy).toHaveBeenCalledWith(
-      "http://worker.local/work/pipeline/monitor",
-      expect.objectContaining({ method: "POST" }),
-    );
+    warn.mockRestore();
   });
 
   it("500 when stage_advanced event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
