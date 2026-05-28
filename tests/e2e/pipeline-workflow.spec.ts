@@ -127,7 +127,13 @@ test.describe("pipeline — no-stall full workflow (image track)", () => {
       .click();
     await expect(page.getByText(/Image:\s*1\s*picked/)).toBeVisible();
 
-    await page.getByRole("button", { name: /continue to review/i }).click();
+    // The pick is recorded server-side (the "Image: 1 picked" subtitle confirms
+    // the /picks write landed). Drive ideation->review through the API so the
+    // advance is committed server-side before the API approve below -- a UI
+    // "continue to review" click shows the Review view optimistically before the
+    // reducer reflects the advance, which raced the API approve to a 409.
+    await expectAdvance(pipelineId, "review");
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
