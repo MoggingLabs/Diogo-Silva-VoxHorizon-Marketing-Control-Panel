@@ -561,7 +561,11 @@ function ManualConfiguration({ pipeline, clients: initialClients }: StageConfigu
   const onFormatChange = useCallback(
     (next: PipelineFormat) => {
       setFormat(next);
-      void autosave({ format_choice: next });
+      // A format pick is discrete (not rapid typing), so skip the 1s debounce
+      // and persist immediately. The hook aborts any in-flight PATCH so the
+      // latest pick still wins; this also removes ~1s of lag before the
+      // server-rendered header badge reflects the change.
+      void autosave({ format_choice: next }, { immediate: true });
     },
     [autosave],
   );
