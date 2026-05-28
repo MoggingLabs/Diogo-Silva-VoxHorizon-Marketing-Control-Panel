@@ -258,6 +258,35 @@ export async function cancelPipeline(id: string): Promise<{ pipeline: Pipeline }
 }
 
 /**
+ * Redispatch the operator for a pipeline whose latest operator dispatch failed
+ * or timed out. POSTs to `/api/pipelines/[id]/redispatch`, which re-enqueues a
+ * fresh `operator_dispatch` work_item chained to the failed one via
+ * `parent_work_item_id` (so the retry is auditable). Returns the new work_item
+ * id and whether it deduped to an already-queued retry (`duplicate`).
+ *
+ * Throws on 4xx/5xx with the inline error body — the WorkItemPanel surfaces the
+ * message inside its confirm modal so the operator can retry without losing it.
+ * Known 409 bodies: `not_operator_driven`, `no_failed_dispatch`, `invalid_state`.
+ */
+export async function redispatchWorkItem(
+  id: string,
+): Promise<{ work_item_id: string; duplicate: boolean }> {
+  const res = await fetch(
+    `${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}/redispatch`,
+    { method: "POST", cache: "no-store" },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(
+      `POST /api/pipelines/${id}/redispatch failed (${res.status}): ${
+        body.slice(0, 200) || res.statusText
+      }`,
+    );
+  }
+  return readJson<{ work_item_id: string; duplicate: boolean }>(res);
+}
+
+/**
  * Archive (soft-delete) a pipeline. Sets `deleted_at` so the run drops out of
  * the active list but stays restorable and keeps its timeline (#609). The
  * pipeline is the orchestration root, so this is never a hard delete.
