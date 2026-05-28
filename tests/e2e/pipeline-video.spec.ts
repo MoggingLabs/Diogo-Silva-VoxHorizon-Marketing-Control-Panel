@@ -179,17 +179,15 @@ test.describe("pipeline - video format", () => {
     // the config view - reload to render the ideation grid over the seeded rows.
     await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText(/Picked:\s*0\s*of\s*3/)).toBeVisible({ timeout: 15_000 });
-    await page
-      .getByRole("checkbox", { name: /pick video concept/i })
-      .nth(0)
-      .click();
-    await expect(page.getByText(/Video:\s*1\s*picked/)).toBeVisible();
 
-    // The pick is recorded server-side (the "Video: 1 picked" subtitle confirms
-    // the /picks write landed). Drive ideation->review through the API so the
-    // advance is committed before the API approve below -- a UI "continue to
-    // review" click shows the Review view optimistically before the reducer
-    // reflects the advance, which raced the API approve to a 409.
+    // Record the pick + drive ideation->review through the API. The ideation
+    // checkbox + "continue to review" button update `pipelines.picks` and the
+    // status OPTIMISTICALLY in the UI before the writes commit server-side, so an
+    // immediately-following API advance/approve raced them (insufficient-picks
+    // 422 / wrong-state 409). The API picks write is the same route the checkbox
+    // calls and is committed on return, so the advance gate sees the pick.
+    const picksRes = await managerPost(pipelineId, "picks", { video: [seeded.video[0]!.id] });
+    expect(picksRes.status, JSON.stringify(picksRes.body)).toBe(200);
     await expectAdvance(pipelineId, "review");
     await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
