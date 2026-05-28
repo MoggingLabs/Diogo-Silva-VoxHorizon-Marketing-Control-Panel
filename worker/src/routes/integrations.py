@@ -31,13 +31,12 @@ Endpoints (all bearer-authed via :func:`verify_secret`):
       Observability snapshot: outbox depth, breaker state, in-flight dispatches,
       cost-vs-cap (#369).
 
-Plus two pure, unit-tested cores wired by cron later (noted, not scheduled):
+Plus one pure, unit-tested core wired by cron (see :mod:`services.scheduler`):
 
   * :func:`reconcile_pipeline` — daily reconciliation (#366/#367): pull GHL
     leads via :class:`GhlClient`, read Meta spend from ``cost_ledger``, compute
     real CPL, and write a ``campaign_perf_image`` / ``campaign_perf_video`` row
     (routed by the pipeline's format).
-  * the watchdog cores live in :mod:`services.observability`.
 """
 
 from __future__ import annotations

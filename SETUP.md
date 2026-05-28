@@ -5,9 +5,11 @@
 > system runs on a single Hostinger VPS: Next.js 15 + Supabase + a Python
 > FastAPI worker + a Hermes operator agent, fronted by Caddy. Treat the steps
 > below as historical until this guide is rewritten for the VPS. For the
-> current architecture and the rebuild in progress, see
-> [`PIPELINE-REBUILD-ARCHITECTURE.md`](./PIPELINE-REBUILD-ARCHITECTURE.md) and
-> the decision records in [`docs/adr`](./docs/adr).
+> current architecture, see the decision records in
+> [`docs/adr`](./docs/adr); [`PIPELINE-REBUILD-ARCHITECTURE.md`](./PIPELINE-REBUILD-ARCHITECTURE.md)
+> records the rebuild's original design and is partially superseded by the
+> silent-failure work_item/daemon redesign (see the banner at the top of that
+> doc).
 
 From-zero recipe for bootstrapping the VoxHorizon Marketing Control Panel on a fresh Mac. Follow top to bottom — every step is idempotent unless noted.
 

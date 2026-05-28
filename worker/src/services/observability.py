@@ -1,6 +1,6 @@
 """Observability primitives for the pipeline rebuild (P5.6 / #369).
 
-Three small, dependency-light surfaces the integrations layer wires together:
+Two small, dependency-light surfaces the integrations layer wires together:
 
   1. **Correlation-id binding.** :func:`bind_pipeline` /
      :func:`bound_pipeline` bind ``pipeline_id`` (the architecture's per-call
@@ -15,46 +15,25 @@ Three small, dependency-light surfaces the integrations layer wires together:
      against an injected supabase handle + breaker map so it unit-tests with the
      in-memory double and no live HTTP.
 
-  3. **Watchdogs.** :func:`stuck_dispatches` + :func:`stuck_outbox` are pure
-     functions over already-fetched rows + a ``now`` clock: they classify which
-     operator dispatches and outbox entries have been stuck past their timeout
-     so a caller (a cron-driven re-dispatch / alert) can act. No I/O, no
-     hidden clock — fully deterministic in tests.
-
-The cron wiring (a periodic task that calls the watchdogs and fans alerts to
-Slack, distinct from the approval long-poll) is deferred — these are the pure
-cores it will call. Slack alert delivery reuses the existing
-:mod:`services.notifications` Slack helper at wire time; not imported here so
-this module stays I/O-free and trivially testable.
+Both read off the unified ``work_item`` queue (silent-failure redesign); the
+former per-row "stuck" classifiers (``stuck_dispatches`` / ``stuck_outbox``)
+were removed once the unified work_item watchdog took over stale-claim rotation
+for every kind. Slack alert delivery reuses the existing Slack helper at wire
+time (see :mod:`services.scheduler`); not imported here so this module stays
+I/O-free and trivially testable.
 """
 
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator, Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
 
 
 log = structlog.get_logger(__name__)
-
-
-# Default "stuck" thresholds. An operator dispatch with no terminal status (and
-# no heartbeat) past this is presumed wedged; an outbox row still pending past
-# this many seconds is presumed stalled. Both are conservative — far longer than
-# a healthy stage dispatch / outbox drain — so a slow-but-alive job is never
-# flagged.
-DEFAULT_DISPATCH_TIMEOUT_S = 900.0  # 15 min
-DEFAULT_OUTBOX_TIMEOUT_S = 300.0  # 5 min
-
-# Open-dispatch statuses (mirrors the operator_dispatches partial index in 0023:
-# rows in these states have no terminal outcome yet).
-_OPEN_DISPATCH_STATUSES: frozenset[str] = frozenset({"dispatched", "running"})
-# Outbox statuses that represent undelivered work (mirrors the 0023 due index).
-_OPEN_OUTBOX_STATUSES: frozenset[str] = frozenset({"pending", "inflight"})
 
 
 # ---------------------------------------------------------------------------
@@ -97,127 +76,6 @@ def bound_pipeline(pipeline_id: str | None, **extra: Any) -> Iterator[None]:
         yield
     finally:
         structlog.contextvars.reset_contextvars(**tokens)
-
-
-# ---------------------------------------------------------------------------
-# Watchdogs (pure)
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class StuckItem:
-    """One item a watchdog flagged as stuck past its timeout.
-
-    ``kind`` is ``"dispatch"`` or ``"outbox"``; ``ref`` is the natural id
-    (dispatch_id / idempotency_key); ``age_s`` is how long it has been wedged.
-    ``row`` carries the original record for the caller's alert/re-dispatch.
-    """
-
-    kind: str
-    pipeline_id: str | None
-    ref: str
-    age_s: float
-    row: dict[str, Any]
-
-
-def _parse_ts(value: Any) -> datetime | None:
-    """Parse a Supabase timestamptz (ISO string / datetime) to aware UTC."""
-    if isinstance(value, datetime):
-        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-    if not isinstance(value, str) or not value.strip():
-        return None
-    raw = value.strip()
-    iso = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw
-    try:
-        dt = datetime.fromisoformat(iso)
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def stuck_dispatches(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    now: datetime,
-    timeout_s: float = DEFAULT_DISPATCH_TIMEOUT_S,
-) -> list[StuckItem]:
-    """Flag operator dispatches wedged past ``timeout_s``.
-
-    A dispatch is *stuck* when its status is still open
-    (``dispatched``/``running``) and the most-recent activity timestamp —
-    ``last_heartbeat_at`` if present, else ``dispatched_at`` — is older than
-    ``timeout_s`` relative to ``now``. Terminal rows (completed/failed/
-    timed_out) and rows whose timestamps don't parse are skipped (a missing
-    timestamp can't be aged, so it's never falsely flagged). Sorted oldest
-    (most stuck) first so a caller alerts the worst offenders first.
-    """
-    out: list[StuckItem] = []
-    for row in rows:
-        status = row.get("status")
-        if status not in _OPEN_DISPATCH_STATUSES:
-            continue
-        last = _parse_ts(row.get("last_heartbeat_at")) or _parse_ts(
-            row.get("dispatched_at")
-        )
-        if last is None:
-            continue
-        age = (now - last).total_seconds()
-        if age < timeout_s:
-            continue
-        out.append(
-            StuckItem(
-                kind="dispatch",
-                pipeline_id=_as_opt_str(row.get("pipeline_id")),
-                ref=str(row.get("dispatch_id") or row.get("id") or ""),
-                age_s=age,
-                row=dict(row),
-            )
-        )
-    out.sort(key=lambda i: i.age_s, reverse=True)
-    return out
-
-
-def stuck_outbox(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    now: datetime,
-    timeout_s: float = DEFAULT_OUTBOX_TIMEOUT_S,
-) -> list[StuckItem]:
-    """Flag transactional-outbox rows undrained past ``timeout_s``.
-
-    An outbox row is *stuck* when its status is open (``pending``/``inflight``)
-    and ``created_at`` is older than ``timeout_s`` relative to ``now``. ``done``/
-    ``failed``/``dead`` rows are terminal and skipped. Sorted oldest first.
-    """
-    out: list[StuckItem] = []
-    for row in rows:
-        status = row.get("status")
-        if status not in _OPEN_OUTBOX_STATUSES:
-            continue
-        created = _parse_ts(row.get("created_at"))
-        if created is None:
-            continue
-        age = (now - created).total_seconds()
-        if age < timeout_s:
-            continue
-        out.append(
-            StuckItem(
-                kind="outbox",
-                pipeline_id=_as_opt_str(row.get("pipeline_id")),
-                ref=str(row.get("idempotency_key") or row.get("id") or ""),
-                age_s=age,
-                row=dict(row),
-            )
-        )
-    out.sort(key=lambda i: i.age_s, reverse=True)
-    return out
-
-
-def _as_opt_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
 
 
 # ---------------------------------------------------------------------------

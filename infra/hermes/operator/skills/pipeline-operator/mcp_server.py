@@ -303,9 +303,9 @@ def pipeline_operator_signal(
     ``dispatched|running|completed|failed|timed_out|stale|waiting|partial|
     error``. On a stale/duplicate dispatch (``status != expected_status`` on
     read) signal ``stale`` and STOP. On a capped per-creative batch signal
-    ``partial``. The worker opens / heartbeats / closes the
-    ``operator_dispatches`` row idempotently on ``(pipeline_id, dispatch_id)``.
-    No spend; allowlisted.
+    ``partial``. The worker records this signal on the ``operator_dispatch``
+    work_item idempotently on ``(pipeline_id, dispatch_id)``. No spend;
+    allowlisted.
     """
     return helper.pipeline_operator_signal(
         pipeline_id=pipeline_id,

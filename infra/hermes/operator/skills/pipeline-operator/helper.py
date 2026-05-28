@@ -1186,8 +1186,8 @@ def pipeline_operator_signal(
 ) -> dict[str, Any]:
     """Signal dispatch completion / health to the workflow (ALWAYS call last).
 
-    POSTs to ``/work/pipeline/tools/signal`` to open / heartbeat / close the
-    dispatch's ``operator_dispatches`` row so the workflow knows the dispatch
+    POSTs to ``/work/pipeline/tools/signal`` to record the signal on the
+    dispatch's ``operator_dispatch`` work_item so the workflow knows the dispatch
     landed and the watchdog does not re-dispatch a healthy stage. End EVERY
     dispatch with this. ``status`` is one of :data:`SIGNAL_STATUSES`:
     ``stale``→done (a no-op dispatch), ``waiting``/``partial``→still running,

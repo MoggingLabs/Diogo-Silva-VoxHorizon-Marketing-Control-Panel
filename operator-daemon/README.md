@@ -60,11 +60,16 @@ Tests:
 uv run pytest
 ```
 
-## What this PR ships
+## Deployment
 
-- The Python package + Dockerfile + tests above
-- A new CI job `operator-daemon (pytest)` in `.github/workflows/ci.yml`
+The daemon is live in the stack (silent-failure PR-3 cutover):
 
-It deliberately does NOT touch `docker-compose.yml`, the deploy-stack
-workflow, the worker, or the web app. Those are PR-3 cutover concerns.
-This is a self-contained directory the build chain has not yet picked up.
+- The Python package + Dockerfile + tests above.
+- A CI job `operator-daemon (pytest)` in `.github/workflows/ci.yml`.
+- An `operator-daemon` service in `docker-compose.yml`: built from this
+  directory, on the default + `hermes-agent-ekko_default` networks, mounting
+  the host Docker socket, `depends_on` the worker being healthy, and exposing a
+  `/healthz` healthcheck on `:9001`.
+- Built, pushed (GHCR), and rolled out by `.github/workflows/deploy-stack.yml`
+  alongside `web` and `worker`; the post-rollout health-wait fails the deploy
+  loudly if the sidecar does not come up healthy.

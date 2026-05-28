@@ -4,8 +4,8 @@ The watchdog ticks classify operational problems and log them; E5.6 adds the
 DELIVERY half: paging a Slack ops channel when a problem is detected. We cover
 the four required behaviours plus the classification + throttle logic:
 
-  * an alert FIRES on a detected problem (stuck dispatch, outbox dead letters,
-    backlog, open breaker, cost over cap);
+  * an alert FIRES on a detected problem (outbox dead letters, backlog, open
+    breaker, cost over cap);
   * repeated alerts are THROTTLED / de-duped (page on transition into bad, not
     every tick) and RE-ARM after a return to healthy;
   * delivery NEVER raises on a Slack failure (outage, non-ok body, missing
@@ -23,7 +23,6 @@ import pytest
 
 from src.config import get_settings
 from src.services import scheduler
-from src.services.observability import StuckItem
 
 from .conftest import FakeSupabase
 
@@ -38,16 +37,6 @@ def _settings(**over: object):  # noqa: ANN202
     get_settings.cache_clear()
     s = get_settings()
     return s.model_copy(update=dict(over)) if over else s
-
-
-def _stuck(ref: str = "d-1", age_s: float = 1000.0, pipeline_id: str = "p-1") -> StuckItem:
-    return StuckItem(
-        kind="dispatch",
-        pipeline_id=pipeline_id,
-        ref=ref,
-        age_s=age_s,
-        row={"dispatch_id": ref},
-    )
 
 
 def _metrics(
@@ -108,30 +97,9 @@ def capture_slack(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_evaluate_flags_stuck_dispatch() -> None:
-    conds = scheduler.evaluate_alert_conditions(
-        _settings(), stuck_dispatches=[_stuck(age_s=1000)], metrics=_metrics()
-    )
-    kinds = {c.kind for c in conds}
-    assert "stuck_dispatch" in kinds
-    sd = next(c for c in conds if c.kind == "stuck_dispatch")
-    assert sd.severity == "critical"
-    assert "d-1" in sd.detail
-
-
-def test_evaluate_ignores_dispatch_below_age_threshold() -> None:
-    # Aged 500s with a 900s SLO -> below threshold -> not flagged.
-    conds = scheduler.evaluate_alert_conditions(
-        _settings(ops_alert_stuck_dispatch_age_s=900.0),
-        stuck_dispatches=[_stuck(age_s=500)],
-        metrics=_metrics(),
-    )
-    assert "stuck_dispatch" not in {c.kind for c in conds}
-
-
 def test_evaluate_flags_outbox_dead_letter() -> None:
     conds = scheduler.evaluate_alert_conditions(
-        _settings(), stuck_dispatches=[], metrics=_metrics(dead=2, failed=1)
+        _settings(), metrics=_metrics(dead=2, failed=1)
     )
     dl = next(c for c in conds if c.kind == "outbox_dead_letter")
     assert "3" in dl.summary  # dead + failed
@@ -140,7 +108,6 @@ def test_evaluate_flags_outbox_dead_letter() -> None:
 def test_evaluate_flags_outbox_backlog() -> None:
     conds = scheduler.evaluate_alert_conditions(
         _settings(ops_alert_outbox_depth_threshold=100),
-        stuck_dispatches=[],
         metrics=_metrics(depth=150),
     )
     assert "outbox_backlog" in {c.kind for c in conds}
@@ -149,7 +116,6 @@ def test_evaluate_flags_outbox_backlog() -> None:
 def test_evaluate_flags_open_breaker() -> None:
     conds = scheduler.evaluate_alert_conditions(
         _settings(),
-        stuck_dispatches=[],
         metrics=_metrics(breakers={"services.leadconnectorhq.com": "open"}),
     )
     bo = next(c for c in conds if c.kind == "breaker_open")
@@ -159,7 +125,6 @@ def test_evaluate_flags_open_breaker() -> None:
 def test_evaluate_ignores_closed_breaker() -> None:
     conds = scheduler.evaluate_alert_conditions(
         _settings(),
-        stuck_dispatches=[],
         metrics=_metrics(breakers={"host": "closed"}),
     )
     assert "breaker_open" not in {c.kind for c in conds}
@@ -167,14 +132,14 @@ def test_evaluate_ignores_closed_breaker() -> None:
 
 def test_evaluate_flags_cost_over_cap() -> None:
     conds = scheduler.evaluate_alert_conditions(
-        _settings(), stuck_dispatches=[], metrics=_metrics(over_cap=True)
+        _settings(), metrics=_metrics(over_cap=True)
     )
     assert "cost_over_cap" in {c.kind for c in conds}
 
 
 def test_evaluate_healthy_is_empty() -> None:
     conds = scheduler.evaluate_alert_conditions(
-        _settings(), stuck_dispatches=[], metrics=_metrics()
+        _settings(), metrics=_metrics()
     )
     assert conds == []
 
@@ -188,7 +153,7 @@ def test_deliver_fires_on_problem(
     slack_env: None, capture_slack: dict[str, Any]
 ) -> None:
     s = _settings()
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "wedged", "detail")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "wedged", "detail")]
     sent = asyncio.run(scheduler.deliver_ops_alerts(s, conds))
     assert sent == 1
     assert len(capture_slack["calls"]) == 1
@@ -214,7 +179,7 @@ def test_deliver_throttles_repeat_within_window(
 ) -> None:
     """Same kind on consecutive ticks pages once, then is suppressed."""
     s = _settings(ops_alert_throttle_s=3600.0)
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "wedged", "d")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "wedged", "d")]
     first = asyncio.run(scheduler.deliver_ops_alerts(s, conds))
     second = asyncio.run(scheduler.deliver_ops_alerts(s, conds))
     assert first == 1
@@ -227,7 +192,7 @@ def test_deliver_rearms_after_return_to_healthy(
 ) -> None:
     """A recover-then-rebreak pages a fresh alert (throttle re-armed)."""
     s = _settings(ops_alert_throttle_s=3600.0)
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "wedged", "d")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "wedged", "d")]
     asyncio.run(scheduler.deliver_ops_alerts(s, conds))  # pages
     asyncio.run(scheduler.deliver_ops_alerts(s, []))  # healthy -> re-arm
     second = asyncio.run(scheduler.deliver_ops_alerts(s, conds))  # breaks again
@@ -241,7 +206,7 @@ def test_deliver_distinct_kinds_each_page(
     """Two different kinds firing on the same tick are batched into one post."""
     s = _settings()
     conds = [
-        scheduler.AlertCondition("stuck_dispatch", "critical", "a", "a"),
+        scheduler.AlertCondition("outbox_backlog", "warning", "a", "a"),
         scheduler.AlertCondition("outbox_dead_letter", "critical", "b", "b"),
     ]
     sent = asyncio.run(scheduler.deliver_ops_alerts(s, conds))
@@ -257,7 +222,7 @@ def test_deliver_skips_when_no_channel(
     """No ops channel configured -> logged skip, no post, no raise."""
     monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-test")
     monkeypatch.delenv("SLACK_OPS_CHANNEL_ID", raising=False)
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "a", "a")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "a", "a")]
     sent = asyncio.run(scheduler.deliver_ops_alerts(_settings(), conds))
     assert sent == 0
     assert capture_slack["calls"] == []
@@ -268,7 +233,7 @@ def test_deliver_skips_when_no_token(
 ) -> None:
     monkeypatch.delenv("SLACK_BOT_TOKEN", raising=False)
     monkeypatch.setenv("SLACK_OPS_CHANNEL_ID", "C-OPS-1")
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "a", "a")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "a", "a")]
     sent = asyncio.run(scheduler.deliver_ops_alerts(_settings(), conds))
     assert sent == 0
     assert capture_slack["calls"] == []
@@ -279,7 +244,7 @@ def test_deliver_never_raises_on_slack_exception(
 ) -> None:
     """An exception out of the Slack sender is caught -> no raise, returns 0."""
     capture_slack["raise"] = RuntimeError("slack down")
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "a", "a")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "a", "a")]
     # Must not raise.
     sent = asyncio.run(scheduler.deliver_ops_alerts(_settings(), conds))
     assert sent == 0
@@ -290,7 +255,7 @@ def test_deliver_handles_slack_logical_failure(
 ) -> None:
     """Slack returns ok=False (sender returns False) -> no raise, still attempted."""
     capture_slack["ok"] = False
-    conds = [scheduler.AlertCondition("stuck_dispatch", "critical", "a", "a")]
+    conds = [scheduler.AlertCondition("outbox_dead_letter", "critical", "a", "a")]
     sent = asyncio.run(scheduler.deliver_ops_alerts(_settings(), conds))
     # The condition was consumed by the throttle + attempted; ok=False just logs.
     assert sent == 1
@@ -326,9 +291,9 @@ async def test_observability_tick_delivers_alert_on_dead_letters(
         ],
     )
     result = await scheduler.run_observability_once(_settings())
-    # The tick still returns its stuck counts...
-    assert result == {"stuck_dispatches": 0, "stuck_outbox": 0}
-    # ...and it delivered an ops alert for the dead-letter pile.
+    # The tick delivered one ops alert for the dead-letter pile...
+    assert result == {"alerts_delivered": 1}
+    # ...and posted it to the channel.
     assert len(capture_slack["calls"]) == 1
     assert "dead-letter" in capture_slack["calls"][0]["text"]
 
@@ -340,7 +305,7 @@ async def test_observability_tick_no_alert_when_healthy(
 ) -> None:
     """No problems -> the tick runs clean and pages nothing."""
     result = await scheduler.run_observability_once(_settings())
-    assert result == {"stuck_dispatches": 0, "stuck_outbox": 0}
+    assert result == {"alerts_delivered": 0}
     assert capture_slack["calls"] == []
 
 
@@ -353,6 +318,6 @@ async def test_observability_tick_never_raises_on_alert_failure(
     sb = _patch_sb
     sb.seed("work_item", [{"kind": "outbox_ghl_send", "status": "timed_out"}])
     capture_slack["raise"] = RuntimeError("boom")
-    # Must complete normally and return the stuck counts.
+    # Must complete normally; the swallowed Slack failure delivers nothing.
     result = await scheduler.run_observability_once(_settings())
-    assert result == {"stuck_dispatches": 0, "stuck_outbox": 0}
+    assert result == {"alerts_delivered": 0}

@@ -1,23 +1,29 @@
 """Periodic background scheduler for the worker's cron cores (#354).
 
-The pipeline rebuild shipped three *pure* cores with their cron wiring
-deliberately deferred (each module says so in its docstring / WIRING_NOTE):
+Each job runs in its own supervised asyncio loop (``asyncio.create_task`` +
+``asyncio.sleep``); the live set is:
 
-  1. the **stuck-dispatch watchdog** -- re-dispatch wedged operator runs
-     (:func:`services.operator_dispatch_watchdog.find_stuck_dispatches`);
+  1. **observability / ops-alert delivery** -- roll the metrics snapshot and
+     page the Slack ops channel on an SLO breach
+     (:func:`run_observability_once`);
   2. the **GHL daily reconciliation** -- real CPL = Meta spend / GHL leads
      (:func:`routes.integrations.reconcile_pipeline`);
-  3. the **observability watchdogs** -- flag stuck dispatches + stuck outbox
-     rows for alerting (:func:`services.observability.stuck_dispatches` /
-     :func:`~services.observability.stuck_outbox`).
+  3. the **kie video render reconciliation** -- poll-and-close renders the
+     callback never resolved (:func:`run_kie_reconcile_once`);
+  4. the **unified work_item watchdog** -- rotate stale-claim work_item rows and
+     flip stale consumers (:func:`run_work_item_watchdog_once`);
+  5. the **outbox drain** -- dispatch the outbox-kind work_item rows
+     (:func:`services.outbox_consumer.run_outbox_drain_once`);
+  6. the **worker-stage drain** -- run the deterministic ideation/generation/
+     monitor work_item rows
+     (:func:`services.worker_stage_consumer.run_worker_stage_drain_once`).
 
-This module is the missing scheduling half. It follows the pattern already in
-the worker (``asyncio.create_task`` + ``asyncio.sleep`` loops -- see
+It follows the pattern already in the worker (the ``asyncio`` loops in
 :mod:`services.hermes_approval`) rather than adding an APScheduler dependency:
 the worker has no scheduler dep today and the team prefers staying
-dependency-light. Each job runs in its own supervised loop; every tick is
-wrapped so a job failure is logged and the loop sleeps and retries -- a single
-bad tick (or a transient Supabase blip) NEVER crashes the worker.
+dependency-light. Every tick is wrapped so a job failure is logged and the loop
+sleeps and retries -- a single bad tick (or a transient Supabase blip) NEVER
+crashes the worker.
 
 Lifecycle: :func:`start_scheduler` is invoked from the FastAPI lifespan on
 startup and returns a :class:`Scheduler` whose :meth:`~Scheduler.stop`
@@ -172,18 +178,15 @@ class AlertCondition:
 def evaluate_alert_conditions(
     settings: Settings,
     *,
-    stuck_dispatches: list[observability.StuckItem],
     metrics: Mapping[str, Any],
 ) -> list[AlertCondition]:
-    """Classify the current watchdog/metrics findings into firing alerts (pure).
+    """Classify the current metrics snapshot into firing alerts (pure).
 
-    Inputs are already-fetched findings (the stuck-dispatch watchdog output + a
-    :func:`services.observability.metrics_snapshot`), so this is deterministic
+    The input is an already-fetched
+    :func:`services.observability.metrics_snapshot`, so this is deterministic
     and unit-tested with no I/O. Each SLO breach maps to one
     :class:`AlertCondition` with a stable ``kind`` (its throttle key):
 
-      * ``stuck_dispatch``  -- one or more dispatches wedged past
-        ``ops_alert_stuck_dispatch_age_s``.
       * ``outbox_dead_letter`` -- the dead-letter pile (status dead+failed) is
         at/above ``ops_alert_outbox_dead_letter_threshold``.
       * ``outbox_backlog`` -- the live outbox depth (pending+inflight) is
@@ -191,32 +194,18 @@ def evaluate_alert_conditions(
       * ``breaker_open`` -- any circuit breaker in the metrics snapshot is open.
       * ``cost_over_cap`` -- cost exceeded its configured cap (only when a cap
         is set; the snapshot reports ``over_cap``).
+
+    Stale-claim rotation for stuck operator dispatches is owned by the unified
+    work_item watchdog now, so the legacy stuck-dispatch alert branch was
+    removed -- a wedged dispatch surfaces as a dead-letter / backlog breach here
+    and a ``work_item_watchdog_dead_lettered`` log line from the watchdog.
     """
     conditions: list[AlertCondition] = []
-
-    # 1. Stuck operator dispatches (the watchdog already aged them).
-    breaching = [s for s in stuck_dispatches if s.age_s >= settings.ops_alert_stuck_dispatch_age_s]
-    if breaching:
-        worst = breaching[0]  # watchdog sorts oldest-first
-        refs = ", ".join(s.ref for s in breaching[:5])
-        conditions.append(
-            AlertCondition(
-                kind="stuck_dispatch",
-                severity="critical",
-                summary=f"{len(breaching)} operator dispatch(es) wedged",
-                detail=(
-                    f"{len(breaching)} dispatch(es) past the "
-                    f"{settings.ops_alert_stuck_dispatch_age_s:.0f}s SLO "
-                    f"(worst idle {worst.age_s:.0f}s, pipeline "
-                    f"{worst.pipeline_id or 'unknown'}). Refs: {refs}"
-                ),
-            )
-        )
 
     outbox = metrics.get("outbox") if isinstance(metrics, Mapping) else None
     outbox = outbox if isinstance(outbox, Mapping) else {}
 
-    # 2. Outbox dead-letter pile (durable external-write failures).
+    # 1. Outbox dead-letter pile (durable external-write failures).
     dead = int(outbox.get("dead", 0) or 0) + int(outbox.get("failed", 0) or 0)
     if dead >= settings.ops_alert_outbox_dead_letter_threshold:
         conditions.append(
@@ -233,7 +222,7 @@ def evaluate_alert_conditions(
             )
         )
 
-    # 3. Outbox backlog depth (the relay is falling behind).
+    # 2. Outbox backlog depth (the relay is falling behind).
     depth = int(outbox.get("depth", 0) or 0)
     if depth >= settings.ops_alert_outbox_depth_threshold:
         conditions.append(
@@ -249,7 +238,7 @@ def evaluate_alert_conditions(
             )
         )
 
-    # 4. Open circuit breaker(s). The metrics snapshot carries a per-host map;
+    # 3. Open circuit breaker(s). The metrics snapshot carries a per-host map;
     # an "open" state means a downstream connector is shedding load. (The
     # snapshot's breaker map is empty until the cron-held connector singleton
     # feeds it -- see docs/observability.md; this fires the moment it does.)
@@ -270,7 +259,7 @@ def evaluate_alert_conditions(
                 )
             )
 
-    # 5. Cost over cap (only meaningful when a cap is configured + fed).
+    # 4. Cost over cap (only meaningful when a cap is configured + fed).
     cost = metrics.get("cost") if isinstance(metrics, Mapping) else None
     if isinstance(cost, Mapping) and cost.get("over_cap"):
         conditions.append(
@@ -292,7 +281,6 @@ def evaluate_alert_conditions(
 # walks this set each tick to re-arm kinds that stopped firing.
 _ALL_ALERT_KINDS: frozenset[str] = frozenset(
     {
-        "stuck_dispatch",
         "outbox_dead_letter",
         "outbox_backlog",
         "breaker_open",
@@ -430,48 +418,41 @@ async def deliver_ops_alerts(
 
 
 # ---------------------------------------------------------------------------
-# Job: observability watchdogs (alerting)
+# Job: observability ops-alert delivery
 # ---------------------------------------------------------------------------
 
 
 async def run_observability_once(settings: Settings) -> dict[str, int]:
-    """One pass of the observability watchdogs. Returns the stuck counts.
+    """One observability pass. Returns the count of alert conditions delivered.
 
     Silent-failure PR-4: the legacy per-domain readers
     (``_all_dispatch_rows``/``_all_outbox_rows``) were removed -- the
     operator_dispatches + integration_outbox tables were renamed `_legacy_*`
     in migration 0051 and nothing writes to them anymore. The unified
     `run_work_item_watchdog_once` covers the equivalent surface against the
-    `work_item` queue. This tick now only DELIVERS the alert conditions the
-    metrics snapshot reports -- the structured logs the legacy watchdogs
-    emitted are gone with their data sources.
+    `work_item` queue. This tick rolls the metrics snapshot and DELIVERS the
+    alert conditions it reports (outbox dead-letter / backlog, open breaker,
+    cost over cap) to the Slack ops channel; the structured logs the legacy
+    watchdogs emitted are gone with their data sources.
     """
-    sb = None
-    stuck_disp: list[Any] = []
-    stuck_ob: list[Any] = []
+    delivered = 0
 
-    # E5.6: turn the findings into ops alerts + DELIVER them (best-effort). The
-    # metrics snapshot supplies the outbox dead-letter/depth, breaker map, and
-    # cost-vs-cap. The whole step is wrapped so an alerting failure never
-    # disturbs the loop.
+    # E5.6: turn the metrics snapshot into ops alerts + DELIVER them
+    # (best-effort). The snapshot supplies the outbox dead-letter/depth, breaker
+    # map, and cost-vs-cap. The whole step is wrapped so an alerting failure
+    # never disturbs the loop.
     try:
         from ..supabase_client import get_supabase_admin
 
         sb = get_supabase_admin()
         snapshot = observability.metrics_snapshot(sb)
-        conditions = evaluate_alert_conditions(
-            settings, stuck_dispatches=stuck_disp, metrics=snapshot
-        )
-        await deliver_ops_alerts(settings, conditions)
+        conditions = evaluate_alert_conditions(settings, metrics=snapshot)
+        delivered = await deliver_ops_alerts(settings, conditions)
     except Exception as exc:  # noqa: BLE001 -- alert delivery never sinks the tick
         log.warning("ops_alert_tick_failed", error=str(exc))
 
-    log.info(
-        "observability_pass_done",
-        stuck_dispatches=len(stuck_disp),
-        stuck_outbox=len(stuck_ob),
-    )
-    return {"stuck_dispatches": len(stuck_disp), "stuck_outbox": len(stuck_ob)}
+    log.info("observability_pass_done", alerts_delivered=delivered)
+    return {"alerts_delivered": delivered}
 
 
 # ---------------------------------------------------------------------------
