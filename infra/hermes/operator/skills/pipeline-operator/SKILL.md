@@ -60,21 +60,21 @@ the worker). Call them like any other tool — do NOT shell out to `helper.py`.
 The names matter: the approval gate keys on them. Each stage below names the
 one tool it calls.
 
-| MCP tool                              | What it does                                          | Spend?  | Manager gate                                                   |
-| ------------------------------------- | ----------------------------------------------------- | ------- | -------------------------------------------------------------- |
-| `pipeline_operator_read`              | Read pipeline state + stage + per-creative rollup     | no      | allowlisted (no prompt)                                        |
-| `pipeline_operator_client_read`       | Read client brand / offers / do-not-say               | no      | allowlisted (no prompt)                                        |
-| `pipeline_operator_brief`             | Author/upsert the image brief + persist concepts      | no      | reviewed via the brief stage gate                              |
-| `pipeline_operator_render`            | Render concepts / finals / re-renders                 | no      | allowlisted (free render, $0; spend supervised at stage gates) |
-| `pipeline_operator_store_creative`    | Record render bytes/metadata (codex backend upload)   | no      | allowlisted (worker recorder)                                  |
-| `pipeline_operator_qa_result`         | Persist per-creative QA verdicts (array)              | no      | allowlisted; worker adjudicates                                |
-| `pipeline_operator_compliance_result` | Submit per-creative compliance **candidate findings** | no      | allowlisted; **worker writes the verdict**                     |
-| `pipeline_operator_copy`              | Persist per-creative copy variants (array)            | no      | reviewed via the copy stage gate                               |
-| `pipeline_operator_spec_result`       | Persist per-placement spec checks + derived crops     | no      | allowlisted; auto-stage                                        |
-| `pipeline_operator_finalize_result`   | Record naming + Drive URLs + verify report            | no      | allowlisted; worker recorder                                   |
-| _(no launch tool)_                    | Launch runs on your **Meta MCP** (create entities PAUSED-first) + the worker recorder; there is no `pipeline_operator_launch` | n/a     | **approval on `Meta_ads_activate_entity`** (HARD launch gate)  |
-| `pipeline_operator_monitor_result`    | Persist monitor KPIs + kill/scale verdicts            | no      | allowlisted; recommendation only                               |
-| `pipeline_operator_signal`            | Signal dispatch completion / health to the workflow   | no      | allowlisted (always last)                                      |
+| MCP tool                              | What it does                                                                                                                  | Spend? | Manager gate                                                   |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------ | -------------------------------------------------------------- |
+| `pipeline_operator_read`              | Read pipeline state + stage + per-creative rollup                                                                             | no     | allowlisted (no prompt)                                        |
+| `pipeline_operator_client_read`       | Read client brand / offers / do-not-say                                                                                       | no     | allowlisted (no prompt)                                        |
+| `pipeline_operator_brief`             | Author/upsert the image brief + persist concepts                                                                              | no     | reviewed via the brief stage gate                              |
+| `pipeline_operator_render`            | Render concepts / finals / re-renders                                                                                         | no     | allowlisted (free render, $0; spend supervised at stage gates) |
+| `pipeline_operator_store_creative`    | Record render bytes/metadata (codex backend upload)                                                                           | no     | allowlisted (worker recorder)                                  |
+| `pipeline_operator_qa_result`         | Persist per-creative QA verdicts (array)                                                                                      | no     | allowlisted; worker adjudicates                                |
+| `pipeline_operator_compliance_result` | Submit per-creative compliance **candidate findings**                                                                         | no     | allowlisted; **worker writes the verdict**                     |
+| `pipeline_operator_copy`              | Persist per-creative copy variants (array)                                                                                    | no     | reviewed via the copy stage gate                               |
+| `pipeline_operator_spec_result`       | Persist per-placement spec checks + derived crops                                                                             | no     | allowlisted; auto-stage                                        |
+| `pipeline_operator_finalize_result`   | Record naming + Drive URLs + verify report                                                                                    | no     | allowlisted; worker recorder                                   |
+| _(no launch tool)_                    | Launch runs on your **Meta MCP** (create entities PAUSED-first) + the worker recorder; there is no `pipeline_operator_launch` | n/a    | **approval on `Meta_ads_activate_entity`** (HARD launch gate)  |
+| `pipeline_operator_monitor_result`    | Persist monitor KPIs + kill/scale verdicts                                                                                    | no     | allowlisted; recommendation only                               |
+| `pipeline_operator_signal`            | Signal dispatch completion / health to the workflow                                                                           | no     | allowlisted (always last)                                      |
 
 > **The compliance + launch invariant (READ THIS, IT IS THE WHOLE POINT).**
 > You have **no tool that writes a compliance pass and no tool that clears a
@@ -451,7 +451,9 @@ primary_text, description, cta, validation}, ...])` — ONE array call for the
 Goal: validate ratios / file size / safe zones per placement and produce
 derived crops (Meta 1:1 + 4:5 + 9:16; Google overlay-free 1.91:1 + 1:1, <=5MB,
 center-80% safe). **No spend.** Per-creative; needs the final copy because text
-drives safe-zones/overlay. This is an **auto** stage (advances when it closes).
+drives safe-zones/overlay. This is a **gate** stage: it does NOT auto-advance.
+The manager advances spec_validation -> `variant_plan` via the advance route
+once every in-scope creative's spec gate is cleared.
 
 - **Reads:** `pipeline_operator_read` (finals + approved copy per creative).
 - **Procedure (in-context):** For each creative/placement, check the
@@ -463,12 +465,13 @@ drives safe-zones/overlay. This is an **auto** stage (advances when it closes).
 results=[{creative_id, placement, ratio, status, crop_ref, exceptions}, ...])`
   — ONE array call.
 - **Narration line:** _"Spec check done: all placements pass except K (listed).
-  Derived crops are attached. The pipeline moves to variant planning
-  automatically."_
+  Derived crops are attached. Clear the spec gate to move to variant planning."_
 - **Signal:** `..._signal(..., "spec_validation", status="done")`.
-- **Stop.** Do NOT advance. The workflow auto-advances spec_validation ->
-  `variant_plan` when the spec work closes; exceptions are surfaced for the
-  manager, not auto-passed.
+- **Stop.** Do NOT advance. spec_validation -> `variant_plan` is a manager gate
+  on the advance route (it does NOT auto-advance); exceptions are surfaced for
+  the manager, not auto-passed. Entry into this stage is dispatched on the
+  copy -> spec_validation advance (operator -> a fresh operator dispatch;
+  deterministic -> a `worker_spec` work_item).
 
 ---
 
@@ -499,8 +502,13 @@ same creative+copy/different targeting — never multiple variables at once.
 ## Stage: `finalize_assets` -> naming + registry + Drive (operator-MCP)
 
 Goal: name assets to convention, register them, upload to Drive, and verify.
-**No spend.** This is an **auto** stage; Drive runs through the operator-held
-MCP, and the worker is the recorder.
+**No spend.** Drive runs through the operator-held MCP, and the worker is the
+recorder. This is a **gate** stage: finalize_assets -> `launch_handoff` is the
+advance route's finalize gate (every in-scope creative `finalize_verified`), NOT
+an auto/trigger advance. Entry into finalize_assets is dispatched on the
+variant_plan approve (operator -> an operator dispatch carrying the finalize
+instruction; deterministic-mode finalize is DEFERRED -- there is no autonomous
+Drive uploader, so a deterministic pipeline gets no dispatch here yet).
 
 - **Reads:** `pipeline_operator_read` (passed + compliant creatives, approved
   copy, the variant plan).
@@ -513,10 +521,11 @@ MCP, and the worker is the recorder.
 results=[{creative_id, asset_name, drive_url, md5, verified}, ...])` — the
   worker records the `drive_url` graph idempotently.
 - **Narration line:** _"Assets are named, uploaded to Drive, and verified
-  (report below). The pipeline assembles the launch package next."_
+  (report below). Clear the finalize gate to assemble the launch package."_
 - **Signal:** `..._signal(..., "finalize_assets", status="done")`.
-- **Stop.** Do NOT advance. The workflow auto-advances finalize_assets ->
-  `launch_handoff` when the finalize work closes.
+- **Stop.** Do NOT advance. finalize_assets -> `launch_handoff` is the advance
+  route's finalize gate (it does NOT auto-advance); it opens once every in-scope
+  creative is `finalize_verified`.
 
 ---
 
