@@ -1088,13 +1088,29 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
         # ``worker_monitor`` rides the same drain (the monitor decision route
         # enqueues it); its handler is a no-op acknowledgement shell until the
         # Meta-pause / budget connector lands -- see the consumer module.
+        # FIX-A: ``worker_qa`` / ``worker_compliance`` / ``worker_spec`` ride the
+        # same drain too -- the deterministic post-generation gate consumers the
+        # auto-advance trigger + the advance route enqueue (the producers that
+        # had been missing, deadlocking every pipeline at creative_qa).
         loop.create_task(
             _interval_loop(
                 "worker_stage_drain",
                 float(settings.scheduler_worker_stage_interval_s),
                 lambda: run_worker_stage_drain_once(
                     settings,
-                    kinds=["worker_ideation", "worker_generation", "worker_monitor"],
+                    kinds=[
+                        "worker_ideation",
+                        "worker_generation",
+                        "worker_monitor",
+                        # FIX-A: the deterministic post-generation gate consumers
+                        # (creative_qa / compliance_review / spec_validation). The
+                        # auto-advance trigger + the advance route enqueue these
+                        # for non-operator-driven pipelines; this drain claims +
+                        # runs the verdict-writer for each.
+                        "worker_qa",
+                        "worker_compliance",
+                        "worker_spec",
+                    ],
                 ),
                 initial_delay_s=12.0,
             ),

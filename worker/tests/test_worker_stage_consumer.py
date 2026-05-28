@@ -36,10 +36,15 @@ from src.config import Settings
 from src.services import work_queue, worker_stage_consumer
 from src.services.worker_stage_consumer import (
     _HANDLERS,
+    _already_terminal_good,
     _classify_failure,
+    _handle_worker_compliance,
     _handle_worker_generation,
     _handle_worker_ideation,
     _handle_worker_monitor,
+    _handle_worker_qa,
+    _handle_worker_spec,
+    _resolve_in_scope_creatives,
     run_worker_stage_drain_once,
 )
 
@@ -797,3 +802,325 @@ def test_heartbeat_loop_cancellation_is_clean(
 
     asyncio.run(_run())
     assert not rotated.is_set()
+
+
+# ---------------------------------------------------------------------------
+# FIX-A: deterministic post-generation gate handlers
+# (worker_qa / worker_compliance / worker_spec)
+# ---------------------------------------------------------------------------
+#
+# These exercise the real handler orchestration: resolve in-scope creatives the
+# way the trigger seeded them, skip the already-passed ones (resume-by-skip-
+# done), and call the verdict-writer in-process. The verdict-writers
+# (qa_run / compliance_run / persist_spec_result) are stubbed so the
+# resolution/skip/fan-out seam is isolated from the engine internals (those have
+# their own route tests).
+
+
+def _patch_handler_pipeline(
+    monkeypatch: pytest.MonkeyPatch, *, pipeline: dict[str, Any] | None
+) -> None:
+    """Patch ``fetch_pipeline`` for the deterministic handlers (imported lazily).
+
+    The handlers ``from .pipeline_runner import fetch_pipeline`` lazily, so
+    patching the source module catches the lookup.
+    """
+    from src.services import pipeline_runner
+
+    monkeypatch.setattr(pipeline_runner, "fetch_pipeline", lambda _pid: pipeline)
+
+
+def test_resolve_in_scope_creatives_image_track(fake_supabase) -> None:
+    """Image scope: type='image' + version like v1% + not deleted + not killed."""
+    fake_supabase.seed(
+        "creatives",
+        [
+            {"id": "c-good", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+             "deleted_at": None, "status": "draft", "file_path_supabase": "p/good.png"},
+            {"id": "c-killed", "brief_id": "ib-1", "type": "image", "version": "v1.1",
+             "deleted_at": None, "status": "killed", "file_path_supabase": None},
+            {"id": "c-deleted", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+             "deleted_at": "2026-01-01", "status": "draft", "file_path_supabase": None},
+            {"id": "c-draft-version", "brief_id": "ib-1", "type": "image", "version": "v0.3",
+             "deleted_at": None, "status": "draft", "file_path_supabase": None},
+        ],
+    )
+    image, video = _resolve_in_scope_creatives(
+        fake_supabase, {"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+    assert [c["id"] for c in image] == ["c-good"]
+    assert video == []
+
+
+def test_resolve_in_scope_creatives_video_track(fake_supabase) -> None:
+    """Video scope: status='captioned' + not deleted, joined on video_brief_id."""
+    fake_supabase.seed(
+        "video_creatives",
+        [
+            {"id": "v-cap", "brief_id": "vb-1", "status": "captioned", "deleted_at": None},
+            {"id": "v-draft", "brief_id": "vb-1", "status": "rendering", "deleted_at": None},
+            {"id": "v-del", "brief_id": "vb-1", "status": "captioned", "deleted_at": "2026"},
+        ],
+    )
+    image, video = _resolve_in_scope_creatives(
+        fake_supabase, {"format_choice": "video", "video_brief_id": "vb-1"}
+    )
+    assert image == []
+    assert [c["id"] for c in video] == ["v-cap"]
+
+
+def test_already_terminal_good_skips_passed(fake_supabase) -> None:
+    """A passed/overridden/skipped gate row is terminal-good; pending is not."""
+    fake_supabase.set_single(
+        "creative_stage_state", {"status": "passed"}
+    )
+    assert _already_terminal_good(
+        fake_supabase, creative_id="c-1", stage="creative_qa"
+    ) is True
+
+    fake_supabase.set_single("creative_stage_state", {"status": "pending"})
+    assert _already_terminal_good(
+        fake_supabase, creative_id="c-1", stage="creative_qa"
+    ) is False
+
+    fake_supabase.set_single("creative_stage_state", None)
+    assert _already_terminal_good(
+        fake_supabase, creative_id="c-1", stage="creative_qa"
+    ) is False
+
+
+def test_qa_handler_fans_qa_run_over_unpassed(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker_qa builds QA items for unpassed in-scope creatives + calls qa_run."""
+    from src.routes import qa_compliance
+
+    fake_supabase.seed(
+        "creatives",
+        [
+            {"id": "c-1", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+             "deleted_at": None, "status": "draft", "file_path_supabase": "p/1.png"},
+            {"id": "c-2", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+             "deleted_at": None, "status": "draft", "file_path_supabase": "p/2.png"},
+        ],
+    )
+    # c-1 already passed (skip-done); c-2 still pending.
+    def _state() -> dict[str, Any] | None:
+        return None  # default: no row -> not terminal-good
+
+    # Override per-creative: c-1 passed, c-2 absent. The fake's single_override
+    # is global per table, so drive skip-done via a captured set instead.
+    passed = {"c-1"}
+    monkeypatch.setattr(
+        worker_stage_consumer,
+        "_already_terminal_good",
+        lambda sb, *, creative_id, stage: creative_id in passed,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _qa_run(body: Any) -> dict[str, Any]:
+        captured["item_ids"] = [i.creative_id for i in body.items]
+        captured["candidates"] = [
+            [c.check_id for c in i.vision_candidates] for i in body.items
+        ]
+        return {"results": [{"creative_id": "c-2"}], "errors": [], "rollup": "passed"}
+
+    monkeypatch.setattr(qa_compliance, "qa_run", _qa_run)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+
+    result = asyncio.run(_handle_worker_qa("p-1"))
+    assert captured["item_ids"] == ["c-2"]
+    # Deterministic-mode QA supplies the universal vision pass-candidates so the
+    # engine's verdict rests on the Pillow backstops (a missing candidate would
+    # escalate the vision items to needs_review and stall the gate).
+    assert captured["candidates"] == [
+        ["vision.hands", "vision.text_glyphs", "vision.anatomy", "vision.surface_artifact"]
+    ]
+    assert result["adjudicated"] == 1
+    assert result["rollup"] == "passed"
+
+
+def test_qa_handler_nothing_to_do_when_all_passed(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When every in-scope creative already passed, qa_run is NOT called."""
+    from src.routes import qa_compliance
+
+    fake_supabase.seed(
+        "creatives",
+        [{"id": "c-1", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+          "deleted_at": None, "status": "draft", "file_path_supabase": "p/1.png"}],
+    )
+    monkeypatch.setattr(
+        worker_stage_consumer,
+        "_already_terminal_good",
+        lambda sb, *, creative_id, stage: True,
+    )
+
+    async def _should_not_run(body: Any) -> dict[str, Any]:
+        raise AssertionError("qa_run must not run when nothing is outstanding")
+
+    monkeypatch.setattr(qa_compliance, "qa_run", _should_not_run)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+
+    result = asyncio.run(_handle_worker_qa("p-1"))
+    assert result["skipped_all"] is True
+    assert result["adjudicated"] == 0
+
+
+def test_qa_handler_missing_pipeline_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing pipeline row raises LookupError (terminal fault)."""
+    _patch_handler_pipeline(monkeypatch, pipeline=None)
+    with pytest.raises(LookupError):
+        asyncio.run(_handle_worker_qa("p-missing"))
+
+
+def test_compliance_handler_fans_compliance_run_empty_candidates(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker_compliance calls compliance_run with EMPTY llm_candidates."""
+    from src.routes import qa_compliance
+
+    fake_supabase.seed(
+        "creatives",
+        [{"id": "c-1", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+          "deleted_at": None, "status": "draft", "file_path_supabase": "p/1.png"}],
+    )
+    monkeypatch.setattr(
+        worker_stage_consumer,
+        "_already_terminal_good",
+        lambda sb, *, creative_id, stage: False,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _compliance_run(body: Any) -> dict[str, Any]:
+        captured["candidates"] = [i.llm_candidates for i in body.items]
+        captured["ids"] = [i.creative_id for i in body.items]
+        return {"results": [{"creative_id": "c-1"}], "errors": [], "rollup": "passed"}
+
+    monkeypatch.setattr(qa_compliance, "compliance_run", _compliance_run)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+
+    result = asyncio.run(_handle_worker_compliance("p-1"))
+    assert captured["ids"] == ["c-1"]
+    assert captured["candidates"] == [[]]  # deterministic rules only
+    assert result["adjudicated"] == 1
+
+
+def test_compliance_handler_nothing_to_do(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No in-scope creatives -> compliance_run not called, skipped_all True."""
+    from src.routes import qa_compliance
+
+    async def _should_not_run(body: Any) -> dict[str, Any]:
+        raise AssertionError("compliance_run must not run with no creatives")
+
+    monkeypatch.setattr(qa_compliance, "compliance_run", _should_not_run)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+    result = asyncio.run(_handle_worker_compliance("p-1"))
+    assert result["skipped_all"] is True
+
+
+def test_compliance_handler_missing_pipeline_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing pipeline row raises LookupError."""
+    _patch_handler_pipeline(monkeypatch, pipeline=None)
+    with pytest.raises(LookupError):
+        asyncio.run(_handle_worker_compliance("p-missing"))
+
+
+def test_spec_handler_fans_persist_spec_result(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """worker_spec submits a feed placement per unpassed creative."""
+    from src.routes import operator_stage_tools
+
+    fake_supabase.seed(
+        "creatives",
+        [{"id": "c-1", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+          "deleted_at": None, "status": "draft", "file_path_supabase": "p/1.png"}],
+    )
+    monkeypatch.setattr(
+        worker_stage_consumer,
+        "_already_terminal_good",
+        lambda sb, *, creative_id, stage: False,
+    )
+
+    captured: dict[str, Any] = {}
+
+    async def _persist(body: Any) -> dict[str, Any]:
+        captured["results"] = [
+            (r.creative_id, r.platform, r.placement, r.status) for r in body.results
+        ]
+        return {"results": [{"creative_id": "c-1"}], "rollup": [{"creative_id": "c-1"}]}
+
+    monkeypatch.setattr(operator_stage_tools, "persist_spec_result", _persist)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+
+    result = asyncio.run(_handle_worker_spec("p-1"))
+    assert captured["results"] == [("c-1", "meta", "feed", "pass")]
+    assert result["creatives"] == 1
+
+
+def test_spec_handler_nothing_to_do(
+    fake_supabase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No unpassed creatives -> persist_spec_result not called."""
+    from src.routes import operator_stage_tools
+
+    fake_supabase.seed(
+        "creatives",
+        [{"id": "c-1", "brief_id": "ib-1", "type": "image", "version": "v1.0",
+          "deleted_at": None, "status": "draft", "file_path_supabase": "p/1.png"}],
+    )
+    monkeypatch.setattr(
+        worker_stage_consumer,
+        "_already_terminal_good",
+        lambda sb, *, creative_id, stage: True,
+    )
+
+    async def _should_not_run(body: Any) -> dict[str, Any]:
+        raise AssertionError("persist_spec_result must not run when all passed")
+
+    monkeypatch.setattr(operator_stage_tools, "persist_spec_result", _should_not_run)
+    _patch_handler_pipeline(
+        monkeypatch, pipeline={"format_choice": "image", "image_brief_id": "ib-1"}
+    )
+    result = asyncio.run(_handle_worker_spec("p-1"))
+    assert result["skipped_all"] is True
+
+
+def test_spec_handler_missing_pipeline_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A missing pipeline row raises LookupError."""
+    _patch_handler_pipeline(monkeypatch, pipeline=None)
+    with pytest.raises(LookupError):
+        asyncio.run(_handle_worker_spec("p-missing"))
+
+
+def test_fix_a_handlers_registered() -> None:
+    """The three FIX-A deterministic gate consumers are wired into _HANDLERS."""
+    for kind in ("worker_qa", "worker_compliance", "worker_spec"):
+        assert kind in _HANDLERS
+
+
+def test_sb_for_handler_returns_admin_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_sb_for_handler`` resolves the service-role admin client (lazy import)."""
+    sentinel = object()
+    from src import supabase_client
+
+    monkeypatch.setattr(supabase_client, "get_supabase_admin", lambda: sentinel)
+    assert worker_stage_consumer._sb_for_handler() is sentinel

@@ -112,6 +112,27 @@ class _FakeQuery:
         self._filters.append((col, ("__in__", tuple(vals))))
         return self
 
+    def is_(self, col: str, val: Any) -> "_FakeQuery":
+        """``column is <val>`` filter -- mirrors the supabase-py ``is_``.
+
+        The only use the worker has is ``is_("deleted_at", "null")`` (the
+        soft-delete scope filter). Encoded as a special tuple so ``_matches``
+        treats the string ``"null"`` as a SQL ``IS NULL`` test rather than a
+        literal equality against the string.
+        """
+        self._filters.append((col, ("__is__", val)))
+        return self
+
+    def like(self, col: str, pattern: str) -> "_FakeQuery":
+        """``column like <pattern>`` filter -- mirrors the supabase-py ``like``.
+
+        Supports the worker's only pattern shape, a trailing-``%`` prefix match
+        (e.g. ``version like 'v1%'`` -- the final-creative version filter).
+        Encoded as a special tuple so ``_matches`` does a prefix compare.
+        """
+        self._filters.append((col, ("__like__", pattern)))
+        return self
+
     def order(self, col: str, *, desc: bool = False) -> "_FakeQuery":
         self._order = (col, desc)
         return self
@@ -147,12 +168,28 @@ class _FakeQuery:
     # -- internals ---------------------------------------------------------
     def _matches(self, row: dict[str, Any]) -> bool:
         for col, val in self._filters:
-            if (
-                isinstance(val, tuple)
-                and len(val) == 2
-                and val[0] == "__in__"
-            ):
+            if isinstance(val, tuple) and len(val) == 2 and val[0] == "__in__":
                 if row.get(col) not in val[1]:
+                    return False
+            elif isinstance(val, tuple) and len(val) == 2 and val[0] == "__is__":
+                # ``is_("col", "null")`` -> SQL IS NULL; any other ``is`` value
+                # is an identity compare (the worker only uses the null form).
+                want = val[1]
+                cell = row.get(col)
+                if want == "null":
+                    if cell is not None:
+                        return False
+                elif cell is not want:
+                    return False
+            elif isinstance(val, tuple) and len(val) == 2 and val[0] == "__like__":
+                pattern = str(val[1])
+                cell = row.get(col)
+                if not isinstance(cell, str):
+                    return False
+                if pattern.endswith("%"):
+                    if not cell.startswith(pattern[:-1]):
+                        return False
+                elif cell != pattern:
                     return False
             elif row.get(col) != val:
                 return False
@@ -407,12 +444,19 @@ def fake_supabase(monkeypatch: pytest.MonkeyPatch) -> FakeSupabase:
     sb = FakeSupabase()
 
     from src import supabase_client
-    from src.routes import integrations, pipeline_tools, qa_compliance, video_callback
+    from src.routes import (
+        integrations,
+        operator_stage_tools,
+        pipeline_tools,
+        qa_compliance,
+        video_callback,
+    )
     from src.services import atomic_inserts, cost_ledger, pipeline_runner
 
     for mod in (
         supabase_client,
         pipeline_tools,
+        operator_stage_tools,
         integrations,
         qa_compliance,
         pipeline_runner,

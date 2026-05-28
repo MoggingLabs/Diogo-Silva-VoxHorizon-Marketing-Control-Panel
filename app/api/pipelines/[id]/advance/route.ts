@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { BriefPayload, type BriefInsert } from "@/lib/briefs";
-import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { isOperatorDriven, operatorInstruction, type OperatorStage } from "@/lib/operator/dispatch";
 import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import {
   PER_CREATIVE_STAGES,
@@ -561,10 +561,88 @@ async function commitPerCreativeAdvance(
     );
   }
 
+  // FIX-A: dispatch the PRODUCER for the stage we just entered. The post-gen
+  // per-creative stages had no producer once the pipeline left creative_qa --
+  // the verdict-writers were reachable only by the manual routes / e2e harness,
+  // so the chain deadlocked. Each per-creative advance now enqueues the next
+  // stage's dispatch on entry. A failed enqueue is a 5xx (mirrors the
+  // configuration->ideation try/catch): the producer never silently goes
+  // missing.
+  try {
+    await dispatchStageOnEntry(supabase, pipeline, next);
+  } catch (e) {
+    return NextResponse.json(
+      { error: `stage dispatch enqueue failed: ${String(e)}` },
+      { status: 500 },
+    );
+  }
+
   // The reducer resolves the pipeline's status from the event we just wrote.
   // Hydrate the response so callers see the post-advance status.
   const responsePipeline = { ...updated, status: next };
   return NextResponse.json({ pipeline: responsePipeline });
+}
+
+/**
+ * Dispatch the producer for a post-generation stage on ENTRY (FIX-A).
+ *
+ * The generation->creative_qa entry is dispatched by the auto-advance DB
+ * trigger; THIS helper dispatches the route-driven entries
+ * (creative_qa->compliance_review, compliance_review->copy,
+ * copy->spec_validation). The branch on `isOperatorDriven` is the switch that
+ * keeps the two execution models from BOTH firing (which would double-charge /
+ * double-write):
+ *
+ *   - operator-driven -> ONE `operator_dispatch` work_item carrying the stage's
+ *     natural-language instruction (operatorInstruction(stage)); the daemon
+ *     claims it + runs one Hermes chat. Every post-gen operator stage is
+ *     unambiguous (the operator holds the Drive MCP), so finalize_assets is
+ *     dispatched this way too -- by the variant-plan/decision route's approve
+ *     path, not here (this route never enters finalize_assets).
+ *   - deterministic -> the matching `worker_*` consumer kind:
+ *       * compliance_review -> `worker_compliance`,
+ *       * spec_validation   -> `worker_spec`,
+ *       * copy              -> NOTHING. Deterministic copy stays MANUAL: a
+ *         manager approves >=3 variants via /copy/decision; there is no
+ *         worker that auto-approves copy by design.
+ *
+ * The `worker_qa` (deterministic creative_qa) dispatch is owned by the
+ * auto-advance trigger (the generation->creative_qa entry), not this route.
+ */
+async function dispatchStageOnEntry(
+  supabase: SupabaseClient,
+  pipeline: PipelineRowWithStatus,
+  next: PipelineStatus,
+): Promise<void> {
+  if (isOperatorDriven(pipeline.config_draft)) {
+    await enqueueWorkItem({
+      kind: "operator_dispatch",
+      pipelineId: pipeline.id,
+      payload: {
+        instruction: operatorInstruction(next as OperatorStage, pipeline.id),
+        stage: next,
+      },
+      idempotencyKey: `op-disp:${pipeline.id}:${next}:advance`,
+      createdBy: "api/pipelines/advance/dispatchStageOnEntry",
+    });
+    return;
+  }
+
+  // Deterministic mode: map the entered stage to its worker consumer kind.
+  // creative_qa is dispatched by the auto-advance trigger; copy is manual
+  // (no worker); finalize is dispatched by the variant-plan/decision route.
+  let kind: "worker_compliance" | "worker_spec" | null = null;
+  if (next === "compliance_review") kind = "worker_compliance";
+  else if (next === "spec_validation") kind = "worker_spec";
+  if (kind === null) return;
+
+  await enqueueWorkItem({
+    kind,
+    pipelineId: pipeline.id,
+    payload: { stage: next },
+    idempotencyKey: `wi:${pipeline.id}:${next}`,
+    createdBy: `api/pipelines/advance/${kind}`,
+  });
 }
 
 /**
@@ -1025,7 +1103,7 @@ function readPicksJsonb(value: unknown): { image?: string[]; video?: string[] } 
 async function retaskOperator(
   supabase: SupabaseClient,
   pipelineId: string,
-  stage: "ideation" | "generation",
+  stage: OperatorStage,
   reason: string,
 ): Promise<void> {
   void supabase; // kept for signature stability; PR-4 may need it again

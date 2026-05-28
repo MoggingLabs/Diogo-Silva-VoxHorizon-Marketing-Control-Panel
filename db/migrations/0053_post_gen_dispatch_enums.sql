@@ -1,0 +1,41 @@
+-- 0053_post_gen_dispatch_enums.sql
+-- ----------------------------------------------------------------------------
+-- Silent-failure foundational redesign, FIX-A (post-generation dispatch), part A.
+--
+-- THE BUG this two-part migration closes: the generation -> creative_qa entry
+-- is the DB trigger ``pipeline_events_auto_advance_done()`` (migration 0051),
+-- which emits ``stage_advanced -> creative_qa`` + seeds the per-creative QA gate
+-- rows but enqueues NO ``work_item``. Every post-generation per-creative stage
+-- (creative_qa / compliance_review / spec_validation) therefore had NO dispatch
+-- PRODUCER -- the verdict-writers (``qa_run`` / ``compliance_run`` /
+-- ``persist_spec_result``) were reachable only by the e2e harness + the manual
+-- dashboard routes, so every real pipeline deadlocked at ``creative_qa``.
+--
+-- FIX-A wires a per-stage dispatch on entry:
+--   * operator-driven pipelines -> an ``operator_dispatch`` work_item (the daemon
+--     runs one Hermes chat per claim);
+--   * deterministic pipelines -> a new ``worker_qa`` / ``worker_compliance`` /
+--     ``worker_spec`` work_item that the worker-stage consumer claims and runs
+--     the verdict-writer over the in-scope creatives in-process.
+--
+-- This file (0053) ONLY adds the three new ``work_item_kind`` enum values.
+-- 0054 create-or-replaces the two trigger functions that USE them. The split
+-- into two files is deliberate: ``ALTER TYPE ... ADD VALUE`` cannot be used in
+-- the SAME transaction that later references the new value (Postgres rejects an
+-- enum value added and used in one tx). The Migration apply CI job runs each
+-- ``db/migrations/NNNN_*.sql`` file as its OWN ``psql`` invocation (its own
+-- transaction), so adding the values here and using them in 0054 -- a separate
+-- file == a separate transaction == a committed enum -- side-steps the hazard.
+--
+-- Forward-only + additive: ``add value if not exists`` is idempotent, so a
+-- re-run (or a clean CI database that already has the values from a prior run)
+-- is a benign no-op.
+-- ----------------------------------------------------------------------------
+
+-- Deterministic-mode post-generation consumers. They emit task_* pipeline_events
+-- (see 0054's work_item_emit_pipeline_event update) exactly like the other
+-- worker_* kinds, so the reducer (compute_pipeline_status) -- which only folds
+-- stage_advanced -- never lets the per-creative gate work move the macro status.
+alter type work_item_kind add value if not exists 'worker_qa';
+alter type work_item_kind add value if not exists 'worker_compliance';
+alter type work_item_kind add value if not exists 'worker_spec';

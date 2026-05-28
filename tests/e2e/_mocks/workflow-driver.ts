@@ -81,10 +81,30 @@ export async function seedFinalCreatives(args: {
   pipelineId: string;
   briefId: string;
   count: number;
+  /**
+   * FIX-A deterministic-mode QA: the deterministic ``worker_qa`` consumer fetches
+   * the creative bytes from ``file_path_supabase`` (the operator-supplied b64 path
+   * does not exist when there is no operator). Pass a valid 1080x1080 PNG b64 to
+   * upload it to Storage + stamp ``file_path_supabase`` so the worker QA engine
+   * can download + adjudicate a real PASS. Omit for the operator-mode assertions
+   * (no real QA runs there -- only the dispatch enqueue is under test).
+   */
+  imageB64?: string;
 }): Promise<SeededFinalCreative[]> {
   const admin = getAdminClient();
   const out: SeededFinalCreative[] = [];
   for (let i = 0; i < args.count; i += 1) {
+    let filePath: string | null = null;
+    if (args.imageB64) {
+      filePath = `${args.briefId}/e2e-final-${i + 1}.png`;
+      const bytes = Buffer.from(args.imageB64, "base64");
+      const { error: upErr } = await admin.storage
+        .from(STORAGE_BUCKET)
+        .upload(filePath, bytes, { contentType: "image/png", upsert: true });
+      if (upErr) {
+        throw new Error(`seedFinalCreatives upload failed: ${upErr.message}`);
+      }
+    }
     const { data, error } = await admin
       .from("creatives")
       .insert({
@@ -96,7 +116,7 @@ export async function seedFinalCreatives(args: {
         version: "v1.0",
         concept: `workflow-final-${i + 1}`,
         has_overlay_text: false,
-        file_path_supabase: null,
+        file_path_supabase: filePath,
         file_path_drive: null,
       } as unknown as Database["public"]["Tables"]["creatives"]["Insert"])
       .select("id")
@@ -223,9 +243,17 @@ export async function emitGenerationClosure(args: {
  * row does not hang -- but in CI the routes always enqueue it via the admin
  * client regardless of `WORKER_URL`, so the consumer path IS exercised.
  */
+export type WorkerStageKind =
+  | "worker_ideation"
+  | "worker_generation"
+  | "worker_monitor"
+  | "worker_qa"
+  | "worker_compliance"
+  | "worker_spec";
+
 export async function awaitWorkerStageClosed(
   pipelineId: string,
-  kind: "worker_ideation" | "worker_generation" | "worker_monitor",
+  kind: WorkerStageKind,
   opts: { timeoutMs?: number; intervalMs?: number } = {},
 ): Promise<string | null> {
   const admin = getAdminClient();
@@ -257,6 +285,52 @@ export async function awaitWorkerStageClosed(
     `awaitWorkerStageClosed: ${kind} for pipeline ${pipelineId} stuck at '${lastStatus}' ` +
       `(never reached a terminal status within ${timeoutMs}ms) -- the worker-stage consumer ` +
       `did not claim+close it. Is the scheduler's worker_stage_drain loop running?`,
+  );
+}
+
+/**
+ * Wait for a `work_item` of `kind` to EXIST for a pipeline (any status), and
+ * optionally assert its `payload.stage`. This is the FIX-A dispatch-on-entry
+ * proof: the missing seam was that a post-generation stage had NO producer (no
+ * work_item was ever enqueued), so the pipeline deadlocked. Asserting the row
+ * exists proves the dispatch fired -- for the OPERATOR path, where the daemon's
+ * Hermes chat can't run in CI, the enqueue-on-entry IS the thing under test
+ * (the chat itself is unit-tested separately). Returns the row's id + status +
+ * payload stage. Throws on timeout (the producer never fired -> the deadlock).
+ */
+export async function awaitWorkItemEnqueued(
+  pipelineId: string,
+  kind: string,
+  payloadStage?: string,
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<{ id: string; status: string; stage: string | null }> {
+  const admin = getAdminClient();
+  const timeoutMs = opts.timeoutMs ?? 20_000;
+  const intervalMs = opts.intervalMs ?? 300;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const { data } = await admin
+      .from("work_item")
+      .select("id, status, payload")
+      .eq("pipeline_id", pipelineId)
+      .eq("kind", kind as never)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    const row = (data ?? [])[0] as
+      | { id: string; status: string; payload: Record<string, unknown> | null }
+      | undefined;
+    if (row) {
+      const stage = (row.payload?.stage as string | undefined) ?? null;
+      if (payloadStage === undefined || stage === payloadStage) {
+        return { id: row.id, status: row.status, stage };
+      }
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(
+    `awaitWorkItemEnqueued: no work_item of kind '${kind}'` +
+      `${payloadStage ? ` (payload.stage='${payloadStage}')` : ""} ever appeared for pipeline ` +
+      `${pipelineId} within ${timeoutMs}ms -- the dispatch-on-entry producer did not fire.`,
   );
 }
 

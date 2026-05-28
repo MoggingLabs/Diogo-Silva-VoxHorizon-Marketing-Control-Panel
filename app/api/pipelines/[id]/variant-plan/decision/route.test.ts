@@ -13,6 +13,11 @@ vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
 
+const { enqueueWorkItem } = vi.hoisted(() => ({
+  enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(),
+}));
+vi.mock("@/lib/work-queue/enqueue", () => ({ enqueueWorkItem }));
+
 import { POST } from "./route";
 
 const id = "11111111-1111-4111-8111-111111111111";
@@ -29,6 +34,8 @@ function req(body: unknown | string): NextRequest {
 
 beforeEach(() => {
   currentSupabase = mockClient();
+  enqueueWorkItem.mockReset();
+  enqueueWorkItem.mockResolvedValue({ id: "wi-1", duplicate: false });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -120,5 +127,102 @@ describe("POST /api/pipelines/:id/variant-plan/decision", () => {
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  // FIX-A: finalize_assets is inherently OPERATOR-HELD work in BOTH modes --
+  // only the operator's Drive MCP can upload the finals + verify, so every
+  // approved variant_plan hands off to the operator via
+  // operator_dispatch(finalize_assets), deterministic pipelines included.
+  it("deterministic approve ALSO enqueues operator_dispatch(finalize_assets) (operator hand-off)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: { single: { data: { id, status: "variant_plan", advanced_at: {} }, error: null } },
+        update: { single: { data: { id, status: "finalize_assets" }, error: null } },
+      },
+      variant_plan: { update: { data: null, error: null } },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ decision: "approved" }), { params });
+    expect(res.status).toBe(200);
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.idempotencyKey).toBe(`op-disp:${id}:finalize_assets:variant_plan_approve`);
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.stage).toBe("finalize_assets");
+  });
+
+  it("operator-driven approve enqueues operator_dispatch(finalize_assets)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: {
+              id,
+              status: "variant_plan",
+              advanced_at: {},
+              config_draft: { operator_driven: true },
+            },
+            error: null,
+          },
+        },
+        update: { single: { data: { id, status: "finalize_assets" }, error: null } },
+      },
+      variant_plan: { update: { data: null, error: null } },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ decision: "approved" }), { params });
+    expect(res.status).toBe(200);
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.idempotencyKey).toBe(`op-disp:${id}:finalize_assets:variant_plan_approve`);
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.stage).toBe("finalize_assets");
+    expect(String(payload.instruction)).toContain(id);
+  });
+
+  it("operator-driven reject enqueues nothing (stays in variant_plan)", async () => {
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: { id, status: "variant_plan", config_draft: { operator_driven: true } },
+            error: null,
+          },
+        },
+      },
+      variant_plan: { update: { data: null, error: null } },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ decision: "rejected", notes: "re-plan" }), { params });
+    expect(res.status).toBe(200);
+    expect(enqueueWorkItem).not.toHaveBeenCalled();
+  });
+
+  it("500 when the operator finalize dispatch enqueue fails (not swallowed)", async () => {
+    enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: {
+            data: {
+              id,
+              status: "variant_plan",
+              advanced_at: {},
+              config_draft: { operator_driven: true },
+            },
+            error: null,
+          },
+        },
+        update: { single: { data: { id, status: "finalize_assets" }, error: null } },
+      },
+      variant_plan: { update: { data: null, error: null } },
+      pipeline_events: { insert: { data: null, error: null } },
+    });
+    const res = await POST(req({ decision: "approved" }), { params });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("finalize dispatch enqueue failed");
   });
 });

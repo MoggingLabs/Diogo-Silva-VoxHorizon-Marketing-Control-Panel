@@ -1,11 +1,13 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { operatorInstruction } from "@/lib/operator/dispatch";
 import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { VariantPlanDecisionInput } from "@/lib/pipeline/decision-schemas";
 import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
 import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
+import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -134,6 +136,32 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
     console.warn(`[pipelines.variant-plan.decision] event insert failed: ${evErr.message}`);
+  }
+
+  // FIX-A: dispatch the finalize_assets PRODUCER on entry. finalize_assets is
+  // inherently OPERATOR-HELD work regardless of pipeline mode -- only the
+  // operator's Drive MCP can upload the finals, compute the md5, and stamp
+  // `finalize_verified`. So BOTH operator-driven and deterministic pipelines
+  // hand off to the operator for finalize: every approved variant_plan enqueues
+  // an `operator_dispatch(finalize_assets)` the daemon claims to run the
+  // finalize chat (apply naming, register, upload to Drive, verify). A failed
+  // enqueue is a 5xx: the producer must never silently go missing.
+  try {
+    await enqueueWorkItem({
+      kind: "operator_dispatch",
+      pipelineId: id,
+      payload: {
+        instruction: operatorInstruction("finalize_assets", id),
+        stage: "finalize_assets",
+      },
+      idempotencyKey: `op-disp:${id}:finalize_assets:variant_plan_approve`,
+      createdBy: "api/pipelines/variant-plan/decision/dispatchFinalize",
+    });
+  } catch (e) {
+    return NextResponse.json(
+      { error: `finalize dispatch enqueue failed: ${String(e)}` },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({

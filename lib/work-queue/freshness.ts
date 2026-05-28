@@ -90,6 +90,18 @@ export const WORK_ITEM_KIND_LABEL: Record<WorkItemKind, { label: string; descrip
     label: "Monitor pull",
     description: "The worker is pulling live campaign performance from Meta + GHL.",
   },
+  worker_qa: {
+    label: "Creative QA",
+    description: "The worker is running the QA pass on each final creative.",
+  },
+  worker_compliance: {
+    label: "Compliance review",
+    description: "The worker is screening each creative against the compliance ruleset.",
+  },
+  worker_spec: {
+    label: "Spec validation",
+    description: "The worker is validating placement specs for each creative.",
+  },
   broll_search: {
     label: "B-roll search",
     description: "Searching the b-roll library for matching clips.",
