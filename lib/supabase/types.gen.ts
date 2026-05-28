@@ -2653,6 +2653,9 @@ export type Database = {
         | "worker_ideation"
         | "worker_generation"
         | "worker_monitor"
+        | "worker_qa"
+        | "worker_compliance"
+        | "worker_spec"
         | "broll_search"
         | "other"
       work_item_status:
@@ -2975,6 +2978,9 @@ export const Constants = {
         "worker_ideation",
         "worker_generation",
         "worker_monitor",
+        "worker_qa",
+        "worker_compliance",
+        "worker_spec",
         "broll_search",
         "other",
       ],

@@ -45,6 +45,13 @@ export type WorkItemKind =
   | "worker_ideation"
   | "worker_generation"
   | "worker_monitor"
+  // FIX-A: deterministic-mode post-generation consumers (creative_qa /
+  // compliance_review / spec_validation). Migration 0053a adds them to the DB
+  // work_item_kind enum; mirrored here so an invalid kind 422s at the TS
+  // boundary before it reaches the DB.
+  | "worker_qa"
+  | "worker_compliance"
+  | "worker_spec"
   | "broll_search"
   | "other";
 
