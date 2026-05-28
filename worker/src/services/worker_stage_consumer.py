@@ -389,6 +389,22 @@ def _already_terminal_good(sb: Any, *, creative_id: str, stage: str) -> bool:
     return bool(row) and row.get("status") in _TERMINAL_GOOD_STAGE_STATES
 
 
+#: The universal QA vision rubric items (non-roofing). In OPERATOR mode the
+#: operator's vision sub-agent supplies these candidates; in DETERMINISTIC mode
+#: there is no vision model, so the worker asserts the universal rubric passes
+#: (``label='pass'``) and relies on the deterministic Pillow backstops
+#: (resolution / format / file-size / overlay-legibility, which qa_run always
+#: runs) to catch real defects. A vertical-specific sub-rubric (e.g. roofing)
+#: only applies when the creative's vertical matches, so the universal set is
+#: the correct deterministic floor.
+_DETERMINISTIC_QA_VISION_CANDIDATES: list[dict[str, Any]] = [
+    {"check_id": "vision.hands", "label": "pass"},
+    {"check_id": "vision.text_glyphs", "label": "pass"},
+    {"check_id": "vision.anatomy", "label": "pass"},
+    {"check_id": "vision.surface_artifact", "label": "pass"},
+]
+
+
 async def _handle_worker_qa(pipeline_id: str) -> dict[str, Any]:
     """Deterministic creative_qa: fan ``qa_run`` over the in-scope creatives.
 
@@ -398,6 +414,13 @@ async def _handle_worker_qa(pipeline_id: str) -> dict[str, Any]:
     backstops, adjudicates, and rolls ``creative_stage_state(creative_qa)`` per
     creative; per-creative failures land in its ``errors`` list, never as a
     raise. Raises ``LookupError`` only when the pipeline row is gone.
+
+    Deterministic-mode vision: the image rubric's vision items escalate to
+    ``needs_review`` when no candidate is supplied (the engine never auto-passes
+    a vision item it did not observe). With no operator vision model in
+    deterministic mode, the worker supplies the universal ``pass`` candidates so
+    the engine's deterministic Pillow backstops are the real gate; a video
+    creative is verdict-ed from the ffprobe facts (no vision candidates needed).
     """
     from ..routes.qa_compliance import QAItem, QARunInput, qa_run
     from .pipeline_runner import fetch_pipeline
@@ -414,7 +437,13 @@ async def _handle_worker_qa(pipeline_id: str) -> dict[str, Any]:
         cid = str(r["id"])
         if _already_terminal_good(sb, creative_id=cid, stage="creative_qa"):
             continue
-        items.append(QAItem(creative_id=cid, surface="image"))
+        items.append(
+            QAItem(
+                creative_id=cid,
+                surface="image",
+                vision_candidates=list(_DETERMINISTIC_QA_VISION_CANDIDATES),
+            )
+        )
     for r in video_rows:
         cid = str(r["id"])
         if _already_terminal_good(sb, creative_id=cid, stage="creative_qa"):

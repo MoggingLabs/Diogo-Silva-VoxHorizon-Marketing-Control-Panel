@@ -921,6 +921,9 @@ def test_qa_handler_fans_qa_run_over_unpassed(
 
     async def _qa_run(body: Any) -> dict[str, Any]:
         captured["item_ids"] = [i.creative_id for i in body.items]
+        captured["candidates"] = [
+            [c.check_id for c in i.vision_candidates] for i in body.items
+        ]
         return {"results": [{"creative_id": "c-2"}], "errors": [], "rollup": "passed"}
 
     monkeypatch.setattr(qa_compliance, "qa_run", _qa_run)
@@ -930,6 +933,12 @@ def test_qa_handler_fans_qa_run_over_unpassed(
 
     result = asyncio.run(_handle_worker_qa("p-1"))
     assert captured["item_ids"] == ["c-2"]
+    # Deterministic-mode QA supplies the universal vision pass-candidates so the
+    # engine's verdict rests on the Pillow backstops (a missing candidate would
+    # escalate the vision items to needs_review and stall the gate).
+    assert captured["candidates"] == [
+        ["vision.hands", "vision.text_glyphs", "vision.anatomy", "vision.surface_artifact"]
+    ]
     assert result["adjudicated"] == 1
     assert result["rollup"] == "passed"
 
