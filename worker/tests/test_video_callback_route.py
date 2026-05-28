@@ -5,15 +5,20 @@ Drives ``POST /work/video/kie-callback`` via the shared ``client`` +
 worker bearer), so the tests build a valid ``X-Webhook-Signature`` over
 ``f"{taskId}.{timestamp}"`` with the configured ``KIE_AI_WEBHOOK_SECRET``.
 
+Silent-failure PR-6: the durable render record is the
+``work_item(kind='kie_video_render')`` (looked up + closed by the kie
+idempotency key ``kie:render:<task_id>``). The legacy ``video_render_tasks``
+table is retired; the callback reads + writes ONLY the work_item.
+
 Covered:
   * happy path -- verified callback for an in-flight render downloads + stores
-    the clip and marks the row ``completed``;
+    the clip and closes the work_item ``completed``;
   * bad signature -> 401 (nothing recorded);
   * missing-secret config -> 503;
-  * duplicate / late callback for an already-terminal render -> 200 no-op
+  * duplicate / late callback for an already-terminal work_item -> 200 no-op
     (``deduped: true``), NEVER re-downloads, NEVER 5xxes;
   * unknown task -> 404;
-  * a failure callback marks the row ``failed`` (no download).
+  * a failure callback closes the work_item ``failed`` (no download).
 """
 
 from __future__ import annotations
@@ -69,15 +74,24 @@ def _veo_success_body(task_id: str) -> dict[str, object]:
 
 
 def _seed_open_render(sb: FakeSupabase, task_id: str, **over: object) -> None:
+    """Seed the render's work_item (kind='kie_video_render') in the store.
+
+    The callback both READS the row (maybe_single by idempotency_key) and
+    UPDATEs it (by idempotency_key), so the row must live in the store -- not a
+    single-override -- for both to resolve. ``status`` defaults to ``running``
+    (a claimed/awaiting-callback render); pass ``status='completed'`` etc. to
+    exercise the terminal-dedup path.
+    """
+    status = over.pop("status", "running")
     row: dict[str, object] = {
-        "task_id": task_id,
-        "is_veo": True,
-        "status": "submitted",
-        "theme": "roofing",
+        "kind": "kie_video_render",
+        "status": status,
+        "idempotency_key": f"kie:render:{task_id}",
+        "payload": {"task_id": task_id, "is_veo": True, "theme": "roofing", "creative_id": "vc-1"},
         "creative_id": "vc-1",
     }
     row.update(over)
-    sb.set_single("_legacy_video_render_tasks", row)
+    sb.seed("work_item", [row])
 
 
 @pytest.fixture
@@ -116,15 +130,13 @@ def test_callback_happy_records_and_completes(
     assert body["deduped"] is False
     assert body["status"] == "completed"
     assert body["clip_id"] == "clip-veo-ok"
-    # The render row was marked completed with the clip.
-    upd = [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
-    assert upd and upd[-1]["status"] == "completed"
-    assert upd[-1]["clip_id"] == "clip-veo-ok"
-    # The clip was stored from the callback's result url.
+    # The clip was stored from the callback's result url (theme read off the
+    # work_item payload).
     assert _stub_store["urls"] == ["https://kie/veo-ok.mp4"]
     assert _stub_store["theme"] == "roofing"
-    # Silent-failure PR-4: the callback also closes the work_item by its
-    # idempotency_key (kie:render:<task_id>).
+    # Silent-failure PR-6: the callback closes ONLY the work_item by its
+    # idempotency_key (kie:render:<task_id>); no legacy render-tasks write.
+    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
     wi = [r for n, r in fake_supabase.updates if n == "work_item"]
     assert wi and wi[-1]["status"] == "completed"
     assert wi[-1]["claim_token"] is None
@@ -147,7 +159,7 @@ def test_callback_bad_signature_401(
     )
     assert resp.status_code == 401
     # Nothing recorded on a rejected signature.
-    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
+    assert not [r for n, r in fake_supabase.updates if n == "work_item"]
     assert "task_id" not in _stub_store
 
 
@@ -203,7 +215,7 @@ def test_callback_duplicate_is_noop_200(
     assert body["status"] == "completed"
     # No download/store attempted, no new write.
     assert "task_id" not in _stub_store
-    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
+    assert not [r for n, r in fake_supabase.updates if n == "work_item"]
 
 
 def test_callback_duplicate_failed_is_noop_200(
@@ -221,12 +233,41 @@ def test_callback_duplicate_failed_is_noop_200(
     assert resp.json()["deduped"] is True
 
 
+@pytest.mark.parametrize("terminal_status", ["timed_out", "cancelled"])
+def test_callback_on_watchdog_or_cancel_terminal_is_noop_200(
+    client: TestClient,
+    fake_supabase: FakeSupabase,
+    _stub_store: dict[str, object],
+    terminal_status: str,
+) -> None:
+    """A work_item the watchdog dead-lettered or a cancel closed is terminal.
+
+    Silent-failure PR-6: ``timed_out`` (watchdog) + ``cancelled`` (pipeline
+    cancel propagation) are terminal too -- a late callback must NOT re-open
+    such a render. The idempotency guard is the work_item terminal status, so a
+    duplicate callback can never double-close.
+    """
+    _seed_open_render(fake_supabase, "veo-term", status=terminal_status)
+    resp = client.post(
+        "/work/video/kie-callback",
+        headers=_headers("veo-term"),
+        json=_veo_success_body("veo-term"),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["deduped"] is True
+    assert resp.json()["status"] == terminal_status
+    # Never re-downloaded, never re-closed.
+    assert "task_id" not in _stub_store
+    assert not [r for n, r in fake_supabase.updates if n == "work_item"]
+
+
 def test_callback_unknown_task_404(
     client: TestClient,
     fake_supabase: FakeSupabase,
     _stub_store: dict[str, object],
 ) -> None:
-    fake_supabase.set_single("_legacy_video_render_tasks", None)
+    # No work_item seeded for this task -> the idempotency-key lookup misses.
+    fake_supabase.set_single("work_item", None)
     resp = client.post(
         "/work/video/kie-callback",
         headers=_headers("veo-unknown"),
@@ -267,13 +308,11 @@ def test_callback_failure_marks_failed(
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["status"] == "failed"
-    upd = [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
-    assert upd and upd[-1]["status"] == "failed"
-    assert upd[-1]["error"] == "unsafe content"
     # A failure never downloads/stores.
     assert "task_id" not in _stub_store
-    # Silent-failure PR-4: a failure callback also closes the work_item as
-    # failed with a named error_kind.
+    # Silent-failure PR-6: a failure callback closes ONLY the work_item as
+    # failed with a named error_kind; no legacy render-tasks write.
+    assert not [r for n, r in fake_supabase.updates if n == "_legacy_video_render_tasks"]
     wi = [r for n, r in fake_supabase.updates if n == "work_item"]
     assert wi and wi[-1]["status"] == "failed"
     assert wi[-1]["error_kind"] == "kie_render_failed"

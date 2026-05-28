@@ -287,57 +287,84 @@ def metrics_snapshot(
 # visible.
 _OUTBOX_REPORT_STATUSES = ("pending", "inflight", "failed", "dead")
 
+# The work_item kinds that ARE the outbox surface (silent-failure redesign).
+# The transactional outbox is no longer its own table: the Meta-launch / Drive-
+# finalize / GHL-send side effects each enqueue a work_item of one of these
+# kinds, drained by the outbox consumer + swept by the unified watchdog.
+_OUTBOX_WORK_ITEM_KINDS = (
+    "outbox_meta_record_launch",
+    "outbox_drive_finalize_verified",
+    "outbox_ghl_send",
+)
+
+# Map work_item_status (0050 enum) onto the four reported outbox buckets so
+# /work/metrics + the dashboard keep their existing shape after the cutover off
+# the legacy table:
+#   * pending  <- queued        (not yet drained)
+#   * inflight <- claimed/running (a consumer holds it)
+#   * failed   <- failed        (retryable failure, still on the retry chain)
+#   * dead     <- timed_out     (the watchdog's dead-letter terminal)
+# ``completed`` + ``cancelled`` are not reported (they are not undelivered work,
+# mirroring the legacy ``done`` status the old reader dropped).
+_WORK_ITEM_STATUS_TO_OUTBOX_BUCKET = {
+    "queued": "pending",
+    "claimed": "inflight",
+    "running": "inflight",
+    "failed": "failed",
+    "timed_out": "dead",
+}
+
 
 def _count_outbox_by_status(supabase: Any) -> dict[str, int]:
-    """Count integration_outbox rows per reported status (resilient).
+    """Count the outbox ``work_item`` rows per reported status (resilient).
 
-    Silent-failure PR-4 / migration 0051: the table was renamed to
-    ``_legacy_integration_outbox``. The outbox surface lives on the
-    ``work_item`` queue now (kinds ``outbox_meta_record_launch`` /
-    ``outbox_drive_finalize_verified`` / ``outbox_ghl_send``); the legacy
-    table is read here for one-quarter retention so any in-flight rows
-    enqueued before the cutover are still counted on /work/metrics.
-    TODO(follow-up issue): wire this off ``work_item`` and drop the read.
+    Silent-failure PR-6: the outbox surface lives entirely on the ``work_item``
+    queue (kinds ``outbox_meta_record_launch`` / ``outbox_drive_finalize_verified``
+    / ``outbox_ghl_send``). This counts those rows and maps each
+    ``work_item_status`` onto the four buckets the dashboard reads
+    (``pending`` / ``inflight`` / ``failed`` / ``dead`` -- see
+    ``_WORK_ITEM_STATUS_TO_OUTBOX_BUCKET``), preserving the legacy return shape.
+    Fail-soft: a read error degrades to all-zero counts and is logged; this
+    metric never raises (you want /work/metrics MOST when something is wrong).
     """
     counts = {s: 0 for s in _OUTBOX_REPORT_STATUSES}
     try:
         resp = (
-            supabase.table("_legacy_integration_outbox")
+            supabase.table("work_item")
             .select("status")
+            .in_("kind", list(_OUTBOX_WORK_ITEM_KINDS))
             .execute()
         )
         rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
         for row in rows:
             status = row.get("status") if isinstance(row, dict) else None
-            if status in counts:
-                counts[status] += 1
+            bucket = _WORK_ITEM_STATUS_TO_OUTBOX_BUCKET.get(status)
+            if bucket is not None:
+                counts[bucket] += 1
     except Exception as e:  # noqa: BLE001 -- metrics never raise
         log.warning("metrics_outbox_read_failed", error=str(e))
     return counts
 
 
 def _count_open_dispatches(supabase: Any) -> int:
-    """Count operator_dispatches still open (dispatched/running) (resilient).
+    """Count operator dispatches still in flight (claimed/running) (resilient).
 
-    Silent-failure PR-4 / migration 0051: the table was renamed to
-    ``_legacy_operator_dispatches``. The operator dispatch surface lives on
-    the ``work_item`` queue (kind ``operator_dispatch``) and the daemon owns
-    its lifecycle now; the legacy table is read here only for one-quarter
-    retention so any in-flight pre-cutover rows are still counted.
-    TODO(follow-up issue): wire this off ``work_item`` and drop the read.
+    Silent-failure PR-6: the operator-dispatch surface lives on the ``work_item``
+    queue (kind ``operator_dispatch``) and the daemon owns its lifecycle. This
+    counts the rows a live consumer is actively holding -- ``claimed`` or
+    ``running``. Fail-soft: a read error degrades to 0 and is logged; the metric
+    never raises.
     """
     try:
         resp = (
-            supabase.table("_legacy_operator_dispatches")
+            supabase.table("work_item")
             .select("status")
+            .eq("kind", "operator_dispatch")
+            .in_("status", ["claimed", "running"])
             .execute()
         )
         rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
-        return sum(
-            1
-            for row in rows
-            if isinstance(row, dict) and row.get("status") in _OPEN_DISPATCH_STATUSES
-        )
+        return sum(1 for row in rows if isinstance(row, dict))
     except Exception as e:  # noqa: BLE001 -- metrics never raise
         log.warning("metrics_dispatch_read_failed", error=str(e))
         return 0

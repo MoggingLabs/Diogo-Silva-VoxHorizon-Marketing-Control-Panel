@@ -513,52 +513,19 @@ def test_poll_status_fake_mode_is_success(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 # ---------------------------------------------------------------------------
-# persist_submitted_render (the durable safety-net write at submit, E5.2)
+# persist_submitted_render_work_item (the durable safety-net write at submit)
 # ---------------------------------------------------------------------------
-
-
-def test_persist_submitted_render_inserts_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tests.conftest import FakeSupabase
-
-    sb = FakeSupabase()
-    monkeypatch.setattr(
-        "src.supabase_client.get_supabase_admin", lambda: sb
-    )
-    wrote = vid_mod.persist_submitted_render(
-        task_id="veo-persist", is_veo=True, prompt="a roof"
-    )
-    assert wrote is True
-    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
-    assert len(rows) == 1
-    assert rows[0]["task_id"] == "veo-persist"
-    assert rows[0]["status"] == "submitted"
-    assert rows[0]["is_veo"] is True
-
-
-def test_persist_submitted_render_idempotent(monkeypatch: pytest.MonkeyPatch) -> None:
-    from tests.conftest import FakeSupabase
-
-    sb = FakeSupabase()
-    sb.set_single("_legacy_video_render_tasks", {"task_id": "dup"})
-    monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
-    wrote = vid_mod.persist_submitted_render(task_id="dup", is_veo=False)
-    assert wrote is False
-    assert not [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
-
-
-def test_persist_submitted_render_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _boom() -> object:
-        raise RuntimeError("no supabase")
-
-    monkeypatch.setattr("src.supabase_client.get_supabase_admin", _boom)
-    # Best-effort: a persistence failure must NOT abort a submit.
-    assert vid_mod.persist_submitted_render(task_id="t", is_veo=True) is False
+#
+# Silent-failure PR-6: the durable render record is the
+# ``work_item(kind='kie_video_render')`` -- the legacy ``video_render_tasks``
+# write (and ``persist_submitted_render``) are retired. We assert the submit
+# enqueues ONLY a work_item and never a legacy row.
 
 
 def test_persist_submitted_render_work_item_enqueues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The work_item mirror of persist_submitted_render enqueues a queued row."""
+    """The render record enqueues a queued work_item (the sole durable record)."""
     from tests.conftest import FakeSupabase
 
     sb = FakeSupabase()
@@ -577,6 +544,8 @@ def test_persist_submitted_render_work_item_enqueues(
     assert rows[0]["payload"]["task_id"] == "veo-wi"
     assert rows[0]["payload"]["is_veo"] is True
     assert rows[0]["creative_id"] == "cr-1"
+    # No legacy render-tasks row is ever written.
+    assert not [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
 
 
 def test_persist_submitted_render_work_item_never_raises(
@@ -593,7 +562,7 @@ def test_persist_submitted_render_work_item_never_raises(
 
 
 def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
-    """generate_video's submit writes the legacy row + the work_item row."""
+    """generate_video's submit writes ONLY a work_item (no legacy render row)."""
     from tests.conftest import FakeSupabase
 
     sb = FakeSupabase()
@@ -614,10 +583,10 @@ def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = KieVideoClient(api_key="k", transport=_transport(handler))
     asyncio.run(client.generate_video("p"))
-    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
-    assert rows and rows[0]["task_id"] == "veo-sp"
-    # Silent-failure PR-4: the same submit also enqueues a work_item row of
-    # kind 'kie_video_render' so the durable record lives on the unified queue.
+    # Silent-failure PR-6: the submit enqueues a work_item row of kind
+    # 'kie_video_render' as the SOLE durable record -- no legacy row is written.
     wi = [r for n, r in sb.inserts if n == "work_item"]
     assert wi and wi[0]["kind"] == "kie_video_render"
     assert wi[0]["idempotency_key"] == "kie:render:veo-sp"
+    assert wi[0]["payload"]["task_id"] == "veo-sp"
+    assert not [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]

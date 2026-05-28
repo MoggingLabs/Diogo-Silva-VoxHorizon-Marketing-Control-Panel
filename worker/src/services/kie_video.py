@@ -542,17 +542,15 @@ class KieVideoClient:
                 status_code=resp.status_code,
             )
         is_veo = _is_veo(model)
-        # E5.2 / #514: durably record the submitted (BILLED) render so a restart
-        # mid-poll, or a dropped callback, can never lose it -- the callback
-        # receiver + the reconciliation sweep resolve the render through this row
-        # (video_render_tasks). Best-effort: a persistence failure must never
-        # abort the submit (the worker boots without Supabase configured), it
-        # just forfeits the safety net for this one render.
-        persist_submitted_render(task_id=task_id, is_veo=is_veo, prompt=prompt)
-        # Silent-failure PR-4: also enqueue a work_item(kind='kie_video_render')
-        # so the durable render record lives on the unified queue -- the callback
-        # closes it to completed/failed, and the watchdog handles rotation if the
-        # callback never arrives (max attempts -> dead-letter).
+        # E5.2 / #514 + silent-failure PR-6: durably record the submitted
+        # (BILLED) render so a restart mid-poll, or a dropped callback, can never
+        # lose it. The record lives on the unified ``work_item`` queue
+        # (kind='kie_video_render'): the callback closes it to completed/failed,
+        # the reconciliation sweep resolves a dropped callback by polling kie,
+        # and the watchdog rotates it (max attempts -> dead-letter) if neither
+        # fires. Best-effort: a persistence failure must never abort the submit
+        # (the worker boots without Supabase configured), it just forfeits the
+        # safety net for this one render.
         persist_submitted_render_work_item(
             task_id=task_id, is_veo=is_veo, prompt=prompt
         )
@@ -646,71 +644,6 @@ def _safe_json(resp: httpx.Response) -> Any:
         return None
 
 
-# Name of the durable record table for in-flight kie video renders (migration
-# 0033). Kept here next to the submit path that writes it; the callback receiver
-# + the reconciliation sweep read it.
-#
-# Silent-failure PR-4 / migration 0051: the table was renamed
-# ``_legacy_video_render_tasks``. The kie video submit/callback path is not yet
-# migrated to the ``work_item`` queue (work_item_kind has ``kie_video_render``
-# reserved); until that lands the writes/reads go to the renamed table.
-# TODO(follow-up issue): migrate kie video renders onto the work_item queue and
-# delete this constant + ``persist_submitted_render`` + the reconciliation sweep.
-RENDER_TASKS_TABLE = "_legacy_video_render_tasks"
-
-
-def persist_submitted_render(
-    *,
-    task_id: str,
-    is_veo: bool,
-    prompt: str | None = None,
-    creative_id: str | None = None,
-    brief_id: str | None = None,
-    segment_idx: int | None = None,
-    theme: str | None = None,
-) -> bool:
-    """Durably record a just-submitted (BILLED) kie video render (E5.2 / #514).
-
-    Best-effort + idempotent: writes a ``video_render_tasks`` row keyed on the
-    unique ``task_id`` so the callback receiver and the reconciliation sweep can
-    resolve the render later (a restart mid-poll, or a dropped callback, no
-    longer loses it). NEVER raises -- the worker boots without Supabase
-    configured, and a render's submit must not fail just because the safety-net
-    write did. A duplicate task_id (re-submit) is a logged no-op. Returns True
-    when a row was written, False otherwise.
-    """
-    try:
-        from ..supabase_client import get_supabase_admin
-
-        sb = get_supabase_admin()
-        existing = (
-            sb.table(RENDER_TASKS_TABLE)
-            .select("task_id")
-            .eq("task_id", task_id)
-            .maybe_single()
-            .execute()
-        )
-        if existing is not None and isinstance(existing.data, dict):
-            return False
-        sb.table(RENDER_TASKS_TABLE).insert(
-            {
-                "task_id": task_id,
-                "is_veo": is_veo,
-                "prompt": prompt,
-                "creative_id": creative_id,
-                "brief_id": brief_id,
-                "segment_idx": segment_idx,
-                "theme": theme,
-                "status": "submitted",
-            }
-        ).execute()
-        log.info("kie_render_persisted", task_id=task_id, is_veo=is_veo)
-        return True
-    except Exception as exc:  # noqa: BLE001 -- safety-net write never aborts a submit
-        log.warning("kie_render_persist_failed", task_id=task_id, error=str(exc))
-        return False
-
-
 def kie_render_idempotency_key(task_id: str) -> str:
     """Stable work_item idempotency key for a kie render task_id.
 
@@ -733,14 +666,15 @@ def persist_submitted_render_work_item(
 ) -> bool:
     """Enqueue a ``work_item(kind='kie_video_render')`` for a submitted render.
 
-    Silent-failure PR-4 mirror of :func:`persist_submitted_render` on the
-    unified ``work_item`` queue: the callback closes it to completed/failed and
-    the watchdog handles rotation if the callback never arrives (the work_item
-    inherits the watchdog's stuck-row rotation + dead-lettering, so a dropped
-    callback can no longer silently lose a billed render). Best-effort + never
-    raises -- the worker boots without Supabase configured and a render's
-    submit must not fail because the safety-net write did. Idempotent via
-    ``kie_render_idempotency_key``.
+    Silent-failure PR-6: this IS the durable record for a billed kie render
+    (the legacy ``video_render_tasks`` table is retired). The callback closes
+    it to completed/failed, the reconciliation sweep resolves a dropped
+    callback by polling kie, and the watchdog handles rotation if neither fires
+    (the work_item inherits the watchdog's stuck-row rotation + dead-lettering,
+    so a dropped callback can no longer silently lose a billed render).
+    Best-effort + never raises -- the worker boots without Supabase configured
+    and a render's submit must not fail because the safety-net write did.
+    Idempotent via ``kie_render_idempotency_key``.
     """
     try:
         from ..supabase_client import get_supabase_admin

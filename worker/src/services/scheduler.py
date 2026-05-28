@@ -546,51 +546,65 @@ async def run_reconciliation_once(settings: Settings) -> int:
 # THE BUG this job backstops: the live broll-search path submits a kie video
 # render and BLOCKS on a 10-minute poll. A restart mid-poll abandoned the render
 # (kie still produced + billed the clip, nothing recorded it), and even with the
-# new callback receiver a dropped/never-delivered callback would still lose it.
-# This sweep is the durable safety net: it finds renders persisted as
-# ``submitted`` in ``video_render_tasks`` (migration 0033), polls kie for each
-# via a single non-blocking probe, and records the result -- exactly what the
-# callback would have done. Idempotent (the callback + the sweep both resolve a
-# task by its unique id; the loser sees a terminal row and no-ops) and BOUNDED
-# per pass (``scheduler_kie_reconcile_max_per_pass``), mirroring the dispatch
-# watchdog's redispatch cap so a backlog can't fan out an unbounded burst.
+# callback receiver a dropped/never-delivered callback would still lose it. This
+# sweep is the durable safety net the watchdog CANNOT replace: the watchdog only
+# rotates stale claims, but a kie render can FINISH remotely while no callback
+# ever arrives -- only an explicit poll of the kie API discovers that. The sweep
+# reads the open ``work_item(kind='kie_video_render')`` rows (silent-failure
+# PR-6 -- the durable record is the work_item now, not ``video_render_tasks``),
+# polls kie for each via a single non-blocking probe, and closes the work_item
+# -- exactly what the callback would have done. Idempotent (the callback + the
+# sweep both resolve a task by its idempotency key; the loser sees a terminal
+# work_item and no-ops) and BOUNDED per pass
+# (``scheduler_kie_reconcile_max_per_pass``), mirroring the dispatch watchdog's
+# redispatch cap so a backlog can't fan out an unbounded burst.
 
 
 def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
-    """Read up to ``limit`` still-``submitted`` video render task rows (oldest first).
+    """Read up to ``limit`` open ``kie_video_render`` work_items (oldest first).
 
-    Silent-failure PR-4 / migration 0051: the table was renamed
-    ``_legacy_video_render_tasks``. The kie video submit/callback path was not
-    migrated to the ``work_item`` queue in this PR, so the reconciliation sweep
-    keeps reading the renamed table during the one-quarter retention window.
-    TODO(follow-up issue): migrate kie video renders to ``work_item`` kind
-    ``kie_video_render`` and delete this surface.
+    Silent-failure PR-6: the durable render record is the
+    ``work_item(kind='kie_video_render')``. The reconciliation sweep reads the
+    rows a consumer is holding (``claimed`` / ``running``) -- those are the
+    renders submitted-and-awaiting-resolution that a poll of kie can close. The
+    ``task_id`` / ``is_veo`` / ``theme`` / ``creative_id`` live in the
+    work_item ``payload``.
     """
     resp = (
-        sb.table("_legacy_video_render_tasks")
-        .select("id, task_id, is_veo, creative_id, brief_id, theme, status, attempts")
-        .eq("status", "submitted")
-        .order("submitted_at", desc=False)
+        sb.table("work_item")
+        .select(
+            "id, kind, status, attempt, payload, idempotency_key, "
+            "pipeline_id, creative_id, brief_id, claim_token"
+        )
+        .eq("kind", "kie_video_render")
+        .in_("status", ["claimed", "running"])
+        .order("created_at", desc=False)
         .limit(limit)
         .execute()
     )
     return resp.data if (resp is not None and isinstance(resp.data, list)) else []
 
 
+def _render_payload(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Pull the kie render payload (task_id / is_veo / theme) off a work_item."""
+    payload = row.get("payload")
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
 async def run_kie_reconcile_once(settings: Settings) -> int:
     """One pass of the kie video render reconciliation. Returns rows resolved.
 
-    Reads the open ``video_render_tasks`` (bounded by
+    Reads the open ``work_item(kind='kie_video_render')`` rows (bounded by
     ``scheduler_kie_reconcile_max_per_pass``), polls kie once for each via
-    :meth:`services.kie_video.KieVideoClient.poll_status`, and records the
-    outcome: a success downloads + stores the clip and marks the row
+    :meth:`services.kie_video.KieVideoClient.poll_status`, and closes the
+    outcome on the work_item: a success downloads + stores the clip and marks it
     ``completed``; a terminal kie failure marks it ``failed``; a still-pending
-    render bumps ``attempts`` and is left for the next pass. A per-row failure is
+    render bumps its attempt + pushes ``next_attempt_at`` out via the watchdog's
+    exponential backoff and is left for the next pass. A per-row failure is
     logged and skipped so one bad render never aborts the sweep. Idempotent: a
-    row the callback already resolved is no longer ``submitted`` and is skipped.
+    row the callback already resolved is terminal (not claimed/running) and is
+    no longer read.
     """
-    from datetime import datetime, timezone
-
     from ..routes import video_callback
     from ..supabase_client import get_supabase_admin  # lazy: never forces a client
     from .kie_video import (
@@ -606,29 +620,29 @@ async def run_kie_reconcile_once(settings: Settings) -> int:
         return 0
 
     client = KieVideoClient()
-    now_iso = datetime.now(timezone.utc).isoformat()
     resolved = 0
     for row in rows:
-        task_id = row.get("task_id")
+        payload = _render_payload(row)
+        task_id = payload.get("task_id")
         if not isinstance(task_id, str) or not task_id:
             continue
         try:
-            status = await client.poll_status(task_id, bool(row.get("is_veo")))
+            status = await client.poll_status(task_id, bool(payload.get("is_veo")))
         except Exception as exc:  # noqa: BLE001 -- one bad render never sinks the pass
             log.warning("kie_reconcile_poll_failed", task_id=task_id, error=str(exc))
-            _bump_render_attempt(sb, task_id, now_iso)
+            _bump_render_attempt(sb, row)
             continue
 
         if status.state == RENDER_SUCCESS:
             try:
                 stored = await video_callback._store_render_result(
-                    task_id=task_id, theme=row.get("theme"), urls=status.urls
+                    task_id=task_id, theme=payload.get("theme"), urls=status.urls
                 )
             except Exception as exc:  # noqa: BLE001 -- store failure is non-terminal
                 log.warning(
                     "kie_reconcile_store_failed", task_id=task_id, error=str(exc)
                 )
-                _bump_render_attempt(sb, task_id, now_iso)
+                _bump_render_attempt(sb, row)
                 continue
             video_callback._mark_completed(
                 task_id,
@@ -643,40 +657,45 @@ async def run_kie_reconcile_once(settings: Settings) -> int:
                 clip_id=stored.get("clip_id"),
             )
         elif status.state == RENDER_FAILED:
-            sb.table("_legacy_video_render_tasks").update(
-                {
-                    "status": "failed",
-                    "error": status.error or "kie reported a render failure",
-                    "completed_at": now_iso,
-                }
-            ).eq("task_id", task_id).execute()
+            video_callback._mark_work_item_failed(
+                task_id, error=status.error or "kie reported a render failure"
+            )
             resolved += 1
             log.info("kie_reconcile_marked_failed", task_id=task_id)
         else:
-            _bump_render_attempt(sb, task_id, now_iso)
+            _bump_render_attempt(sb, row)
 
     log.info("kie_reconcile_pass_done", open_rows=len(rows), resolved=resolved)
     return resolved
 
 
-def _bump_render_attempt(sb: Any, task_id: str, now_iso: str) -> None:
-    """Stamp a still-pending render's last-checked time + bump its attempt count."""
+def _bump_render_attempt(sb: Any, row: Mapping[str, Any]) -> None:
+    """Push a still-pending render's ``next_attempt_at`` out via backoff.
+
+    Silent-failure PR-6: a render kie has not resolved yet is left ``running``
+    on the work_item; we only bump the attempt counter and delay the next poll
+    (the watchdog's :func:`compute_backoff_seconds`, capped) so a long render
+    isn't re-polled every pass. Best-effort -- bookkeeping never aborts the
+    sweep.
+    """
+    work_item_id = row.get("id")
+    if not work_item_id:
+        return
     try:
-        existing = (
-            sb.table("_legacy_video_render_tasks")
-            .select("attempts")
-            .eq("task_id", task_id)
-            .maybe_single()
-            .execute()
-        )
-        attempts = 0
-        if existing is not None and isinstance(existing.data, dict):
-            attempts = int(existing.data.get("attempts") or 0)
-        sb.table("_legacy_video_render_tasks").update(
-            {"attempts": attempts + 1, "updated_at": now_iso}
-        ).eq("task_id", task_id).execute()
+        attempt = int(row.get("attempt") or 0)
+        backoff = compute_backoff_seconds(attempt=attempt)
+        next_attempt_at = (
+            datetime.now(timezone.utc) + timedelta(seconds=backoff)
+        ).isoformat()
+        sb.table("work_item").update(
+            {"attempt": attempt + 1, "next_attempt_at": next_attempt_at}
+        ).eq("id", work_item_id).execute()
     except Exception as exc:  # noqa: BLE001 -- bookkeeping never aborts the sweep
-        log.warning("kie_reconcile_attempt_bump_failed", task_id=task_id, error=str(exc))
+        log.warning(
+            "kie_reconcile_attempt_bump_failed",
+            work_item_id=work_item_id,
+            error=str(exc),
+        )
 
 
 # Silent-failure PR-4: the legacy `run_outbox_relay_once` (and the

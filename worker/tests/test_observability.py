@@ -198,23 +198,26 @@ def test_dispatch_accepts_datetime_timestamp() -> None:
 def test_metrics_snapshot_counts_outbox_and_dispatches(
     fake_supabase: FakeSupabase,
 ) -> None:
+    # Silent-failure PR-6: outbox + dispatch metrics come off the unified
+    # work_item queue. Outbox kinds map onto the four reported buckets:
+    # queued->pending, claimed/running->inflight, failed->failed, timed_out->dead.
     fake_supabase.seed(
-        "_legacy_integration_outbox",
+        "work_item",
         [
-            {"status": "pending"},
-            {"status": "pending"},
-            {"status": "inflight"},
-            {"status": "failed"},
-            {"status": "dead"},
-            {"status": "done"},  # not reported
-        ],
-    )
-    fake_supabase.seed(
-        "_legacy_operator_dispatches",
-        [
-            {"status": "dispatched"},
-            {"status": "running"},
-            {"status": "completed"},  # not in-flight
+            {"kind": "outbox_meta_record_launch", "status": "queued"},
+            {"kind": "outbox_drive_finalize_verified", "status": "queued"},
+            {"kind": "outbox_ghl_send", "status": "running"},
+            {"kind": "outbox_meta_record_launch", "status": "failed"},
+            {"kind": "outbox_ghl_send", "status": "timed_out"},
+            {"kind": "outbox_meta_record_launch", "status": "completed"},  # not reported
+            {"kind": "outbox_ghl_send", "status": "cancelled"},  # not reported
+            # A non-outbox kind is never counted as outbox depth.
+            {"kind": "kie_video_render", "status": "queued"},
+            # operator_dispatch rows: only claimed/running are in-flight.
+            {"kind": "operator_dispatch", "status": "claimed"},
+            {"kind": "operator_dispatch", "status": "running"},
+            {"kind": "operator_dispatch", "status": "completed"},  # not in-flight
+            {"kind": "operator_dispatch", "status": "queued"},  # not in-flight
         ],
     )
     snap = metrics_snapshot(

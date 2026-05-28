@@ -560,11 +560,17 @@ def test_ghl_webhook_401(client: TestClient, fake_supabase: FakeSupabase) -> Non
 def test_metrics_happy(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
+    # Silent-failure PR-6: outbox + dispatch metrics come off the work_item
+    # queue. queued->pending, running->inflight (depth = both); an
+    # operator_dispatch in 'running' is one in-flight dispatch.
     fake_supabase.seed(
-        "_legacy_integration_outbox",
-        [{"status": "pending"}, {"status": "inflight"}],
+        "work_item",
+        [
+            {"kind": "outbox_meta_record_launch", "status": "queued"},
+            {"kind": "outbox_ghl_send", "status": "running"},
+            {"kind": "operator_dispatch", "status": "running"},
+        ],
     )
-    fake_supabase.seed("_legacy_operator_dispatches", [{"status": "running"}])
     resp = client.get("/work/metrics", headers=auth_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
