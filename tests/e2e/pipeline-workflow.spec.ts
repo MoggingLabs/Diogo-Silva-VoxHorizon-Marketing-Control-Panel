@@ -133,21 +133,32 @@ test.describe("pipeline — no-stall full workflow (image track)", () => {
     });
 
     // ===================================================================
-    // review → generation (UI Approve)
+    // review → generation (API Approve, then open the batch atomically)
     // ===================================================================
-    await page.getByRole("button", { name: /^approve$/i }).click();
+    // Silent-failure PR-8: with a real worker-stage consumer now draining
+    // `worker_generation`, the review approve enqueues that row and the consumer
+    // would claim + RENDER it (image finals run for real under FAKE_RENDER),
+    // adding v1.0 creatives that break the creative_qa gate count below. We drive
+    // the approve through the API (not a UI click) so the route's enqueue has
+    // COMPLETED by the time it returns, then immediately open the generation
+    // batch -- a fast write with no UI-visibility wait in between -- so the
+    // producer's `generation_state` probe reports `already_running` before the
+    // consumer's next poll. The consumer then claims + closes the work_item as a
+    // no-op-but-real re-entry (proven via emitGenerationClosure's await), without
+    // re-rendering. The closing terminal events come from
+    // emitGenerationClosure({ alreadyOpened: true }) further down.
+    const approve = await managerPost(pipelineId, "review/decision", {
+      decision: "approved",
+    });
+    expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+    await seedGenerationOpenMarker(pipelineId, 2);
+    expect(await readPipelineStatus(pipelineId)).toBe("generation");
+
+    // Focused UI assertion: the Generation stage renders after the API advance.
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
-
-    // Silent-failure PR-8: open the generation batch immediately so the real
-    // worker-stage consumer (now draining `worker_generation`) treats the stage
-    // as in-flight and does NOT re-render the picks under FAKE_RENDER (which
-    // would add v1.0 finals that break the creative_qa gate count below). The
-    // consumer still claims + closes the work_item -- it just runs the
-    // in-process service as a no-op-but-real re-entry. Closed by
-    // emitGenerationClosure({ alreadyOpened: true }) further down.
-    await seedGenerationOpenMarker(pipelineId, 2);
 
     // Resolve the pipeline's image brief id (stamped at configure→ideation).
     const { data: pipeRow } = await admin

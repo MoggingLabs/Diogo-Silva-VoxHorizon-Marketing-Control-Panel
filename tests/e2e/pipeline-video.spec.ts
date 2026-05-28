@@ -191,22 +191,29 @@ test.describe("pipeline - video format", () => {
     });
 
     // ===================================================================
-    // review → generation (UI Approve)
+    // review → generation (API Approve, then open the batch atomically)
     // ===================================================================
-    await page.getByRole("button", { name: /^approve$/i }).click();
+    // Silent-failure PR-8: drive the approve through the API so the route's
+    // `worker_generation` enqueue has COMPLETED on return, then immediately open
+    // the generation batch (a fast write, no UI-visibility wait in between) so
+    // the producer's `generation_state` probe reports `already_running` before
+    // the consumer's next poll. For VIDEO the real render chain (TTS / compose /
+    // caption) has NO fake mode in CI, so the captioned final + its closure are
+    // seeded below; the consumer claims + closes the work_item as a
+    // no-op-but-real re-entry (proven via emitGenerationClosure's await) without
+    // emitting conflicting task_error events that would unbalance the closure.
+    const approve = await managerPost(pipelineId, "review/decision", {
+      decision: "approved",
+    });
+    expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+    await seedGenerationOpenMarker(pipelineId, 2);
+    expect(await readPipelineStatus(pipelineId)).toBe("generation");
+
+    // Focused UI assertion: the Generation stage renders after the API advance.
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
-
-    // Silent-failure PR-8: open the generation batch immediately so the real
-    // worker-stage consumer (now draining `worker_generation`) treats the stage
-    // as in-flight and skips the in-process producer. For VIDEO the real render
-    // chain (TTS / compose / caption) has NO fake mode in CI, so the captioned
-    // final + its closure are seeded below; the consumer still claims + closes
-    // the work_item (a no-op-but-real re-entry), which is the symmetric half the
-    // cutover left unbuilt -- proven via awaitWorkerStageClosed inside
-    // emitGenerationClosure.
-    await seedGenerationOpenMarker(pipelineId, 2);
 
     // Prove the worker-stage consumer claimed + closed the worker_ideation row
     // the configuration->ideation advance enqueued (the seeded video drafts
