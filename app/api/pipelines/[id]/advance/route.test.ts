@@ -1115,6 +1115,151 @@ describe("POST /api/pipelines/:id/advance", () => {
     });
   });
 
+  describe("FIX-A: dispatch-on-entry for post-generation stages", () => {
+    // The post-gen per-creative stages had no dispatch PRODUCER once the
+    // pipeline left creative_qa (the verdict-writers were reachable only by the
+    // manual routes / e2e harness), so every pipeline deadlocked. Each
+    // per-creative advance now enqueues the NEXT stage's producer on entry,
+    // branching on operator_driven so the two execution models never both fire.
+    function perCreative(status: string, operatorDriven = false) {
+      return {
+        id,
+        status,
+        format_choice: "image",
+        config_draft: operatorDriven ? { operator_driven: true } : null,
+        advanced_at: {},
+      };
+    }
+
+    it("deterministic creative_qa->compliance_review enqueues worker_compliance", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("creative_qa"), error: null } },
+          update: { single: { data: { id, status: "compliance_review" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("worker_compliance");
+      expect(opts.idempotencyKey).toBe(`wi:${id}:compliance_review`);
+      expect((opts.payload as Record<string, unknown>).stage).toBe("compliance_review");
+    });
+
+    it("deterministic copy->spec_validation enqueues worker_spec", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("compliance_review"), error: null } },
+          update: { single: { data: { id, status: "copy" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      // compliance_review -> copy: deterministic copy is MANUAL, so NO enqueue.
+      const toCopy = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(toCopy.status).toBe(200);
+      expect(enqueueWorkItem).not.toHaveBeenCalled();
+
+      // copy -> spec_validation: enqueues worker_spec.
+      enqueueWorkItem.mockClear();
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("copy"), error: null } },
+          update: { single: { data: { id, status: "spec_validation" }, error: null } },
+        },
+        creatives: { select: { data: [{ id: "c1", status: "draft" }], error: null } },
+        copy_variants: {
+          select: {
+            data: [
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+              { creative_id: "c1", status: "approved" },
+            ],
+            error: null,
+          },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const toSpec = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(toSpec.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("worker_spec");
+      expect(opts.idempotencyKey).toBe(`wi:${id}:spec_validation`);
+    });
+
+    it("deterministic spec_validation->variant_plan enqueues NOTHING", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("spec_validation"), error: null } },
+          update: { single: { data: { id, status: "variant_plan" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).not.toHaveBeenCalled();
+    });
+
+    it("operator creative_qa->compliance_review enqueues operator_dispatch", async () => {
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("creative_qa", true), error: null } },
+          update: { single: { data: { id, status: "compliance_review" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(200);
+      expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+      const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+      expect(opts.kind).toBe("operator_dispatch");
+      expect(opts.idempotencyKey).toBe(`op-disp:${id}:compliance_review:advance`);
+      const payload = opts.payload as Record<string, unknown>;
+      expect(payload.stage).toBe("compliance_review");
+      expect(String(payload.instruction)).toContain(id);
+    });
+
+    it("500 when the stage dispatch enqueue fails (not swallowed)", async () => {
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: perCreative("creative_qa"), error: null } },
+          update: { single: { data: { id, status: "compliance_review" }, error: null } },
+        },
+        creative_stage_state: { select: { data: [{ status: "passed" }], error: null } },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/advance`, { method: "POST" }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(String(body.error)).toContain("stage dispatch enqueue failed");
+    });
+  });
+
   describe("copy → spec_validation (approved-copy gate, no-stall wiring)", () => {
     function copyPipeline() {
       return {
