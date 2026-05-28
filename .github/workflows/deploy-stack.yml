@@ -286,11 +286,15 @@ jobs:
             docker compose pull
             docker compose up -d --remove-orphans
             # Wait for each service to report healthy before pruning the
-            # old images. Up to ~60s per service — matches healthcheck
-            # cadence (start_period 30s + a couple of interval ticks).
-            for svc in web worker; do
+            # old images. Up to ~120s per service -- matches the slowest
+            # healthcheck cadence (operator-daemon start_period 60s + a couple
+            # of 30s interval ticks; web/worker are faster but share the cap).
+            # operator-daemon is included so a dead sidecar (failed auth/skill
+            # probe leaves it unhealthy) fails the deploy loudly instead of
+            # rolling out a silently-broken operator.
+            for svc in web worker operator-daemon; do
               status=unhealthy
-              for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              for i in $(seq 1 24); do
                 cid=$(docker compose ps -q "$svc")
                 status=$(docker inspect --format='{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unhealthy)
                 [ "$status" = "healthy" ] && break
