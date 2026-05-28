@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { VariantPlanDecisionInput } from "@/lib/pipeline/decision-schemas";
 import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
 
@@ -52,9 +54,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "variant_plan") {
+  // Silent-failure PR-4: read derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "variant_plan") {
     return NextResponse.json(
-      { error: "invalid_state", current: pipeline.status, expected: "variant_plan" },
+      { error: "invalid_state", current: derivedStatus, expected: "variant_plan" },
       { status: 409 },
     );
   }
@@ -78,7 +83,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   }
 
   if (decision === "rejected") {
-    // Stays in variant_plan — record the rejection on the timeline only.
+    // Stays in variant_plan -- record the rejection on the timeline only.
     const event: PipelineEventInsert = {
       pipeline_id: id,
       kind: "variant_plan_rejected",
@@ -89,10 +94,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     if (evErr) {
       console.warn(`[pipelines.variant-plan.decision] event insert failed: ${evErr.message}`);
     }
-    return NextResponse.json({ pipeline, decision });
+    return NextResponse.json({
+      pipeline: { ...pipeline, status: "variant_plan" as PipelineStatus },
+      decision,
+    });
   }
 
-  // Approve → advance to finalize_assets.
+  // Approve -> advance to finalize_assets. Silent-failure PR-4: drop the
+  // `status` field from the UPDATE and the CAS guard (`pipelines.status` was
+  // dropped in 0051); the stage_advanced event below is the canonical write.
   const advancedAt =
     pipeline.advanced_at &&
     typeof pipeline.advanced_at === "object" &&
@@ -100,14 +110,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
   const update: PipelineUpdate = {
-    status: "finalize_assets",
     advanced_at: { ...advancedAt, finalize_assets: now } as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", id)
-    .eq("status", "variant_plan")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -128,5 +136,8 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     console.warn(`[pipelines.variant-plan.decision] event insert failed: ${evErr.message}`);
   }
 
-  return NextResponse.json({ pipeline: updated, decision });
+  return NextResponse.json({
+    pipeline: { ...updated, status: "finalize_assets" as PipelineStatus },
+    decision,
+  });
 }

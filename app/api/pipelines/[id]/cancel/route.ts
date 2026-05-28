@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { HermesError, kanbanCancel } from "@/lib/hermes/client";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
 
@@ -50,7 +52,7 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   const supabase = createAdminClient();
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status, advanced_at")
+    .select("id, advanced_at")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
@@ -60,11 +62,14 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  if (pipeline.status === "cancelled" || pipeline.status === "done") {
-    return NextResponse.json({ error: "invalid_state", from: pipeline.status }, { status: 409 });
+  // Silent-failure PR-4: read the derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus === "cancelled" || derivedStatus === "done") {
+    return NextResponse.json({ error: "invalid_state", from: derivedStatus }, { status: 409 });
   }
 
-  const previousStatus = pipeline.status;
+  const previousStatus = derivedStatus;
   const now = new Date().toISOString();
 
   // Stamp `advanced_at.cancelled` without clobbering earlier stage marks.
@@ -76,21 +81,20 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, cancelled: now };
 
-  // Silent-failure PR-3: write the cancel status alongside the strict
-  // `pipeline_cancelled` event emission. The event fires the
-  // cancel-propagate trigger from migration 0050 (every open work_item for
-  // the pipeline is cancelled in the same transaction) AND drives the
-  // reducer's terminal-escape branch.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The `pipeline_cancelled` event below is the canonical status write -- it
+  // fires the cancel-propagate trigger from migration 0050 (every open
+  // work_item for the pipeline is cancelled in the same transaction) AND
+  // drives the reducer's terminal-escape branch. The legacy `.in("status",
+  // [...])` CAS guard was removed; the derived-status pre-check is the race
+  // guard now (a concurrent cancel idempotently re-emits the event).
   const update: PipelineUpdate = {
-    status: "cancelled",
     advanced_at: nextAdvancedAt as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    // Re-assert the previous status so a concurrent transition can't race.
-    .in("status", ["configuration", "ideation", "review", "generation"])
     .select()
     .single();
   if (updateErr || !updated) {
@@ -122,7 +126,9 @@ export async function POST(_req: NextRequest, ctx: RouteContext) {
   // Fan out kanban cancels for every still-active task on this pipeline.
   await cancelActiveKanbanTasks(supabase, pipeline.id);
 
-  return NextResponse.json({ pipeline: updated });
+  return NextResponse.json({
+    pipeline: { ...updated, status: "cancelled" as PipelineStatus },
+  });
 }
 
 /**

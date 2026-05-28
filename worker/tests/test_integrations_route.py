@@ -561,10 +561,10 @@ def test_metrics_happy(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
     fake_supabase.seed(
-        "integration_outbox",
+        "_legacy_integration_outbox",
         [{"status": "pending"}, {"status": "inflight"}],
     )
-    fake_supabase.seed("operator_dispatches", [{"status": "running"}])
+    fake_supabase.seed("_legacy_operator_dispatches", [{"status": "running"}])
     resp = client.get("/work/metrics", headers=auth_headers)
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -580,22 +580,23 @@ def test_metrics_401(client: TestClient, fake_supabase: FakeSupabase) -> None:
 
 
 # ===========================================================================
-# Transactional outbox enqueue (E5.1 / #510)
+# Outbox enqueue on the unified work_item queue (silent-failure PR-4)
 # ===========================================================================
 #
-# The Meta launch + Drive finalize recorders enqueue an integration_outbox row
-# IN THE SAME HANDLER as the state change, so the durable side effect is
-# exactly-once + retryable. We assert the row is written on the happy path,
-# carries the right (integration, op) + a deterministic idempotency_key, and is
-# NOT written when the state change itself is rejected (gate-blocked / md5
-# mismatch) -- a side effect must never outlive a refused state change.
+# The Meta launch + Drive finalize recorders enqueue a work_item row of the
+# matching outbox-* kind IN THE SAME HANDLER as the state change, so the
+# durable side effect is exactly-once + retryable. We assert the row is
+# written on the happy path, carries the right kind + a deterministic
+# idempotency_key, and is NOT written when the state change itself is rejected
+# (gate-blocked / md5 mismatch) -- a side effect must never outlive a refused
+# state change.
 
 
-def _outbox_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
-    return [row for name, row in sb.inserts if name == "integration_outbox"]
+def _work_item_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
+    return [row for name, row in sb.inserts if name == "work_item"]
 
 
-def test_launch_enqueues_meta_outbox_row_in_handler(
+def test_launch_enqueues_meta_outbox_work_item_in_handler(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
     fake_supabase.set_single("pipelines", _pipeline_row())
@@ -605,29 +606,30 @@ def test_launch_enqueues_meta_outbox_row_in_handler(
         "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
     )
     assert resp.status_code == 200, resp.text
-    ob = _outbox_inserts(fake_supabase)
+    ob = _work_item_inserts(fake_supabase)
+    # Exactly one work_item enqueued; the kind + key are deterministic.
     assert len(ob) == 1
     row = ob[0]
-    assert row["integration"] == "meta"
-    assert row["op"] == "record_launch"
-    assert row["status"] == "pending"
+    assert row["kind"] == "outbox_meta_record_launch"
+    assert row["status"] == "queued"
     assert row["pipeline_id"] == "p-1"
+    assert row["created_by"] == "worker.integrations.record_launch"
     assert row["idempotency_key"].startswith("meta:record_launch:p-1:")
-    # The durable request payload carries the recorded entity graph.
-    assert row["request"]["pipeline_id"] == "p-1"
-    assert len(row["request"]["entities"]) == 3
+    # The durable payload carries the recorded entity graph.
+    assert row["payload"]["pipeline_id"] == "p-1"
+    assert len(row["payload"]["entities"]) == 3
 
 
 def test_launch_gate_block_enqueues_nothing(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
     fake_supabase.set_single("pipelines", _pipeline_row())
-    # No clearing state -> gate 422s before any write, INCLUDING the outbox.
+    # No clearing state -> gate 422s before any write, INCLUDING the work_item.
     resp = client.post(
         "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
     )
     assert resp.status_code == 422
-    assert _outbox_inserts(fake_supabase) == []
+    assert _work_item_inserts(fake_supabase) == []
 
 
 def test_launch_enqueue_is_idempotent_on_rerecord(
@@ -641,16 +643,16 @@ def test_launch_enqueue_is_idempotent_on_rerecord(
         "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
     )
     assert first.status_code == 200
-    # The enqueued row now lives in the store; the second call's probe finds it.
+    # The enqueued work_item lives in the store; the second probe finds it.
     second = client.post(
         "/work/pipeline/tools/launch", headers=auth_headers, json=_launch_body()
     )
     assert second.status_code == 200, second.text
-    # Exactly one outbox row despite two recorder runs (same idempotency_key).
-    assert len(_outbox_inserts(fake_supabase)) == 1
+    # Exactly one work_item despite two recorder runs (same idempotency_key).
+    assert len(_work_item_inserts(fake_supabase)) == 1
 
 
-def test_finalize_drive_enqueues_drive_outbox_row(
+def test_finalize_drive_enqueues_drive_outbox_work_item(
     client: TestClient, auth_headers: dict[str, str], fake_supabase: FakeSupabase
 ) -> None:
     fake_supabase.set_single("pipelines", _pipeline_row())
@@ -658,14 +660,14 @@ def test_finalize_drive_enqueues_drive_outbox_row(
         "/work/pipeline/tools/finalize_drive", headers=auth_headers, json=_drive_body()
     )
     assert resp.status_code == 200, resp.text
-    ob = _outbox_inserts(fake_supabase)
+    ob = _work_item_inserts(fake_supabase)
     assert len(ob) == 1
     row = ob[0]
-    assert row["integration"] == "drive"
-    assert row["op"] == "finalize_verified"
-    assert row["status"] == "pending"
+    assert row["kind"] == "outbox_drive_finalize_verified"
+    assert row["status"] == "queued"
+    assert row["created_by"] == "worker.integrations.finalize_drive"
     assert row["idempotency_key"].startswith("drive:finalize_verified:p-1:")
-    assert len(row["request"]["assets"]) == 1
+    assert len(row["payload"]["assets"]) == 1
 
 
 def test_finalize_drive_md5_mismatch_enqueues_nothing(
@@ -687,7 +689,7 @@ def test_finalize_drive_md5_mismatch_enqueues_nothing(
     )
     assert resp.status_code == 422
     # A refused finalize must not leave a durable side effect behind.
-    assert _outbox_inserts(fake_supabase) == []
+    assert _work_item_inserts(fake_supabase) == []
 
 
 def test_ghl_webhook_dedupes_on_insert_conflict(

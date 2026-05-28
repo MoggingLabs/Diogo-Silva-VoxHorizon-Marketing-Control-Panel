@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { conflict, emitEvent, eventKind, notFound, ok, serverError, softDelete } from "@/lib/crud";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Pipeline } from "@/lib/pipeline/schemas";
 
@@ -66,12 +67,19 @@ export async function GET(_req: NextRequest, ctx: RouteContext) {
     image_brief = null,
     video_brief = null,
     events = [],
-    ...pipeline
+    ...pipelineRow
   } = data as typeof data & {
     image_brief: unknown;
     video_brief: unknown;
     events: unknown[];
   };
+
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051). The
+  // curated `Pipeline` view-model still carries `status` (the UI's stepper +
+  // badges + routing read it), so hydrate it from the event-sourced reducer
+  // before returning. One RPC round-trip per detail-page render.
+  const derived = await getDerivedStatus(supabase, id);
+  const pipeline = { ...pipelineRow, status: derived ?? "configuration" };
 
   return NextResponse.json({
     pipeline,

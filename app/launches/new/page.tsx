@@ -80,11 +80,12 @@ export default async function LaunchesNewPage({ searchParams }: { searchParams: 
   // creatives. We use the public Supabase client (server-side) so RLS
   // applies — operators authed via the same session can read the pipeline
   // and its creatives without needing the admin key here.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // This page only uses the row's brief / config / launch metadata, never
+  // the status, so we just drop the field from the select list.
   const { data: pipelineRow, error: pipelineErr } = await supabase
     .from("pipelines")
-    .select(
-      "id, status, format_choice, image_brief_id, video_brief_id, config_draft, launch_package_id",
-    )
+    .select("id, format_choice, image_brief_id, video_brief_id, config_draft, launch_package_id")
     .eq("id", pipeline_id)
     .maybeSingle();
   if (pipelineErr) {

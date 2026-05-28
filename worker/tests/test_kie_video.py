@@ -528,7 +528,7 @@ def test_persist_submitted_render_inserts_row(monkeypatch: pytest.MonkeyPatch) -
         task_id="veo-persist", is_veo=True, prompt="a roof"
     )
     assert wrote is True
-    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
     assert len(rows) == 1
     assert rows[0]["task_id"] == "veo-persist"
     assert rows[0]["status"] == "submitted"
@@ -539,11 +539,11 @@ def test_persist_submitted_render_idempotent(monkeypatch: pytest.MonkeyPatch) ->
     from tests.conftest import FakeSupabase
 
     sb = FakeSupabase()
-    sb.set_single("video_render_tasks", {"task_id": "dup"})
+    sb.set_single("_legacy_video_render_tasks", {"task_id": "dup"})
     monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
     wrote = vid_mod.persist_submitted_render(task_id="dup", is_veo=False)
     assert wrote is False
-    assert not [r for n, r in sb.inserts if n == "video_render_tasks"]
+    assert not [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
 
 
 def test_persist_submitted_render_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -555,11 +555,49 @@ def test_persist_submitted_render_never_raises(monkeypatch: pytest.MonkeyPatch) 
     assert vid_mod.persist_submitted_render(task_id="t", is_veo=True) is False
 
 
-def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
-    """generate_video's submit writes the durable video_render_tasks row."""
+def test_persist_submitted_render_work_item_enqueues(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The work_item mirror of persist_submitted_render enqueues a queued row."""
     from tests.conftest import FakeSupabase
 
     sb = FakeSupabase()
+    sb.set_single("work_item", None)
+    monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
+
+    wrote = vid_mod.persist_submitted_render_work_item(
+        task_id="veo-wi", is_veo=True, prompt="a roof", creative_id="cr-1"
+    )
+    assert wrote is True
+    rows = [r for n, r in sb.inserts if n == "work_item"]
+    assert len(rows) == 1
+    assert rows[0]["kind"] == "kie_video_render"
+    assert rows[0]["status"] == "queued"
+    assert rows[0]["idempotency_key"] == "kie:render:veo-wi"
+    assert rows[0]["payload"]["task_id"] == "veo-wi"
+    assert rows[0]["payload"]["is_veo"] is True
+    assert rows[0]["creative_id"] == "cr-1"
+
+
+def test_persist_submitted_render_work_item_never_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom() -> object:
+        raise RuntimeError("no supabase")
+
+    monkeypatch.setattr("src.supabase_client.get_supabase_admin", _boom)
+    # Best-effort: a persistence failure must NOT abort a submit.
+    assert (
+        vid_mod.persist_submitted_render_work_item(task_id="t", is_veo=True) is False
+    )
+
+
+def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
+    """generate_video's submit writes the legacy row + the work_item row."""
+    from tests.conftest import FakeSupabase
+
+    sb = FakeSupabase()
+    sb.set_single("work_item", None)
     monkeypatch.setattr("src.supabase_client.get_supabase_admin", lambda: sb)
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -576,5 +614,10 @@ def test_submit_persists_render(monkeypatch: pytest.MonkeyPatch) -> None:
 
     client = KieVideoClient(api_key="k", transport=_transport(handler))
     asyncio.run(client.generate_video("p"))
-    rows = [r for n, r in sb.inserts if n == "video_render_tasks"]
+    rows = [r for n, r in sb.inserts if n == "_legacy_video_render_tasks"]
     assert rows and rows[0]["task_id"] == "veo-sp"
+    # Silent-failure PR-4: the same submit also enqueues a work_item row of
+    # kind 'kie_video_render' so the durable record lives on the unified queue.
+    wi = [r for n, r in sb.inserts if n == "work_item"]
+    assert wi and wi[0]["kind"] == "kie_video_render"
+    assert wi[0]["idempotency_key"] == "kie:render:veo-sp"

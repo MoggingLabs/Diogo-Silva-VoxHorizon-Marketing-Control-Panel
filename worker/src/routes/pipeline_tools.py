@@ -67,14 +67,18 @@ import binascii
 from typing import Any, Literal
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
 from ..generated.db_enums import PER_CREATIVE_STAGES as _PER_CREATIVE_STAGES
 from ..services.atomic_inserts import record_creative_stage
 from ..services.kie import KieClient, KieError
-from ..services.operator_bridge import OperatorBridgeError, get_operator_bridge
+# Silent-failure PR-4: the operator_bridge module was deleted; routes that
+# previously docker-exec'd the operator now enqueue an operator_dispatch
+# work_item instead and the operator-daemon claims it. The bridge import is
+# gone -- the only callers that remained (the dispatch_operator route below)
+# were retired in PR-3.
 from ..services.pipeline_runner import (
     EVENT_TASK_DONE,
     EVENT_TASK_ERROR,
@@ -1570,60 +1574,13 @@ async def store_creative(body: StoreCreativeInput) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class DispatchInput(BaseModel):
-    """POST body for ``/work/pipeline/tools/dispatch``."""
-
-    pipeline_id: str = Field(..., min_length=1)
-    instruction: str = Field(..., min_length=1)
-
-
-@router.post(
-    "/work/pipeline/tools/dispatch", dependencies=[Depends(verify_secret)]
-)
-async def dispatch_operator(
-    body: DispatchInput, background: BackgroundTasks
-) -> dict[str, Any]:
-    """Fire-and-forget kick the operator agent for a pipeline.
-
-    Called by the dashboard's Next.js routes (not by the operator) to
-    re-task the operator after a manager stage-gate action. The pipeline id
-    is passed as the operator's session id so its playbook can re-load
-    state. We schedule the docker-exec on a ``BackgroundTask`` and return
-    immediately — the caller never sees the operator's stdout.
-    """
-    bridge = get_operator_bridge()
-    background.add_task(
-        _dispatch_in_background,
-        bridge=bridge,
-        instruction=body.instruction,
-        session_id=body.pipeline_id,
-    )
-    log.info(
-        "operator_dispatch_scheduled",
-        pipeline_id=body.pipeline_id,
-        instruction_chars=len(body.instruction),
-    )
-    return {"ok": True, "dispatched": True}
-
-
-async def _dispatch_in_background(
-    *, bridge: Any, instruction: str, session_id: str
-) -> None:
-    """Run the operator dispatch, swallowing bridge errors with a log.
-
-    The HTTP response has already returned ``dispatched: true`` by the time
-    this runs, so a docker failure can't be surfaced to the caller — log it
-    instead. The dashboard observes real operator progress (or its absence)
-    through ``pipeline_events`` / Realtime.
-    """
-    try:
-        await bridge.dispatch(instruction, session_id)
-    except OperatorBridgeError as e:
-        log.warning(
-            "operator_dispatch_failed",
-            session_id=session_id,
-            error=str(e),
-        )
+# Silent-failure PR-4: the legacy `dispatch_operator` route + the
+# `_dispatch_in_background` helper were removed. Operator dispatches now ride
+# the unified work_item queue (kind='operator_dispatch'); the operator-daemon
+# claims each row and docker-execs into the operator container. The dashboard
+# enqueues via `lib/work-queue/enqueue.ts` synchronously and gets a 5xx on
+# failure -- the silent-failure class the bridge swallowed is structurally
+# closed. The DispatchInput body model was retired with the route.
 
 
 __all__ = [
@@ -1634,6 +1591,5 @@ __all__ = [
     "RenderInput",
     "RenderItem",
     "StoreCreativeInput",
-    "DispatchInput",
     "EVENTS_TAIL_LIMIT",
 ]

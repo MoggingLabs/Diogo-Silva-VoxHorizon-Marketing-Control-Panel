@@ -424,6 +424,7 @@ jobs:
   #   - pipeline-video.spec.ts     (video track            - PF-G-3/#204)
   #   - pipeline-both.spec.ts      (both tracks            - PF-G-3/#204)
   #   - launch-video.spec.ts       (video launch package   - V3-8/#114)
+  #   - launch-image.spec.ts       (image launch package   - silent-failure PR-4)
   #   - pipeline-archive.spec.ts   (archive/restore        - #609)
   #   - launches-manage.spec.ts    (unified launches mgmt  - #595)
   #   - clients-crud.spec.ts       (clients CRUD           - #591/#592)
@@ -460,6 +461,8 @@ jobs:
           - spec: pipeline-both.spec.ts
             allow_failure: false
           - spec: launch-video.spec.ts
+            allow_failure: false
+          - spec: launch-image.spec.ts
             allow_failure: false
           - spec: pipeline-archive.spec.ts
             allow_failure: false

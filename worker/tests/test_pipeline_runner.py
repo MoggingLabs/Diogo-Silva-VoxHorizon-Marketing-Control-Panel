@@ -115,6 +115,16 @@ class _FakeTable:
         return SimpleNamespace(data=None)
 
 
+class _FakeRpc:
+    def __init__(self, parent: "_FakeSupabase") -> None:
+        self.parent = parent
+
+    def execute(self) -> SimpleNamespace:
+        if self.parent.raise_on_rpc:
+            raise RuntimeError("rpc blew up")
+        return SimpleNamespace(data=self.parent.rpc_status)
+
+
 class _FakeSupabase:
     def __init__(self) -> None:
         self.events: list[dict] = []
@@ -123,9 +133,17 @@ class _FakeSupabase:
         self.inserts: list[tuple[str, dict]] = []
         self.raise_on_execute: bool = False
         self.execute_returns_none: bool = False
+        # Silent-failure PR-4: ``fetch_pipeline`` / ``pipeline_is_cancelled``
+        # now read the derived status via ``compute_pipeline_status`` RPC.
+        # ``rpc_status`` is the string the fake returns from that RPC.
+        self.rpc_status: str | None = "configuration"
+        self.raise_on_rpc: bool = False
 
     def table(self, name: str) -> _FakeTable:
         return _FakeTable(name, self)
+
+    def rpc(self, _name: str, _params: dict[str, Any]) -> _FakeRpc:
+        return _FakeRpc(self)
 
 
 @pytest.fixture
@@ -493,7 +511,11 @@ def test_generation_state_neither_when_no_tasks(
 
 
 def test_fetch_pipeline_returns_row_when_present(fake_sb: _FakeSupabase) -> None:
-    fake_sb.pipeline_row = {"id": "p-1", "status": "ideation"}
+    # Silent-failure PR-4: ``pipelines.status`` was dropped; the helper
+    # hydrates ``status`` from the reducer RPC. The DB read returns the
+    # remaining columns; the RPC returns the derived status.
+    fake_sb.pipeline_row = {"id": "p-1"}
+    fake_sb.rpc_status = "ideation"
     row = pr.fetch_pipeline("p-1")
     assert row == {"id": "p-1", "status": "ideation"}
 
@@ -695,7 +717,9 @@ def test_emit_cost_defers_video_substage_apis_to_real_recorder(
 def test_pipeline_is_cancelled_true_when_status_cancelled(
     fake_sb: _FakeSupabase,
 ) -> None:
-    fake_sb.pipeline_row = {"status": "cancelled"}
+    # Silent-failure PR-4: derived status comes from the reducer RPC, not
+    # from ``pipelines.status`` (the column was dropped in migration 0051).
+    fake_sb.rpc_status = "cancelled"
     assert pr.pipeline_is_cancelled("p-1") is True
 
 
@@ -705,35 +729,36 @@ def test_pipeline_is_cancelled_false_when_status_active(
     """Every non-cancelled status (ideation, review, generation, done) must
     return False so the worker continues normally."""
     for status in ("configuration", "ideation", "review", "generation", "done"):
-        fake_sb.pipeline_row = {"status": status}
+        fake_sb.rpc_status = status
         assert pr.pipeline_is_cancelled("p-1") is False, status
 
 
-def test_pipeline_is_cancelled_false_when_row_missing(
+def test_pipeline_is_cancelled_false_when_rpc_returns_none(
     fake_sb: _FakeSupabase,
 ) -> None:
-    """A missing pipeline row must NOT trigger abort — that would short-
-    circuit any pipeline whose row was momentarily unreadable."""
-    fake_sb.pipeline_row = None
+    """A None from the reducer (unknown pipeline / transient miss) must
+    NOT trigger abort -- that would short-circuit any pipeline whose row
+    was momentarily unreadable."""
+    fake_sb.rpc_status = None
     assert pr.pipeline_is_cancelled("p-missing") is False
 
 
-def test_pipeline_is_cancelled_false_when_row_not_dict(
+def test_pipeline_is_cancelled_false_when_rpc_returns_non_string(
     fake_sb: _FakeSupabase,
 ) -> None:
-    """Defensive: maybe_single may occasionally return a non-dict.
-    Treat as 'not cancelled' rather than crashing the substage loop."""
-    fake_sb.pipeline_row = ["unexpected"]  # type: ignore[assignment]
+    """Defensive: the RPC could conceivably return a non-string value
+    on a stale schema; treat as 'not cancelled' rather than aborting."""
+    fake_sb.rpc_status = {"unexpected": "shape"}  # type: ignore[assignment]
     assert pr.pipeline_is_cancelled("p-1") is False
 
 
 def test_pipeline_is_cancelled_false_on_supabase_error(
     fake_sb: _FakeSupabase,
 ) -> None:
-    """A read failure must NOT abort the pipeline — transient Supabase
+    """A read failure must NOT abort the pipeline -- transient Supabase
     flakes shouldn't cancel a running job. The worker carries on; the
     next emit_pipeline_event call would surface a real outage."""
-    fake_sb.raise_on_execute = True
+    fake_sb.raise_on_rpc = True
     assert pr.pipeline_is_cancelled("p-err") is False
 
 

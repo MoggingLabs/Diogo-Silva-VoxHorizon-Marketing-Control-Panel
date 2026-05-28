@@ -56,6 +56,7 @@ from ..generated.db_enums import AD_ENTITY_KINDS
 from ..services import cost_ledger, observability
 from ..services.ghl import GhlClient, GhlError, parse_webhook_event, real_cpl
 from ..services.pipeline_runner import emit_pipeline_event, fetch_pipeline
+from ..services.work_queue import enqueue_work_item
 from ..supabase_client import get_supabase_admin
 
 
@@ -86,72 +87,31 @@ _AD_ENTITY_KINDS: frozenset[str] = frozenset(AD_ENTITY_KINDS)
 
 
 # ===========================================================================
-# Transactional outbox enqueue (E5.1)
+# Transactional outbox enqueue -- work_item queue (silent-failure PR-4)
 # ===========================================================================
 #
-# The external-write recorder routes below enqueue an ``integration_outbox`` row
-# alongside the state change they record, so the durable side effect the operator
-# cannot itself guarantee (a Meta activation follow-through, a Drive index/notify)
-# is applied EXACTLY ONCE and is retryable across a crash. The relay drainer
-# (:mod:`services.outbox_relay`) claims + performs + records each row.
+# The external-write recorder routes below enqueue a ``work_item`` row of the
+# matching ``outbox_*`` kind alongside the state change they record, so the
+# durable side effect the operator cannot itself guarantee (a Meta activation
+# follow-through, a Drive index/notify) is applied EXACTLY ONCE and is
+# retryable across a crash. The drainer in ``services.outbox_consumer`` claims
+# + performs + closes each row; the unified watchdog
+# (``services.work_item_watchdog``) handles stuck-row rotation + dead-lettering
+# so retry policy lives in ONE place.
 #
 # supabase-py is not transactional (see :mod:`services.atomic_inserts` for the
-# same accepted constraint), so "same transaction" here is the worker's practical
-# equivalent: the outbox INSERT is the LAST write in the handler, after the state
-# change has landed. The ``idempotency_key`` UNIQUE constraint (migration 0023)
-# is the exactly-once backstop -- a re-run of the same recorder (the operator
-# retries the call) finds the row already enqueued and does not double-enqueue,
-# so the side effect fires once even though the recorder ran twice.
-
-
-def enqueue_outbox(
-    *,
-    integration: str,
-    op: str,
-    idempotency_key: str,
-    request: dict[str, Any],
-    pipeline_id: str | None = None,
-) -> bool:
-    """Enqueue one ``integration_outbox`` row, idempotent on ``idempotency_key``.
-
-    Returns True when a new row was enqueued, False when an identical key already
-    exists (a recorder re-run) -- so the side effect is enqueued exactly once
-    regardless of how many times the recorder is replayed. A duplicate-key INSERT
-    that races past the probe is caught + treated as already-enqueued, so two
-    concurrent recorders never both create the side effect.
-    """
-    sb = get_supabase_admin()
-    existing = (
-        sb.table("integration_outbox")
-        .select("id")
-        .eq("idempotency_key", idempotency_key)
-        .maybe_single()
-        .execute()
-    )
-    if existing is not None and isinstance(existing.data, dict):
-        log.info("outbox_enqueue_deduped", idempotency_key=idempotency_key, op=op)
-        return False
-    try:
-        sb.table("integration_outbox").insert(
-            {
-                "pipeline_id": pipeline_id,
-                "integration": integration,
-                "op": op,
-                "idempotency_key": idempotency_key,
-                "request": request,
-                "status": "pending",
-            }
-        ).execute()
-    except Exception as exc:  # noqa: BLE001 -- a unique-key race == already enqueued
-        log.info(
-            "outbox_enqueue_conflict",
-            idempotency_key=idempotency_key,
-            op=op,
-            error=str(exc),
-        )
-        return False
-    log.info("outbox_enqueued", idempotency_key=idempotency_key, integration=integration, op=op)
-    return True
+# same accepted constraint), so "same transaction" here is the worker's
+# practical equivalent: the work_item INSERT is the LAST write in the handler,
+# after the state change has landed. The ``idempotency_key`` UNIQUE constraint
+# on ``work_item`` is the exactly-once backstop -- a re-run of the same
+# recorder (the operator retries the call) finds the row already enqueued and
+# ``enqueue_work_item`` returns the existing row instead of inserting a
+# duplicate.
+#
+# Silent-failure PR-4: the legacy local ``enqueue_outbox`` helper (which wrote
+# to ``_legacy_integration_outbox`` -- a table with no consumer after the
+# ``outbox_relay`` deletion) is gone. Producers below now call
+# :func:`services.work_queue.enqueue_work_item` directly.
 
 
 # ===========================================================================
@@ -382,13 +342,12 @@ async def record_launch(body: LaunchInput) -> dict[str, Any]:
     # (5) Enqueue the durable Meta launch follow-through in the SAME handler as
     # the state change (the recorder above). Keyed on the pipeline + recorded
     # entity graph so a re-recorded launch (operator retry) does not double-
-    # enqueue. The relay performs the exactly-once side effect + retries it.
-    enqueue_outbox(
-        integration="meta",
-        op="record_launch",
-        idempotency_key=_launch_idempotency_key(body.pipeline_id, recorded),
+    # enqueue. The outbox_consumer drains + the watchdog retries.
+    enqueue_work_item(
+        get_supabase_admin(),
+        kind="outbox_meta_record_launch",
         pipeline_id=body.pipeline_id,
-        request={
+        payload={
             "pipeline_id": body.pipeline_id,
             "approved_by": body.approved_by,
             "launch_package_id": body.launch_package_id,
@@ -398,6 +357,8 @@ async def record_launch(body: LaunchInput) -> dict[str, Any]:
                 for e in recorded
             ],
         },
+        idempotency_key=_launch_idempotency_key(body.pipeline_id, recorded),
+        created_by="worker.integrations.record_launch",
     )
 
     emit_pipeline_event(
@@ -596,17 +557,18 @@ async def finalize_drive(body: FinalizeDriveInput) -> dict[str, Any]:
 
     # Enqueue the durable Drive finalize follow-through in the same handler as the
     # creative stamps above. Keyed on the pipeline + the verified asset set so a
-    # re-finalize (operator retry) does not double-enqueue; the relay performs the
-    # exactly-once side effect + retries it.
-    enqueue_outbox(
-        integration="drive",
-        op="finalize_verified",
-        idempotency_key=_finalize_idempotency_key(body.pipeline_id, recorded),
+    # re-finalize (operator retry) does not double-enqueue; the outbox_consumer
+    # drains + the watchdog retries.
+    enqueue_work_item(
+        get_supabase_admin(),
+        kind="outbox_drive_finalize_verified",
         pipeline_id=body.pipeline_id,
-        request={
+        payload={
             "pipeline_id": body.pipeline_id,
             "assets": recorded,
         },
+        idempotency_key=_finalize_idempotency_key(body.pipeline_id, recorded),
+        created_by="worker.integrations.finalize_drive",
     )
 
     emit_pipeline_event(

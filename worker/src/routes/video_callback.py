@@ -48,6 +48,7 @@ from ..services.kie_video import (
     WEBHOOK_SIGNATURE_HEADER,
     WEBHOOK_TIMESTAMP_HEADER,
     KieVideoClient,
+    kie_render_idempotency_key,
 )
 from ..supabase_client import get_supabase_admin
 
@@ -58,7 +59,11 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-RENDER_TASKS_TABLE = "video_render_tasks"
+# Silent-failure PR-4 / migration 0051: the table was renamed to
+# ``_legacy_video_render_tasks``. Kie video renders are not yet on the
+# ``work_item`` queue, so the callback receiver keeps resolving rows from
+# the renamed table. TODO(follow-up issue): migrate to work_item.
+RENDER_TASKS_TABLE = "_legacy_video_render_tasks"
 
 
 class KieCallbackBody(BaseModel):
@@ -163,6 +168,56 @@ def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> No
             "completed_at": _now_iso(),
         }
     ).eq("task_id", task_id).execute()
+    # Silent-failure PR-4: also close the work_item(kind='kie_video_render').
+    # Idempotency-key targeted UPDATE so the same task_id always resolves the
+    # one canonical row (even if a duplicate enqueue ever raced past the
+    # UNIQUE backstop). Best-effort -- a closure failure must not 5xx the
+    # callback (kie retries on a 5xx), the watchdog will sweep the row.
+    try:
+        sb.table("work_item").update(
+            {
+                "status": "completed",
+                "completed_at": _now_iso(),
+                "result": {"result_url": result_url, "clip_id": clip_id},
+                "claim_token": None,
+                "claimed_by": None,
+                "claimed_at": None,
+            }
+        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).execute()
+    except Exception as exc:  # noqa: BLE001 -- watchdog sweeps unclosed rows
+        log.warning(
+            "kie_callback_work_item_close_failed",
+            task_id=task_id,
+            error=str(exc),
+        )
+
+
+def _mark_work_item_failed(task_id: str, *, error: str) -> None:
+    """Close the work_item(kind='kie_video_render') as failed for a kie failure.
+
+    Silent-failure PR-4 mirror of the legacy table's failure stamp. Best-effort
+    -- a closure failure must not 5xx the callback; the watchdog sweeps any
+    unclosed rows past the heartbeat threshold.
+    """
+    sb = get_supabase_admin()
+    try:
+        sb.table("work_item").update(
+            {
+                "status": "failed",
+                "completed_at": _now_iso(),
+                "error_kind": "kie_render_failed",
+                "error_detail": {"message": error},
+                "claim_token": None,
+                "claimed_by": None,
+                "claimed_at": None,
+            }
+        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).execute()
+    except Exception as exc:  # noqa: BLE001 -- watchdog sweeps unclosed rows
+        log.warning(
+            "kie_callback_work_item_fail_failed",
+            task_id=task_id,
+            error=str(exc),
+        )
 
 
 @router.post("/work/video/kie-callback")
@@ -224,13 +279,15 @@ async def kie_video_callback(
     sb = get_supabase_admin()
     state = _callback_state(payload)
     if state == "failed":
+        error_msg = _callback_error(payload)
         sb.table(RENDER_TASKS_TABLE).update(
             {
                 "status": "failed",
-                "error": _callback_error(payload),
+                "error": error_msg,
                 "completed_at": _now_iso(),
             }
         ).eq("task_id", task_id).execute()
+        _mark_work_item_failed(task_id, error=error_msg)
         log.info("kie_callback_failed", task_id=task_id)
         return {"ok": True, "deduped": False, "task_id": task_id, "status": "failed"}
 
@@ -281,4 +338,11 @@ def _callback_error(payload: dict[str, Any]) -> str:
     )
 
 
-__all__ = ["router", "KieCallbackBody", "kie_video_callback", "RENDER_TASKS_TABLE"]
+__all__ = [
+    "router",
+    "KieCallbackBody",
+    "kie_video_callback",
+    "RENDER_TASKS_TABLE",
+    "_mark_completed",
+    "_mark_work_item_failed",
+]

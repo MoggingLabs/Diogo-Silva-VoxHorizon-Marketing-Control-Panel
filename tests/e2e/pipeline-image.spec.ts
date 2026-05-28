@@ -206,14 +206,14 @@ test.describe("pipeline — image format", () => {
       timeout: 20_000,
     });
 
-    // Verify the post-update row carries `status='done'` server-side too.
+    // Verify the post-update derived status is 'done' server-side too.
+    // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051);
+    // the canonical answer comes from `compute_pipeline_status(id)`.
     const admin = getTestAdminClient();
-    const { data: finalPipeline } = await admin
-      .from("pipelines")
-      .select("status, advanced_at")
-      .eq("id", pipelineId)
-      .maybeSingle();
-    expect(finalPipeline?.status).toBe("done");
+    const { data: derivedStatus } = await admin.rpc("compute_pipeline_status", {
+      p_pipeline_id: pipelineId,
+    });
+    expect(derivedStatus).toBe("done");
 
     // -----------------------------------------------------------------
     // Step 9. Done stage assertions — gallery + launch CTA visible.

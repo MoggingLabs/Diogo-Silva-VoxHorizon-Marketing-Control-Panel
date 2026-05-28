@@ -91,8 +91,12 @@ test.describe("image launch package", () => {
     await expect(approveBtn).toBeVisible();
     await approveBtn.click();
 
+    // Mirrors the launch-video equivalent: the router.refresh() re-render of
+    // the Supabase-heavy launch detail page can exceed 15s on a busy CI
+    // runner (especially on a re-run where the runner is already warm with
+    // images). 30s removes the flake without masking a real hang.
     await expect(page.getByText("Approved", { exact: true })).toBeVisible({
-      timeout: 15_000,
+      timeout: 30_000,
     });
     // Gate disappears after a non-posted transition.
     await expect(page.getByRole("button", { name: /^approve$/i })).toHaveCount(0);
@@ -105,16 +109,21 @@ test.describe("image launch package", () => {
     await page.goto(`/launches/${launchId}`);
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
-    // Click without notes — client-side validation blocks the submit.
+    // Click without notes -- client-side validation blocks the submit. The
+    // gate renders the error inside a role=alert region, but Next's
+    // __next-route-announcer__ ALSO carries role=alert, so a bare
+    // page.getByRole("alert") is a strict-mode violation. Scope the locator
+    // to the gate's own region by anchoring on its required-notes text.
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByRole("alert")).toContainText(/notes are required/i);
+    const gateAlert = page.getByRole("alert").filter({ hasText: /notes are required/i });
+    await expect(gateAlert).toBeVisible();
     // Status unchanged.
     await expect(page.getByText("Posted", { exact: true })).toBeVisible();
 
-    // Provide notes and retry — the launch flips to approved_with_changes.
+    // Provide notes and retry -- the launch flips to approved_with_changes.
     await page.getByLabel(/notes/i).fill("Adjust the body copy then ship.");
     await page.getByRole("button", { name: /approve with changes/i }).click();
-    await expect(page.getByText(/Approved with changes/i)).toBeVisible({
+    await expect(page.getByText(/Approved with changes/i).first()).toBeVisible({
       timeout: 15_000,
     });
   });

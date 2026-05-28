@@ -226,6 +226,29 @@ class _PipelineSupabase:
     def storage(self) -> "_PipelineStorage":
         return _PipelineStorage(self)
 
+    def rpc(self, name: str, _params: dict) -> "_PipelineRpc":
+        """Silent-failure PR-4: ``compute_pipeline_status`` is the canonical
+        status source after migration 0051. The fake folds the existing
+        ``pipeline_row.status`` field into the RPC response so tests that set
+        ``pipeline_row['status']`` keep working without seeding a parallel
+        rpc table.
+        """
+        status = None
+        if isinstance(self.pipeline_row, dict):
+            status = self.pipeline_row.get("status")
+        return _PipelineRpc(status if name == "compute_pipeline_status" else None)
+
+
+class _PipelineRpc:
+    """Minimal RPC surface so tests using ``_PipelineSupabase`` exercise the
+    new derived-status read path. ``execute()`` returns the canned status."""
+
+    def __init__(self, status: object) -> None:
+        self._status = status
+
+    def execute(self) -> SimpleNamespace:
+        return SimpleNamespace(data=self._status)
+
 
 class _PipelineTable:
     def __init__(self, sb: _PipelineSupabase, name: str) -> None:

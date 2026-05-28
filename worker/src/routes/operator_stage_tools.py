@@ -38,9 +38,11 @@ Endpoints (all bearer-authed):
       on the daily-unique index (skip a row already pulled today).
 
   POST /work/pipeline/tools/signal
-      Write/close an ``operator_dispatches`` row: a fresh ``dispatched`` row, a
-      ``running`` heartbeat, or a terminal close (completed/failed/timed_out).
-      Idempotent on ``unique(pipeline_id, dispatch_id)``.
+      Record one operator dispatch signal on the unified ``work_item`` queue
+      (kind ``operator_dispatch``): a fresh ``dispatched`` row, a ``running``
+      heartbeat, or a terminal close (completed/failed/timed_out). Idempotent
+      on ``(pipeline_id, dispatch_id, status)`` via the work_item idempotency
+      key.
 
 NOT here (other agents own them): ``/work/pipeline/tools/{qa_run,compliance_run}``
 (the qa_compliance route module — the worker adjudicates QA/compliance there)
@@ -908,16 +910,15 @@ def _already_pulled_today(
 class SignalInput(BaseModel):
     """POST body for ``/work/pipeline/tools/signal`` — dispatch tracking/heartbeat.
 
-    ``status`` drives the lifecycle of an ``operator_dispatches`` row:
+    ``status`` drives the lifecycle signal recorded on the ``work_item`` queue
+    (kind ``operator_dispatch``):
 
-      * ``dispatched`` — open a fresh row (the operator acknowledges a kick).
-      * ``running``    — heartbeat: stamp ``last_heartbeat_at`` (the watchdog
-        treats a recent heartbeat as healthy).
-      * ``completed`` / ``failed`` / ``timed_out`` — terminal close: stamp
-        ``completed_at`` so the watchdog never re-dispatches it.
+      * ``dispatched`` — open a fresh signal (the operator acknowledges a kick).
+      * ``running``    — heartbeat signal (the operator is still working).
+      * ``completed`` / ``failed`` / ``timed_out`` — terminal close signal.
 
     ``stale``/``waiting``/``partial``/``error`` (operator narration verbs from
-    the SKILL) map onto these DB states: ``stale``→``completed`` (a no-op
+    the SKILL) map onto these states: ``stale``→``completed`` (a no-op
     dispatch is done), ``waiting``/``partial``→``running`` (still working, the
     workflow advances on the manager's gate), ``error``→``failed``.
     """
@@ -942,7 +943,8 @@ class SignalInput(BaseModel):
     error: str | None = None
 
 
-#: Operator narration verbs → the DB ``operator_dispatches.status`` enum values.
+#: Operator narration verbs → the resolved dispatch status the work_item
+#: signal records (kept as the DB string the dashboard surfaces).
 _SIGNAL_DB_STATUS = {
     "dispatched": "dispatched",
     "running": "running",
@@ -959,39 +961,36 @@ _SIGNAL_DB_STATUS = {
 _TERMINAL_DISPATCH = {"completed", "failed", "timed_out"}
 
 
-def _existing_dispatch(
-    sb: Any, *, pipeline_id: str, dispatch_id: str
-) -> dict[str, Any] | None:
-    """Return the existing operator_dispatches row for the unique key, or None."""
-    resp = (
-        sb.table("operator_dispatches")
-        .select("id, status")
-        .eq("pipeline_id", pipeline_id)
-        .eq("dispatch_id", dispatch_id)
-        .maybe_single()
-        .execute()
-    )
-    return resp.data if (resp is not None and isinstance(resp.data, dict)) else None
-
-
 @router.post("/work/pipeline/tools/signal", dependencies=[Depends(verify_secret)])
 async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
-    """Open, heartbeat, or close an ``operator_dispatches`` row.
+    """Record one operator dispatch lifecycle signal on the audit log.
 
-    The completion/health channel for the (today blind) fire-and-forget
-    dispatch: the operator calls this last on every dispatch so the workflow
-    knows it landed and the watchdog does not re-dispatch a healthy stage.
-    Idempotent on ``unique(pipeline_id, dispatch_id)`` — a repeated signal
-    updates the same row. Returns the resolved DB status.
+    Silent-failure PR-4: the legacy ``operator_dispatches`` table (renamed
+    ``_legacy_operator_dispatches`` by 0051) was BOTH a work queue and an
+    audit trail. The operator-daemon now owns the dispatch *work* lifecycle
+    natively (claims `work_item(kind='operator_dispatch')`, runs hermes,
+    PATCHes terminal status). The operator-skill's narration verbs
+    (`dispatched`/`running`/`completed`/`failed`/`stale`/`waiting`/`partial`/
+    `error`/`timed_out`) are AUDIT EVENTS -- not work units -- so this route
+    records them as `pipeline_events` rows with `kind='operator_signal'`.
+    Treating them as `work_item(kind='operator_dispatch')` would cause the
+    daemon to re-claim each signal and spawn an empty hermes chat, which is
+    the silent-failure class the redesign exists to eliminate.
+
+    Append-only: a repeated signal is a repeated audit entry. The response
+    shape preserves `dispatch_id` + resolved DB `status` + `terminal` for the
+    operator skill; `event_id` replaces the prior `dispatch_row_id`.
     """
     _require_pipeline(body.pipeline_id)
-    sb = get_supabase_admin()
     db_status = _SIGNAL_DB_STATUS[body.status]
-    now = _now_iso()
+    stage = body.stage or "configuration"
 
-    payload: dict[str, Any] = {"status": db_status, "last_heartbeat_at": now}
-    if body.stage is not None:
-        payload["stage"] = body.stage
+    payload: dict[str, Any] = {
+        "dispatch_id": body.dispatch_id,
+        "signal": body.status,
+        "db_status": db_status,
+        "terminal": db_status in _TERMINAL_DISPATCH,
+    }
     if body.expected_status is not None:
         payload["expected_status"] = body.expected_status
     if body.exec_id is not None:
@@ -1000,30 +999,13 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
         payload["summary"] = body.summary
     if body.error is not None:
         payload["error"] = body.error
-    if db_status in _TERMINAL_DISPATCH:
-        payload["completed_at"] = now
 
-    existing = _existing_dispatch(
-        sb, pipeline_id=body.pipeline_id, dispatch_id=body.dispatch_id
+    event_id = emit_pipeline_event(
+        pipeline_id=body.pipeline_id,
+        kind="operator_signal",
+        stage=stage,
+        payload=payload,
     )
-    if existing is not None:
-        sb.table("operator_dispatches").update(payload).eq(
-            "id", existing["id"]
-        ).execute()
-        dispatch_row_id = existing["id"]
-    else:
-        # A first signal with no prior row: open it. `stage` is NOT NULL on the
-        # table, so default to the pipeline cursor when the operator omits it.
-        insert_row = {
-            "pipeline_id": body.pipeline_id,
-            "dispatch_id": body.dispatch_id,
-            "stage": body.stage or "configuration",
-            **payload,
-        }
-        created = sb.table("operator_dispatches").insert(insert_row).execute().data
-        dispatch_row_id = (
-            created[0]["id"] if isinstance(created, list) and created else None
-        )
 
     log.info(
         "operator_signal",
@@ -1031,12 +1013,13 @@ async def signal_dispatch(body: SignalInput) -> dict[str, Any]:
         dispatch_id=body.dispatch_id,
         signal=body.status,
         db_status=db_status,
+        event_id=event_id,
     )
     return {
         "ok": True,
         "dispatch_id": body.dispatch_id,
         "status": db_status,
-        "dispatch_row_id": dispatch_row_id,
+        "event_id": event_id,
         "terminal": db_status in _TERMINAL_DISPATCH,
     }
 

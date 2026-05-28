@@ -2,18 +2,23 @@
 
 Covers the endpoints on the pipeline-tools router:
 
-  * GET  /work/pipeline/tools/{pipeline_id} — read shape + compact client
+  * GET  /work/pipeline/tools/{pipeline_id} -- read shape + compact client
                                               enrichment.
-  * GET  /work/client/{client_id}           — client-context shape + 404.
-  * POST /work/pipeline/tools/brief         — validate + upsert + event.
-  * POST /work/pipeline/tools/render        — events + cost + creatives,
+  * GET  /work/client/{client_id}           -- client-context shape + 404.
+  * POST /work/pipeline/tools/brief         -- validate + upsert + event.
+  * POST /work/pipeline/tools/render        -- events + cost + creatives,
                                               per-item error handling.
-  * POST /work/pipeline/tools/dispatch      — builds the right argv (the
-                                              operator bridge is mocked).
+
+Silent-failure PR-4: the legacy `/work/pipeline/tools/dispatch` route + the
+`operator_bridge` module it called are deleted. Operator dispatches now ride
+the unified `work_item` queue (kind=operator_dispatch); the dashboard
+enqueues via `lib/work-queue/enqueue.ts` synchronously and gets a 5xx on
+failure -- the silent-failure class the bridge swallowed is structurally
+closed.
 
 Mirrors the test conventions in ``test_pipeline_route.py`` (a narrow
 Supabase + Kie double, background tasks run synchronously by the
-TestClient) and ``test_hermes_bridge.py`` (a MagicMock docker client).
+TestClient).
 """
 
 from __future__ import annotations
@@ -43,16 +48,13 @@ def _env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-api-key")
 
     from src.config import get_settings
-    from src.services.operator_bridge import reset_operator_bridge
     from src.services.queue import reset_queue
 
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
     yield
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +99,16 @@ class _ToolsSupabase:
 
     def rpc(self, fn: str, params: dict) -> "_ToolsRpc":
         self.rpc_calls.append((fn, params))
+        # Silent-failure PR-4: ``compute_pipeline_status`` (migration 0050) is
+        # the canonical pipeline-status source after 0051 dropped the column.
+        # The fake folds the pipeline_row's ``status`` field into the RPC
+        # response so existing tests keep their `pipeline_row['status']`
+        # seeds without growing a parallel rpc fixture.
+        if fn == "compute_pipeline_status":
+            status = None
+            if isinstance(self.pipeline_row, dict):
+                status = self.pipeline_row.get("status")
+            return _ToolsRpc(status)
         return _ToolsRpc(self.rpc_return)
 
     @property
@@ -1524,99 +1536,7 @@ def test_store_creative_400_when_no_brief(
     assert resp.status_code == 400
 
 
-# ===========================================================================
-# POST /work/pipeline/tools/dispatch
-# ===========================================================================
-
-
-def test_dispatch_requires_auth(client: TestClient) -> None:
-    resp = client.post("/work/pipeline/tools/dispatch", json={})
-    assert resp.status_code == 401
-
-
-def test_dispatch_builds_argv_and_returns_immediately(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """dispatch schedules the operator exec with the right argv + session id."""
-    from src.services import operator_bridge
-
-    # Mock docker so the bridge's fire-and-forget exec hits a fake daemon.
-    api = MagicMock()
-    api.exec_create.return_value = {"Id": "exec-xyz"}
-    api.exec_start.return_value = iter([b"narration..."])
-    docker_client = MagicMock()
-    docker_client.api = api
-
-    # Force a fresh bridge bound to our fake docker client.
-    operator_bridge.reset_operator_bridge()
-    bridge = operator_bridge.OperatorBridge(
-        container_name="hermes-agent-operator", client=docker_client
-    )
-    monkeypatch.setattr(
-        operator_bridge, "get_operator_bridge", lambda: bridge
-    )
-    from src.routes import pipeline_tools
-
-    monkeypatch.setattr(
-        pipeline_tools, "get_operator_bridge", lambda: bridge
-    )
-
-    resp = client.post(
-        "/work/pipeline/tools/dispatch",
-        headers=_auth(),
-        json={
-            "pipeline_id": "p-42",
-            "instruction": "author concepts for pipeline p-42",
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json() == {"ok": True, "dispatched": True}
-
-    # The TestClient runs the BackgroundTask after the response, so the
-    # exec has been created by now. No --pass-session-id: it's a boolean flag
-    # on the Hermes CLI, and the operator is stateless per dispatch (the
-    # pipeline id rides in the instruction).
-    args, kwargs = api.exec_create.call_args
-    assert args[0] == "hermes-agent-operator"
-    assert args[1] == [
-        "hermes",
-        "chat",
-        "-q",
-        "author concepts for pipeline p-42",
-        "--max-turns",
-        "40",
-    ]
-    assert kwargs == {"stdout": True, "stderr": True, "tty": False}
-    # stdout was drained to completion.
-    api.exec_start.assert_called_once_with("exec-xyz", stream=True)
-
-
-def test_dispatch_swallows_bridge_error(
-    client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A docker NotFound surfaces as a logged warning, not a 500."""
-    import docker.errors
-
-    from src.services import operator_bridge
-
-    api = MagicMock()
-    api.exec_create.side_effect = docker.errors.NotFound("no container")
-    docker_client = MagicMock()
-    docker_client.api = api
-
-    bridge = operator_bridge.OperatorBridge(client=docker_client)
-    from src.routes import pipeline_tools
-
-    monkeypatch.setattr(
-        pipeline_tools, "get_operator_bridge", lambda: bridge
-    )
-
-    resp = client.post(
-        "/work/pipeline/tools/dispatch",
-        headers=_auth(),
-        json={"pipeline_id": "p-1", "instruction": "go"},
-    )
-    # The endpoint returns before the background task runs; the task's
-    # OperatorBridgeError is caught and logged.
-    assert resp.status_code == 200
-    assert resp.json()["dispatched"] is True
+# Silent-failure PR-4: the legacy `POST /work/pipeline/tools/dispatch` route
+# was deleted along with the `operator_bridge` module it called. The
+# operator-daemon claims operator_dispatch work_items from the unified queue
+# instead, so these tests are gone.

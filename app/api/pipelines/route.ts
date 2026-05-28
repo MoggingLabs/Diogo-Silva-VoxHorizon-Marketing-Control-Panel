@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { hydratePipelineStatus, hydratePipelineStatusMany } from "@/lib/pipeline/derived-status";
 import {
   CreatePipelineInput,
   ListPipelinesQuery,
@@ -49,6 +50,28 @@ export async function GET(req: NextRequest) {
   const archived = archivedRaw === "true" || archivedRaw === "1";
 
   const supabase = createAdminClient();
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051). When
+  // the caller filters by `?status=<stage>`, we read derived_status from
+  // `v_pipeline_dispatch_state` and INTERSECT with the pipelines page below.
+  // Otherwise we read the pipelines table directly and hydrate status per row.
+  let filteredIds: Set<string> | null = null;
+  if (status) {
+    const { data: vRows, error: vErr } = await supabase
+      .from("v_pipeline_dispatch_state")
+      .select("pipeline_id, derived_status")
+      .eq("derived_status", status);
+    if (vErr) {
+      return NextResponse.json({ error: vErr.message }, { status: 500 });
+    }
+    filteredIds = new Set(
+      (vRows ?? []).map((r) => r.pipeline_id).filter((id): id is string => typeof id === "string"),
+    );
+    // No matches -- early return with an empty page.
+    if (filteredIds.size === 0) {
+      return NextResponse.json({ pipelines: [], next_cursor: null });
+    }
+  }
+
   let query = supabase
     .from("pipelines")
     .select("*")
@@ -63,7 +86,9 @@ export async function GET(req: NextRequest) {
     query = query.is("deleted_at", null);
   }
 
-  if (status) query = query.eq("status", status);
+  if (filteredIds) {
+    query = query.in("id", Array.from(filteredIds));
+  }
   if (client_id) query = query.eq("client_id", client_id);
   if (cursor) query = query.lt("created_at", cursor);
 
@@ -72,8 +97,11 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: error.message }, { status: 500 });
   }
   const rows = data ?? [];
+  // Hydrate `status` per row from the reducer so the list page (and every API
+  // client) sees the same Pipeline shape it did before the column was dropped.
+  const enriched = await hydratePipelineStatusMany(supabase, rows);
   const next_cursor = rows.length === limit ? (rows[rows.length - 1]?.created_at ?? null) : null;
-  return NextResponse.json({ pipelines: rows, next_cursor });
+  return NextResponse.json({ pipelines: enriched, next_cursor });
 }
 
 /**
@@ -143,5 +171,8 @@ export async function POST(req: NextRequest) {
     console.warn(`[pipelines.create] event insert failed: ${evErr.message}`);
   }
 
-  return NextResponse.json({ pipeline }, { status: 201 });
+  // Silent-failure PR-4: hydrate `status` from the reducer (the seed
+  // `stage_advanced` event we just inserted resolves to 'configuration').
+  const enriched = await hydratePipelineStatus(supabase, pipeline);
+  return NextResponse.json({ pipeline: enriched }, { status: 201 });
 }

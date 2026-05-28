@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 
 import { operatorInstruction } from "@/lib/operator/dispatch";
+import { hydratePipelineStatus } from "@/lib/pipeline/derived-status";
 import { type PipelineInsert } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
@@ -142,5 +143,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: `work_item enqueue failed: ${String(e)}` }, { status: 500 });
   }
 
-  return NextResponse.json({ pipeline }, { status: 201 });
+  // Silent-failure PR-4: hydrate `status` from the reducer. The work_item
+  // enqueue above fires the auto-emit trigger that writes the seed
+  // `stage_advanced`/`operator_dispatched` events; the reducer resolves to
+  // 'configuration' as the most recent stage_advanced target.
+  const enriched = await hydratePipelineStatus(supabase, pipeline);
+  return NextResponse.json({ pipeline: enriched }, { status: 201 });
 }

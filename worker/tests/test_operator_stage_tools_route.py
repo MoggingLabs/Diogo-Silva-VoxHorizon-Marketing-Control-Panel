@@ -621,6 +621,10 @@ def test_monitor_routes_video_pipeline_to_campaign_perf_video(
 # ===========================================================================
 
 
+def _signal_event_inserts(sb: FakeSupabase) -> list[dict[str, object]]:
+    return [r for t, r in sb.inserts if t == "pipeline_events"]
+
+
 def test_signal_opens_dispatch_row(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
@@ -640,13 +644,21 @@ def test_signal_opens_dispatch_row(
     body = resp.json()
     assert body["status"] == "running"
     assert body["terminal"] is False
-    inserted = [r for t, r in stage_sb.inserts if t == "operator_dispatches"]
-    assert inserted and inserted[0]["status"] == "running"
+    # Silent-failure PR-4: the signal lands on the pipeline_events audit log,
+    # NOT on the work_item queue. Treating signals as work_items would cause
+    # the operator-daemon to re-claim every audit entry and spawn an empty
+    # hermes chat -- the silent-failure class the redesign exists to close.
+    inserted = _signal_event_inserts(stage_sb)
+    assert inserted and inserted[0]["kind"] == "operator_signal"
     assert inserted[0]["stage"] == "copy"
-    assert "last_heartbeat_at" in inserted[0]
+    assert inserted[0]["payload"]["db_status"] == "running"
+    assert inserted[0]["payload"]["signal"] == "running"
+    assert inserted[0]["payload"]["dispatch_id"] == "d-1"
+    # Negative: no work_item was enqueued.
+    assert [r for t, r in stage_sb.inserts if t == "work_item"] == []
 
 
-def test_signal_terminal_close_stamps_completed_at(
+def test_signal_terminal_close_marks_terminal_payload(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
     stage_sb.set_single("pipelines", _pipeline_row())
@@ -659,8 +671,9 @@ def test_signal_terminal_close_stamps_completed_at(
     body = resp.json()
     assert body["status"] == "completed"
     assert body["terminal"] is True
-    inserted = [r for t, r in stage_sb.inserts if t == "operator_dispatches"]
-    assert "completed_at" in inserted[0]
+    inserted = _signal_event_inserts(stage_sb)
+    assert inserted and inserted[0]["payload"]["terminal"] is True
+    assert inserted[0]["kind"] == "operator_signal"
 
 
 def test_signal_stale_maps_to_completed(
@@ -690,25 +703,28 @@ def test_signal_error_maps_to_failed(
     assert body["terminal"] is True
 
 
-def test_signal_idempotent_updates_existing_row(
+def test_signal_is_append_only_audit(
     client: TestClient, stage_sb: FakeSupabase
 ) -> None:
+    """A repeated signal lands as a repeated audit entry (no de-dup).
+
+    Signals are AUDIT events, not work units -- a repeated narration verb
+    from the operator skill is a legitimate second audit entry, not a
+    duplicate to suppress. Idempotency would be wrong semantics here.
+    """
     stage_sb.set_single("pipelines", _pipeline_row())
-    stage_sb.seed(
-        "operator_dispatches",
-        [{"id": "od-1", "pipeline_id": "p-1", "dispatch_id": "d-5", "status": "dispatched"}],
-    )
-    resp = client.post(
-        "/work/pipeline/tools/signal",
-        headers=_auth(),
-        json={"pipeline_id": "p-1", "dispatch_id": "d-5", "status": "completed", "stage": "copy"},
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["dispatch_row_id"] == "od-1"
-    # Updated in place, not a duplicate insert.
-    assert all(t != "operator_dispatches" for t, _ in stage_sb.inserts)
-    updated = [r for t, r in stage_sb.updates if t == "operator_dispatches"]
-    assert updated and updated[0]["status"] == "completed"
+    for _ in range(2):
+        resp = client.post(
+            "/work/pipeline/tools/signal",
+            headers=_auth(),
+            json={"pipeline_id": "p-1", "dispatch_id": "d-5", "status": "completed", "stage": "copy"},
+        )
+        assert resp.status_code == 200, resp.text
+    inserted = _signal_event_inserts(stage_sb)
+    assert len(inserted) == 2
+    # Both entries have the same payload shape; both are operator_signal.
+    assert all(r["kind"] == "operator_signal" for r in inserted)
+    assert all(r["payload"]["dispatch_id"] == "d-5" for r in inserted)
 
 
 def test_signal_422_on_bad_status(

@@ -1,6 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { z } from "zod";
 
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { activeTracksLocal } from "@/lib/pipeline/transitions";
 import type { PipelineEventInsert, PipelineUpdate } from "@/lib/pipeline/schemas";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -88,7 +89,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
 
   const { data: pipeline, error: readErr } = await supabase
     .from("pipelines")
-    .select("id, status, format_choice, picks, image_brief_id, video_brief_id")
+    .select("id, format_choice, picks, image_brief_id, video_brief_id")
     .eq("id", id)
     .maybeSingle();
   if (readErr) {
@@ -98,12 +99,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
 
-  // Status guard -- only the ideation stage may record picks.
-  if (pipeline.status !== "ideation") {
+  // Silent-failure PR-4: read the derived status from the reducer
+  // (`pipelines.status` was dropped in 0051). Only the ideation stage may
+  // record picks.
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "ideation") {
     return NextResponse.json(
       {
         error: "picks_locked",
-        current_status: pipeline.status,
+        current_status: derivedStatus,
       },
       { status: 409 },
     );
@@ -219,19 +223,28 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   const update: PipelineUpdate = {
     picks: nextPicks as unknown as Json,
   };
+  // Silent-failure PR-4: the `.eq("status", "ideation")` CAS guard was removed
+  // (`pipelines.status` was dropped in 0051). The picks write happens; if a
+  // concurrent advance fired an event mid-flight the worst-case is a pick
+  // landing for a pipeline that just transitioned -- we re-read derived
+  // status after the write and reject if it raced past ideation.
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    // Re-assert the status guard at write time so a concurrent advance
-    // can't race past our pre-check.
-    .eq("status", "ideation")
     .select()
     .single();
   if (updateErr || !updated) {
     return NextResponse.json(
       { error: updateErr?.message ?? "picks update failed" },
       { status: 500 },
+    );
+  }
+  const postWriteStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (postWriteStatus !== "ideation") {
+    return NextResponse.json(
+      { error: "picks_locked", current_status: postWriteStatus },
+      { status: 409 },
     );
   }
 

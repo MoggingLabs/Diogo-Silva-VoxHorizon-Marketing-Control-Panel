@@ -2,11 +2,13 @@ import { NextResponse, type NextRequest } from "next/server";
 
 import { estimatePipelineCost } from "@/lib/cost-estimator";
 import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import {
   ReviewDecisionInput,
   type PipelineEventInsert,
   type PipelineUpdate,
 } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Json } from "@/lib/supabase/types.gen";
 import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
@@ -76,9 +78,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "review") {
+  // Silent-failure PR-4: read the derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "review") {
     return NextResponse.json(
-      { error: "invalid_state", current: pipeline.status, expected: "review" },
+      { error: "invalid_state", current: derivedStatus, expected: "review" },
       { status: 409 },
     );
   }
@@ -91,20 +96,18 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
 
   // 3. Reject branch -- terminal, no cost snapshot or worker kick.
-  //    Silent-failure PR-3: emit `pipeline_cancelled` strictly so the
+  //    Silent-failure PR-4: emit `pipeline_cancelled` strictly so the
   //    cancel-propagate trigger from migration 0050 fans the cancel out to
-  //    every open work_item; the `pipelines.status` cache is updated
-  //    alongside until PR-4 drops the column.
+  //    every open work_item. `pipelines.status` was dropped (migration 0051);
+  //    the event is the canonical status write.
   if (decision === "rejected") {
     const update: PipelineUpdate = {
-      status: "cancelled",
       approval: approval as unknown as Json,
     };
     const { data: updated, error: updateErr } = await supabase
       .from("pipelines")
       .update(update)
       .eq("id", pipeline.id)
-      .eq("status", "review")
       .select()
       .single();
     if (updateErr || !updated) {
@@ -128,7 +131,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       );
     }
 
-    return NextResponse.json({ pipeline: updated });
+    return NextResponse.json({
+      pipeline: { ...updated, status: "cancelled" as PipelineStatus },
+    });
   }
 
   // 4. Approve / approve_with_changes — compute cost estimate from the live
@@ -153,10 +158,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       : {};
   const nextAdvancedAt = { ...advancedAt, generation: now };
 
-  // Silent-failure PR-3: keep the `pipelines.status` cache update alongside
-  // the (strict) stage_advanced event emission.
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The stage_advanced event below is the canonical status write.
   const update: PipelineUpdate = {
-    status: "generation",
     approval: approval as unknown as Json,
     cost_estimate: estimate as unknown as Json,
     advanced_at: nextAdvancedAt as unknown as Json,
@@ -165,7 +169,6 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     .from("pipelines")
     .update(update)
     .eq("id", pipeline.id)
-    .eq("status", "review")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -235,7 +238,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     }
   }
 
-  return NextResponse.json({ pipeline: updated });
+  return NextResponse.json({
+    pipeline: { ...updated, status: "generation" as PipelineStatus },
+  });
 }
 
 // Silent-failure PR-3 cutover: the legacy `fireWorkerGeneration` fire-and-forget

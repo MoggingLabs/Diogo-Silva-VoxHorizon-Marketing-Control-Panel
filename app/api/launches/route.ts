@@ -10,6 +10,7 @@ import {
   type LaunchPayloadT,
 } from "@/lib/launches";
 import { isOperatorDriven } from "@/lib/operator/dispatch";
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
 import { callWorker, WorkerError } from "@/lib/worker";
@@ -77,7 +78,7 @@ export async function POST(req: NextRequest) {
   if (pipeline_id) {
     const { data: pipelineRow, error: pipelineErr } = await supabase
       .from("pipelines")
-      .select("id, status, launch_package_id, config_draft")
+      .select("id, launch_package_id, config_draft")
       .eq("id", pipeline_id)
       .maybeSingle();
     if (pipelineErr) {
@@ -86,11 +87,14 @@ export async function POST(req: NextRequest) {
     if (!pipelineRow) {
       return NextResponse.json({ error: "pipeline not found" }, { status: 404 });
     }
-    if (pipelineRow.status !== "done") {
+    // Silent-failure PR-4: read derived status from the reducer
+    // (`pipelines.status` was dropped in 0051).
+    const derivedStatus = await getDerivedStatus(supabase, pipelineRow.id);
+    if (derivedStatus !== "done") {
       return NextResponse.json(
         {
           error: "invalid_pipeline_state",
-          current: pipelineRow.status,
+          current: derivedStatus,
           expected: "done",
         },
         { status: 422 },

@@ -199,7 +199,7 @@ def test_metrics_snapshot_counts_outbox_and_dispatches(
     fake_supabase: FakeSupabase,
 ) -> None:
     fake_supabase.seed(
-        "integration_outbox",
+        "_legacy_integration_outbox",
         [
             {"status": "pending"},
             {"status": "pending"},
@@ -210,7 +210,7 @@ def test_metrics_snapshot_counts_outbox_and_dispatches(
         ],
     )
     fake_supabase.seed(
-        "operator_dispatches",
+        "_legacy_operator_dispatches",
         [
             {"status": "dispatched"},
             {"status": "running"},

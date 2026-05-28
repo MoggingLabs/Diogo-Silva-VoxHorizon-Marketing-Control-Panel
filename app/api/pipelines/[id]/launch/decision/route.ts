@@ -1,7 +1,9 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { LaunchDecisionInput } from "@/lib/pipeline/decision-schemas";
 import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
+import type { PipelineStatus } from "@/lib/pipeline/types";
 import { getReviewBundle } from "@/lib/review/fetch";
 import { buildGridRows, launchPreconditions, launchReady } from "@/lib/review/grid";
 import { createAdminClient } from "@/lib/supabase/admin";
@@ -66,9 +68,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   if (!pipeline) {
     return NextResponse.json({ error: "not found" }, { status: 404 });
   }
-  if (pipeline.status !== "launch_handoff") {
+  // Silent-failure PR-4: read derived status from the reducer
+  // (`pipelines.status` was dropped in 0051).
+  const derivedStatus = await getDerivedStatus(supabase, pipeline.id);
+  if (derivedStatus !== "launch_handoff") {
     return NextResponse.json(
-      { error: "invalid_state", current: pipeline.status, expected: "launch_handoff" },
+      { error: "invalid_state", current: derivedStatus, expected: "launch_handoff" },
       { status: 409 },
     );
   }
@@ -86,7 +91,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     if (evErr) {
       console.warn(`[pipelines.launch.decision] event insert failed: ${evErr.message}`);
     }
-    return NextResponse.json({ pipeline, decision });
+    return NextResponse.json({
+      pipeline: { ...pipeline, status: "launch_handoff" as PipelineStatus },
+      decision,
+    });
   }
 
   // Approve: re-derive the preconditions from the live per-creative data. The
@@ -111,15 +119,15 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     !Array.isArray(pipeline.advanced_at)
       ? (pipeline.advanced_at as Record<string, string>)
       : {};
+  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051).
+  // The stage_advanced event below is the canonical status write.
   const update: PipelineUpdate = {
-    status: "monitor",
     advanced_at: { ...advancedAt, monitor: now } as unknown as Json,
   };
   const { data: updated, error: updateErr } = await supabase
     .from("pipelines")
     .update(update)
     .eq("id", id)
-    .eq("status", "launch_handoff")
     .select()
     .single();
   if (updateErr || !updated) {
@@ -145,5 +153,9 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   // gate) before this approval, and the Meta activate step is a separate
   // approval-gated operator MCP action. Advancing to `monitor` here is the
   // committed gate; the operator's own monitor dispatch drives the next stage.
-  return NextResponse.json({ pipeline: updated, decision, preconditions });
+  return NextResponse.json({
+    pipeline: { ...updated, status: "monitor" as PipelineStatus },
+    decision,
+    preconditions,
+  });
 }

@@ -316,7 +316,7 @@ async def test_observability_tick_delivers_alert_on_dead_letters(
 ) -> None:
     """A dead-lettered outbox row makes the observability tick page the channel."""
     sb = _patch_sb
-    sb.seed("integration_outbox", [{"status": "dead"}, {"status": "dead"}])
+    sb.seed("_legacy_integration_outbox", [{"status": "dead"}, {"status": "dead"}])
     result = await scheduler.run_observability_once(_settings())
     # The tick still returns its stuck counts...
     assert result == {"stuck_dispatches": 0, "stuck_outbox": 0}
@@ -343,7 +343,7 @@ async def test_observability_tick_never_raises_on_alert_failure(
 ) -> None:
     """A Slack blow-up inside the tick is swallowed -- the tick still completes."""
     sb = _patch_sb
-    sb.seed("integration_outbox", [{"status": "dead"}])
+    sb.seed("_legacy_integration_outbox", [{"status": "dead"}])
     capture_slack["raise"] = RuntimeError("boom")
     # Must complete normally and return the stuck counts.
     result = await scheduler.run_observability_once(_settings())

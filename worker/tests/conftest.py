@@ -282,6 +282,20 @@ class FakeSupabase:
 
     def rpc(self, fn: str, params: dict[str, Any]) -> _FakeRpc:
         self.rpc_calls.append((fn, dict(params)))
+        # Silent-failure PR-4: ``compute_pipeline_status`` (migration 0050) is
+        # the canonical pipeline-status source after 0051 dropped the column.
+        # The fake folds the pipelines.single_overrides ``status`` field into
+        # the RPC response so existing tests that seed
+        # ``set_single("pipelines", {..., "status": ...})`` keep working
+        # without growing a parallel rpc fixture.
+        if fn == "compute_pipeline_status":
+            pipeline_row = self.single_overrides.get("pipelines")
+            if callable(pipeline_row):
+                pipeline_row = pipeline_row()
+            status: Any = None
+            if isinstance(pipeline_row, dict):
+                status = pipeline_row.get("status")
+            return _FakeRpc(status)
         return _FakeRpc(self.rpc_return)
 
     @property
@@ -311,12 +325,10 @@ def worker_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
     from src.config import get_settings
     from src.routes import health as health_mod
-    from src.services.operator_bridge import reset_operator_bridge
     from src.services.queue import reset_queue
 
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
     health_mod._reset_bridge()
 
     # Pre-seed a fake Hermes bridge so create_app() / the /work/health route
@@ -331,7 +343,6 @@ def worker_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None
 
     get_settings.cache_clear()
     reset_queue()
-    reset_operator_bridge()
     health_mod._reset_bridge()
 
 
