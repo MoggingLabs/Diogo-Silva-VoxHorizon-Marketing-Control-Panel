@@ -6,7 +6,8 @@
  *  - The "no row" idle state.
  *  - The retry-chain collapsible.
  *  - Failure detail (error_kind + truncated msg) on failed/timed_out.
- *  - The Redispatch button is DISABLED + has the PR-2b tooltip text.
+ *  - The Redispatch button is enabled on failed/timed_out, disabled otherwise,
+ *    and its confirm modal POSTs /redispatch + refreshes.
  *  - The Cancel button (reused CancelPipelineButton) is present.
  *  - Heartbeat-staleness derivation.
  */
@@ -56,8 +57,14 @@ vi.mock("@/hooks/useDaemonHealth", () => ({
 
 // CancelPipelineButton makes a fetch on confirm; we don't need to drive it
 // here, we just need it to render so the test asserts the wiring.
+// redispatchWorkItem is the Redispatch action's network call -- mocked so the
+// confirm-flow test can assert it fires with the pipeline id.
+const redispatchMock = vi.fn((_id: string) =>
+  Promise.resolve({ work_item_id: "wi-2", duplicate: false }),
+);
 vi.mock("@/lib/pipeline/client", () => ({
   cancelPipeline: vi.fn(() => Promise.resolve({ pipeline: { id: "p1", status: "cancelled" } })),
+  redispatchWorkItem: (id: string) => redispatchMock(id),
 }));
 
 import { WorkItemPanel, WorkItemPanelSlot } from "./WorkItemPanel";
@@ -268,7 +275,12 @@ describe("WorkItemPanel — freshness + failure + retry chain", () => {
 });
 
 describe("WorkItemPanel — recovery actions", () => {
-  it("renders a DISABLED Redispatch button with a PR-2b tooltip", () => {
+  beforeEach(() => {
+    redispatchMock.mockClear();
+    routerRefresh.mockClear();
+  });
+
+  it("ENABLES Redispatch on a failed row", () => {
     const wi = workItem({
       status: "failed",
       completed_at: "2026-05-26T12:01:00Z",
@@ -280,12 +292,27 @@ describe("WorkItemPanel — recovery actions", () => {
     activeWorkItemState.activeWorkItem = wi;
     render(<WorkItemPanel pipelineId="p1" initialState={makeState(wi)} />);
     const btn = screen.getByTestId("work-item-redispatch");
-    expect(btn).toBeDisabled();
-    expect(btn).toHaveAttribute("aria-label", expect.stringMatching(/PR-2b/));
+    expect(btn).toBeEnabled();
     expect(btn).toHaveAttribute("data-can-redispatch", "yes");
   });
 
-  it("renders the Redispatch button DISABLED even on a running row (PR-2b ships the actual route)", () => {
+  it("ENABLES Redispatch on a timed_out row", () => {
+    const wi = workItem({
+      status: "timed_out",
+      completed_at: "2026-05-26T12:01:00Z",
+      claim_token: null,
+      claimed_by: null,
+      claimed_at: null,
+      error_kind: "heartbeat_timeout",
+    });
+    activeWorkItemState.activeWorkItem = wi;
+    render(<WorkItemPanel pipelineId="p1" initialState={makeState(wi)} />);
+    const btn = screen.getByTestId("work-item-redispatch");
+    expect(btn).toBeEnabled();
+    expect(btn).toHaveAttribute("data-can-redispatch", "yes");
+  });
+
+  it("DISABLES Redispatch on a running row (nothing failed to retry)", () => {
     activeWorkItemState.activeWorkItem = workItem({ status: "running" });
     render(
       <WorkItemPanel
@@ -296,6 +323,45 @@ describe("WorkItemPanel — recovery actions", () => {
     const btn = screen.getByTestId("work-item-redispatch");
     expect(btn).toBeDisabled();
     expect(btn).toHaveAttribute("data-can-redispatch", "no");
+  });
+
+  it("DISABLES Redispatch on a completed row (no failure to retry)", () => {
+    const wi = workItem({
+      status: "completed",
+      completed_at: "2026-05-26T12:01:00Z",
+      claim_token: null,
+      claimed_by: null,
+      claimed_at: null,
+    });
+    activeWorkItemState.activeWorkItem = wi;
+    render(<WorkItemPanel pipelineId="p1" initialState={makeState(wi)} />);
+    const btn = screen.getByTestId("work-item-redispatch");
+    expect(btn).toBeDisabled();
+    expect(btn).toHaveAttribute("data-can-redispatch", "no");
+  });
+
+  it("redispatch confirm POSTs the route + refreshes", async () => {
+    const user = userEvent.setup();
+    const wi = workItem({
+      status: "failed",
+      completed_at: "2026-05-26T12:01:00Z",
+      claim_token: null,
+      claimed_by: null,
+      claimed_at: null,
+      error_kind: "auth_expired",
+    });
+    activeWorkItemState.activeWorkItem = wi;
+    render(<WorkItemPanel pipelineId="p1" initialState={makeState(wi)} />);
+
+    await user.click(screen.getByTestId("work-item-redispatch"));
+    // Confirm modal appears.
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    // Click the modal's confirm button (label "Redispatch", not the trigger).
+    const confirm = screen.getAllByRole("button", { name: /^redispatch$/i }).at(-1) as HTMLElement;
+    await user.click(confirm);
+
+    expect(redispatchMock).toHaveBeenCalledWith("p1");
+    expect(routerRefresh).toHaveBeenCalled();
   });
 
   it("renders the Cancel pipeline button (reused CancelPipelineButton)", () => {

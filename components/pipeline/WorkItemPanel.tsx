@@ -1,14 +1,24 @@
 "use client";
 
 import * as React from "react";
+import { useRouter } from "next/navigation";
 import { ChevronDown, ChevronUp, Loader2, RefreshCcw } from "lucide-react";
 
 import { CancelPipelineButton } from "@/components/pipeline/CancelPipelineButton";
 import { DaemonHealthBadge } from "@/components/pipeline/DaemonHealthBadge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useActiveWorkItem } from "@/hooks/useActiveWorkItem";
+import { redispatchWorkItem } from "@/lib/pipeline/client";
 import type { PipelineDispatchState, WorkItem, WorkItemConsumer } from "@/lib/work-queue/types";
 import { WORK_ITEM_KIND_LABEL } from "@/lib/work-queue/types";
 import { cn } from "@/lib/utils";
@@ -27,18 +37,11 @@ import { cn } from "@/lib/utils";
  *   - Freshness from `heartbeat_at` when running.
  *   - `error_kind` + truncated `error_detail.msg` on terminal failure.
  *   - The retry chain (collapsible) via `parent_work_item_id`.
- *   - Two recovery actions: Redispatch (DISABLED — PR-2b enables it) +
- *     Cancel (reuses CancelPipelineButton verbatim).
+ *   - Two recovery actions: Redispatch (live -- POSTs /redispatch when the
+ *     shown dispatch failed or timed out) + Cancel (reuses CancelPipelineButton).
  *   - A DaemonHealthBadge so the operator sees the daemon health right next
  *     to the work it's draining.
  */
-
-const TERMINAL: ReadonlySet<WorkItem["status"]> = new Set([
-  "completed",
-  "failed",
-  "timed_out",
-  "cancelled",
-]);
 
 const HEARTBEAT_STALE_THRESHOLD_S = 60;
 
@@ -297,17 +300,56 @@ function RetryChain({ workItem }: { workItem: WorkItem }) {
 }
 
 function ActionRow({ workItem, pipelineId }: { workItem: WorkItem | null; pipelineId: string }) {
-  const canRedispatch = workItem !== null && TERMINAL.has(workItem.status);
-  // The redispatch route ships in PR-2b. Always render the button disabled here
-  // (so the surface signals the recovery option) with a tooltip pointing at the
-  // follow-up PR.
+  // Redispatch retries a FAILED operator dispatch, so it is only meaningful when
+  // the shown work_item failed or timed out. The route itself rejects the other
+  // cases (409 no_failed_dispatch / not_operator_driven), but gating the button
+  // keeps the affordance honest -- you don't offer "retry" on a success.
+  const canRedispatch =
+    workItem !== null && (workItem.status === "failed" || workItem.status === "timed_out");
   return (
     <footer className="flex flex-wrap items-center justify-end gap-2">
+      <RedispatchButton pipelineId={pipelineId} disabled={!canRedispatch} />
+      <CancelPipelineButton pipelineId={pipelineId} />
+    </footer>
+  );
+}
+
+/**
+ * Redispatch recovery action. When enabled, opens a confirm modal and POSTs to
+ * `/api/pipelines/[id]/redispatch` (via `redispatchWorkItem`), mirroring the
+ * CancelPipelineButton pattern: inline error inside the modal, `router.refresh()`
+ * on success (the realtime subscription also pushes the new row in moments
+ * later). When disabled (the shown dispatch did not fail), it renders a
+ * disabled button + tooltip so the affordance stays visible.
+ */
+function RedispatchButton({ pipelineId, disabled }: { pipelineId: string; disabled: boolean }) {
+  const router = useRouter();
+  const [open, setOpen] = React.useState(false);
+  const [submitting, setSubmitting] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+
+  const onConfirm = async () => {
+    if (submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await redispatchWorkItem(pipelineId);
+      setOpen(false);
+      router.refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (disabled) {
+    return (
       <TooltipProvider delayDuration={200}>
         <Tooltip>
           <TooltipTrigger asChild>
-            {/* The disabled button is wrapped in a span so the tooltip still
-                fires while pointer-events on the button itself are off. */}
+            {/* Wrapped in a span so the tooltip still fires while the disabled
+                button's pointer-events are off. */}
             <span>
               <Button
                 type="button"
@@ -315,20 +357,90 @@ function ActionRow({ workItem, pipelineId }: { workItem: WorkItem | null; pipeli
                 size="sm"
                 disabled
                 aria-disabled
-                aria-label="Redispatch (coming in PR-2b)"
+                aria-label="Redispatch (available after a failed dispatch)"
                 className="gap-1.5"
                 data-testid="work-item-redispatch"
-                data-can-redispatch={canRedispatch ? "yes" : "no"}
+                data-can-redispatch="no"
               >
                 <RefreshCcw className="h-3.5 w-3.5" aria-hidden="true" />
                 Redispatch
               </Button>
             </span>
           </TooltipTrigger>
-          <TooltipContent>Redispatch is implemented in PR-2b.</TooltipContent>
+          <TooltipContent>
+            Redispatch becomes available after a dispatch fails or times out.
+          </TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      <CancelPipelineButton pipelineId={pipelineId} />
-    </footer>
+    );
+  }
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        className="gap-1.5"
+        aria-label="Redispatch"
+        data-testid="work-item-redispatch"
+        data-can-redispatch="yes"
+        onClick={() => {
+          setError(null);
+          setOpen(true);
+        }}
+      >
+        <RefreshCcw className="h-3.5 w-3.5" aria-hidden="true" />
+        Redispatch
+      </Button>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Redispatch the operator?</DialogTitle>
+            <DialogDescription>
+              This re-enqueues a fresh operator dispatch, chained to the failed one so the retry
+              stays auditable. Use it when the previous dispatch failed or timed out.
+            </DialogDescription>
+          </DialogHeader>
+
+          {error ? (
+            <p
+              role="alert"
+              className="break-words rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              {error}
+            </p>
+          ) : null}
+
+          <DialogFooter className="gap-2 sm:gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setOpen(false)}
+              disabled={submitting}
+              className="min-h-11 sm:min-h-9"
+            >
+              Keep waiting
+            </Button>
+            <Button
+              type="button"
+              onClick={() => void onConfirm()}
+              disabled={submitting}
+              className="min-h-11 gap-1.5 sm:min-h-9"
+            >
+              {submitting ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Redispatching…
+                </>
+              ) : (
+                "Redispatch"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
