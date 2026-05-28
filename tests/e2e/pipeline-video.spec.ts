@@ -5,6 +5,7 @@ import { mockWorkerIdeation } from "./_mocks/sse-harness";
 import {
   CLEAN_VIDEO_SCRIPT_OUTLINE,
   assertWorkerHealthy,
+  awaitWorkerStageClosed,
   dropVideoIdeationDrafts,
   emitGenerationClosure,
   qaVideoItems,
@@ -13,6 +14,7 @@ import {
   readStageStates,
   readVideoCopyVariants,
   seedFinalVideoCreatives,
+  seedGenerationOpenMarker,
   waitForStatus,
   workerPost,
 } from "./_mocks/workflow-driver";
@@ -196,6 +198,23 @@ test.describe("pipeline - video format", () => {
       timeout: 15_000,
     });
 
+    // Silent-failure PR-8: open the generation batch immediately so the real
+    // worker-stage consumer (now draining `worker_generation`) treats the stage
+    // as in-flight and skips the in-process producer. For VIDEO the real render
+    // chain (TTS / compose / caption) has NO fake mode in CI, so the captioned
+    // final + its closure are seeded below; the consumer still claims + closes
+    // the work_item (a no-op-but-real re-entry), which is the symmetric half the
+    // cutover left unbuilt -- proven via awaitWorkerStageClosed inside
+    // emitGenerationClosure.
+    await seedGenerationOpenMarker(pipelineId, 2);
+
+    // Prove the worker-stage consumer claimed + closed the worker_ideation row
+    // the configuration->ideation advance enqueued (the seeded video drafts
+    // satisfy the producer's idempotency probe, so the real service runs as a
+    // no-op-but-real re-entry and closes the row).
+    const ideationClose = await awaitWorkerStageClosed(pipelineId, "worker_ideation");
+    expect(ideationClose === null || ideationClose === "completed").toBeTruthy();
+
     // ===================================================================
     // generation → creative_qa (AUTO B1 trigger, migration 0046)
     // Seed ONE finalized captioned video creative carrying the real uploaded
@@ -213,7 +232,12 @@ test.describe("pipeline - video format", () => {
       briefId: videoBriefId,
       count: 1,
     });
-    await emitGenerationClosure({ pipelineId, taskCount: 2, outcome: "done" });
+    await emitGenerationClosure({
+      pipelineId,
+      taskCount: 2,
+      outcome: "done",
+      alreadyOpened: true,
+    });
     await waitForStatus(pipelineId, "creative_qa");
     // The B1 trigger seeded a pending creative_qa gate row per final VIDEO
     // creative (joined on video_brief_id, status='captioned').

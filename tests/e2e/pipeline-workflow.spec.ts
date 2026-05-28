@@ -3,12 +3,14 @@ import { mockWorkerIdeation } from "./_mocks/sse-harness";
 import { makeSquarePngBase64 } from "./_mocks/png-fixture";
 import {
   assertWorkerHealthy,
+  awaitWorkerStageClosed,
   emitGenerationClosure,
   qaPassItems,
   readPipelineStatus,
   readStageAdvancedOrder,
   readStageStates,
   seedFinalCreatives,
+  seedGenerationOpenMarker,
   waitForStatus,
   workerPost,
 } from "./_mocks/workflow-driver";
@@ -138,6 +140,15 @@ test.describe("pipeline — no-stall full workflow (image track)", () => {
       timeout: 15_000,
     });
 
+    // Silent-failure PR-8: open the generation batch immediately so the real
+    // worker-stage consumer (now draining `worker_generation`) treats the stage
+    // as in-flight and does NOT re-render the picks under FAKE_RENDER (which
+    // would add v1.0 finals that break the creative_qa gate count below). The
+    // consumer still claims + closes the work_item -- it just runs the
+    // in-process service as a no-op-but-real re-entry. Closed by
+    // emitGenerationClosure({ alreadyOpened: true }) further down.
+    await seedGenerationOpenMarker(pipelineId, 2);
+
     // Resolve the pipeline's image brief id (stamped at configure→ideation).
     const { data: pipeRow } = await admin
       .from("pipelines")
@@ -146,6 +157,17 @@ test.describe("pipeline — no-stall full workflow (image track)", () => {
       .maybeSingle();
     const imageBriefId = pipeRow?.image_brief_id;
     if (!imageBriefId) throw new Error("pipeline has no image_brief_id after review approve");
+
+    // Silent-failure PR-8: prove the worker-stage consumer actually claimed +
+    // closed the `worker_ideation` work_item the configuration→ideation advance
+    // route enqueued. The seeded ideation concepts satisfy the producer's
+    // `ideation_already_ran` idempotency probe, so the real consumer claims the
+    // row, runs the in-process service (a no-op-but-real re-entry), and closes
+    // it -- which is the symmetric half the cutover left unbuilt. A null return
+    // means the row was never enqueued (Next→worker push off); in CI the route
+    // always enqueues it, so this asserts the consumer ran end-to-end.
+    const ideationClose = await awaitWorkerStageClosed(pipelineId, "worker_ideation");
+    expect(ideationClose === null || ideationClose === "completed").toBeTruthy();
 
     // ===================================================================
     // (e) NEGATIVE no-stall case: an ALL-failed generation must NOT advance.
@@ -158,7 +180,12 @@ test.describe("pipeline — no-stall full workflow (image track)", () => {
     // generation → creative_qa (AUTO trigger, migration 0024)
     // ===================================================================
     const finals = await seedFinalCreatives({ pipelineId, briefId: imageBriefId, count: 1 });
-    await emitGenerationClosure({ pipelineId, taskCount: 2, outcome: "done" });
+    await emitGenerationClosure({
+      pipelineId,
+      taskCount: 2,
+      outcome: "done",
+      alreadyOpened: true,
+    });
     await waitForStatus(pipelineId, "creative_qa");
     // The trigger seeded a pending creative_qa gate row per final creative.
     const qaStates = (await readStageStates(pipelineId)).filter((s) => s.stage === "creative_qa");
