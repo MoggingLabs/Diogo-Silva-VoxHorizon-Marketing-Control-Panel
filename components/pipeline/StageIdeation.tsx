@@ -5,9 +5,11 @@ import { useRouter } from "next/navigation";
 import { Check, ImageOff, Loader2, Sparkles } from "lucide-react";
 
 import { StageShell } from "./StageShell";
+import { WorkItemPanelSlot } from "./WorkItemPanel";
 import { activeTracks, type PipelineTrack } from "@/lib/pipeline/tracks";
 import { updatePicks } from "@/lib/pipeline/client";
 import type { Pipeline } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
 import {
   CREATIVES_BUCKET as VIDEO_CREATIVES_BUCKET,
   DEFAULT_SIGNED_URL_TTL_S as VIDEO_SIGNED_URL_TTL_S,
@@ -31,6 +33,13 @@ export type StageIdeationProps = {
   pipeline: Pipeline;
   imageBriefId?: string | null;
   videoBriefId?: string | null;
+  /**
+   * SSR-seeded active work_item for this pipeline (silent-failure PR-5). When
+   * non-null the auto-hiding `WorkItemPanelSlot` surfaces the live dispatcher
+   * status at the bottom of the stage; when null the slot renders nothing and
+   * mounts no realtime channel, leaving the happy-path layout unchanged.
+   */
+  initialWorkItem?: WorkItem | null;
 };
 
 /**
@@ -68,7 +77,12 @@ export type StageIdeationProps = {
  *     background. On a network failure we revert and surface an inline
  *     error banner — the user can retry by toggling again.
  */
-export function StageIdeation({ pipeline, imageBriefId, videoBriefId }: StageIdeationProps) {
+export function StageIdeation({
+  pipeline,
+  imageBriefId,
+  videoBriefId,
+  initialWorkItem = null,
+}: StageIdeationProps) {
   const router = useRouter();
   const tracks = activeTracks(pipeline.format_choice);
 
@@ -190,6 +204,7 @@ export function StageIdeation({ pipeline, imageBriefId, videoBriefId }: StageIde
               />
             ) : null}
           </div>
+          <WorkItemPanelSlot pipelineId={pipeline.id} initialWorkItem={initialWorkItem} />
         </div>
       }
     />

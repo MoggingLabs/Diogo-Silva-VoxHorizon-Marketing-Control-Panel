@@ -28,6 +28,8 @@ import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/revi
 import { getVariantPlanEditorData } from "@/lib/variant-plan/fetch";
 import type { VariantTestVariable } from "@/lib/variant-plan/schemas";
 import { type Pipeline, type PipelineEvent, type PipelineStatus } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -132,6 +134,25 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   const cplTarget =
     pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
 
+  // Silent-failure PR-5: SSR-seed the active work_item for the stages that
+  // mount `WorkItemPanelSlot`. The happy path on ideation/review/generation has
+  // NO active work_item, so the slot renders nothing and opens no realtime
+  // channel -- but when the dispatcher IS running (operator kickoff / recovery)
+  // we hand the slot the seed so it surfaces live status without a client fetch
+  // on mount. Reads ONE row from `v_pipeline_dispatch_state` via the admin
+  // client (RLS deny-all on the work_item tables), mirroring the work-state
+  // route. Gated to the three slot-bearing stages so other stages stay light.
+  const SLOT_STAGES: PipelineStatus[] = ["ideation", "review", "generation"];
+  let initialWorkItem: WorkItem | null = null;
+  if (SLOT_STAGES.includes(pipeline.status)) {
+    const dispatch = await createAdminClient()
+      .from("v_pipeline_dispatch_state")
+      .select("active_work_item")
+      .eq("pipeline_id", pipeline.id)
+      .maybeSingle();
+    initialWorkItem = (dispatch.data?.active_work_item as WorkItem | null) ?? null;
+  }
+
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
   const isArchived = pipeline.deleted_at !== null;
   // Cancel is the in-flight escape hatch; archive is the "remove from my view"
@@ -211,15 +232,21 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
                 pipeline={pipeline}
                 imageBriefId={pipeline.image_brief_id}
                 videoBriefId={pipeline.video_brief_id}
+                initialWorkItem={initialWorkItem}
               />
             ) : pipeline.status === "review" ? (
               <StageReview
                 pipeline={pipeline}
                 imageBriefId={pipeline.image_brief_id}
                 videoBriefId={pipeline.video_brief_id}
+                initialWorkItem={initialWorkItem}
               />
             ) : pipeline.status === "generation" ? (
-              <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
+              <StageGeneration
+                pipeline={pipeline}
+                initialEvents={initialEvents}
+                initialWorkItem={initialWorkItem}
+              />
             ) : (pipeline.status === "creative_qa" ||
                 pipeline.status === "spec_validation" ||
                 pipeline.status === "compliance_review") &&

@@ -60,7 +60,7 @@ vi.mock("@/lib/pipeline/client", () => ({
   cancelPipeline: vi.fn(() => Promise.resolve({ pipeline: { id: "p1", status: "cancelled" } })),
 }));
 
-import { WorkItemPanel } from "./WorkItemPanel";
+import { WorkItemPanel, WorkItemPanelSlot } from "./WorkItemPanel";
 
 function workItem(over: Partial<WorkItem> = {}): WorkItem {
   return {
@@ -307,6 +307,28 @@ describe("WorkItemPanel — recovery actions", () => {
       />,
     );
     expect(screen.getByRole("button", { name: /cancel pipeline/i })).toBeInTheDocument();
+  });
+});
+
+describe("WorkItemPanelSlot -- auto-hiding SSR-seeded wrapper (PR-5)", () => {
+  it("renders NOTHING when there is no active work_item (seed null)", () => {
+    const { container } = render(<WorkItemPanelSlot pipelineId="p1" initialWorkItem={null} />);
+    // Slot returns null -> no slot, no panel.
+    expect(container).toBeEmptyDOMElement();
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel")).not.toBeInTheDocument();
+  });
+
+  it("renders the panel inside the slot when seeded WITH an active work_item", () => {
+    // The slot builds an initialState from the seed; the (mocked) hook surfaces
+    // the same row so the panel paints its running state.
+    activeWorkItemState.activeWorkItem = workItem({ status: "running" });
+    render(<WorkItemPanelSlot pipelineId="p1" initialWorkItem={workItem({ status: "running" })} />);
+    expect(screen.getByTestId("work-item-panel-slot")).toBeInTheDocument();
+    const panel = screen.getByTestId("work-item-panel");
+    expect(panel).toHaveAttribute("data-state", "running");
+    // The unobtrusive "Dispatcher status" subheading is present.
+    expect(screen.getByText(/Dispatcher status/i)).toBeInTheDocument();
   });
 });
 

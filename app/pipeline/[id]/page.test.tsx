@@ -1,5 +1,5 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
@@ -42,6 +42,15 @@ vi.mock("@/lib/pipeline/client", () => ({
 let currentSupabase: SupabaseClientMock;
 vi.mock("@/lib/supabase/server", () => ({
   createClient: async () => currentSupabase,
+}));
+
+// PR-5: the page SSR-seeds the active work_item from `v_pipeline_dispatch_state`
+// via the admin (service-role) client for the ideation/review/generation
+// stages. Mock the admin client so the jsdom test can render those branches
+// without real env / network. `currentAdmin` lets a test control the seed.
+let currentAdmin: SupabaseClientMock;
+vi.mock("@/lib/supabase/admin", () => ({
+  createAdminClient: () => currentAdmin,
 }));
 
 // Stub all stage components so we don't need their full mocks.
@@ -89,13 +98,23 @@ vi.mock("@/components/pipeline/StageConfiguration", () => ({
   ),
 }));
 vi.mock("@/components/pipeline/StageIdeation", () => ({
-  StageIdeation: () => <div data-testid="stage" data-stage="ideation" />,
+  StageIdeation: ({ initialWorkItem }: { initialWorkItem?: { id: string } | null }) => (
+    <div data-testid="stage" data-stage="ideation" data-work-item={initialWorkItem?.id ?? "none"} />
+  ),
 }));
 vi.mock("@/components/pipeline/StageReview", () => ({
-  StageReview: () => <div data-testid="stage" data-stage="review" />,
+  StageReview: ({ initialWorkItem }: { initialWorkItem?: { id: string } | null }) => (
+    <div data-testid="stage" data-stage="review" data-work-item={initialWorkItem?.id ?? "none"} />
+  ),
 }));
 vi.mock("@/components/pipeline/StageGeneration", () => ({
-  StageGeneration: () => <div data-testid="stage" data-stage="generation" />,
+  StageGeneration: ({ initialWorkItem }: { initialWorkItem?: { id: string } | null }) => (
+    <div
+      data-testid="stage"
+      data-stage="generation"
+      data-work-item={initialWorkItem?.id ?? "none"}
+    />
+  ),
 }));
 vi.mock("@/components/pipeline/StageDone", () => ({
   StageDone: () => <div data-testid="stage" data-stage="done" />,
@@ -145,6 +164,20 @@ function pipeline(over: Record<string, unknown>) {
 }
 
 describe("PipelineDetailPage", () => {
+  beforeEach(() => {
+    // Default: the dispatch-state view returns no active work_item, so the
+    // slot stays hidden. Tests that need a seed override `currentAdmin`.
+    currentAdmin = mockSupabaseClient({
+      v_pipeline_dispatch_state: {
+        select: {
+          data: null,
+          error: null,
+          single: { data: { active_work_item: null }, error: null },
+        },
+      },
+    });
+  });
+
   it("renders configuration stage with clients list", async () => {
     getPipeline.mockResolvedValueOnce({ pipeline: pipeline({}), events: [] });
     currentSupabase = mockSupabaseClient({
@@ -224,6 +257,53 @@ describe("PipelineDetailPage", () => {
     const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
     render(el);
     expect(screen.getByTestId("stage")).toHaveAttribute("data-stage", "generation");
+  });
+
+  it("PR-5: SSR-seeds the active work_item into the ideation stage", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "ideation" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    currentAdmin = mockSupabaseClient({
+      v_pipeline_dispatch_state: {
+        select: {
+          data: null,
+          error: null,
+          single: { data: { active_work_item: { id: "wi-42" } }, error: null },
+        },
+      },
+    });
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    const stage = screen.getByTestId("stage");
+    expect(stage).toHaveAttribute("data-stage", "ideation");
+    expect(stage).toHaveAttribute("data-work-item", "wi-42");
+    // The dispatch-state view was read via the admin client.
+    expect(currentAdmin._spies.from).toHaveBeenCalledWith("v_pipeline_dispatch_state");
+  });
+
+  it("PR-5: threads a null seed when the dispatcher is idle on review", async () => {
+    getPipeline.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "review" }),
+      events: [],
+    });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    const stage = screen.getByTestId("stage");
+    expect(stage).toHaveAttribute("data-stage", "review");
+    expect(stage).toHaveAttribute("data-work-item", "none");
+  });
+
+  it("PR-5: does NOT read the dispatch-state view on non-slot stages", async () => {
+    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "monitor" }), events: [] });
+    currentSupabase = mockSupabaseClient();
+    const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
+    render(el);
+    // The slot only lives on ideation/review/generation -- monitor must not
+    // pay for the admin view read.
+    expect(currentAdmin._spies.from).not.toHaveBeenCalledWith("v_pipeline_dispatch_state");
   });
 
   it("renders done stage and hides cancel button", async () => {

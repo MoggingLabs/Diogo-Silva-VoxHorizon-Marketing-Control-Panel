@@ -12,11 +12,27 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { mockRealtimeStream } from "@/tests/unit/helpers/realtime-mock";
 import type { Pipeline } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
 
 const routerRefresh = vi.fn();
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ refresh: routerRefresh, push: vi.fn(), replace: vi.fn() }),
+}));
+
+// The WorkItemPanelSlot at the bottom of StageReview mounts the panel (and its
+// real useActiveWorkItem) only when seeded with an active work_item. Mock the
+// realtime relay so we can assert NO work_item channel opens when idle, and
+// stub the embedded daemon-health badge (not under test here). useActiveWorkItem
+// stays real so the gate is genuinely exercised.
+const realtime = mockRealtimeStream();
+vi.mock("@/hooks/useRealtimeStream", () => ({
+  useRealtimeStream: (listeners: unknown) =>
+    realtime.register(listeners as Parameters<typeof realtime.register>[0]),
+}));
+vi.mock("@/hooks/useDaemonHealth", () => ({
+  useDaemonHealth: () => ({ consumer: null, freshness: "down", isLoading: false, error: null }),
 }));
 
 const submitReviewDecision = vi.fn();
@@ -41,6 +57,38 @@ vi.mock("@/lib/realtime/client-data", () => ({
 }));
 
 import { StageReview } from "./StageReview";
+
+function makeWorkItem(over: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: "wi-1",
+    kind: "operator_dispatch",
+    pipeline_id: "p1",
+    creative_id: null,
+    brief_id: null,
+    status: "running",
+    attempt: 1,
+    claim_token: "tok",
+    claimed_by: "operator-daemon-1",
+    claimed_at: "2026-05-26T12:00:00Z",
+    heartbeat_at: new Date().toISOString(),
+    completed_at: null,
+    error_kind: null,
+    error_detail: null,
+    payload: { stage: "review" },
+    result: null,
+    idempotency_key: "op-disp:p1:review:kickoff",
+    parent_work_item_id: null,
+    created_by: "api/pipelines/operator",
+    next_attempt_at: "2026-05-26T12:00:00Z",
+    created_at: "2026-05-26T11:55:00Z",
+    updated_at: "2026-05-26T12:00:00Z",
+    ...over,
+  };
+}
+
+function workItemListeners() {
+  return realtime.listeners.filter((l) => l.table === "work_item");
+}
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
   return {
@@ -72,6 +120,7 @@ beforeEach(() => {
   fetchVideoCreativesByIdsWithOutline.mockReset();
   fetchVideoCreativesByIdsWithOutline.mockResolvedValue({ creatives: [], outlines: {} });
   signStoragePaths.mockClear();
+  realtime.reset();
 });
 
 afterEach(() => {
@@ -294,5 +343,33 @@ describe("StageReview", () => {
     expect(await screen.findByText("30s")).toBeInTheDocument();
     expect(screen.getByText(/0 segments/)).toBeInTheDocument();
     expect(screen.getByText(/b-roll plan pending/)).toBeInTheDocument();
+  });
+});
+
+describe("StageReview -- WorkItemPanelSlot (PR-5 SSR seed)", () => {
+  it("renders the dispatcher panel when initialWorkItem is provided", () => {
+    render(
+      <StageReview
+        pipeline={makePipeline()}
+        initialWorkItem={makeWorkItem({ status: "running" })}
+      />,
+    );
+    expect(screen.getByTestId("work-item-panel-slot")).toBeInTheDocument();
+    expect(screen.getByTestId("work-item-panel")).toHaveAttribute("data-state", "running");
+    // The seeded stream opens a single full work_item listener.
+    const wi = workItemListeners();
+    expect(wi).toHaveLength(1);
+    expect(wi[0]!.event).toBe("*");
+  });
+
+  it("renders NOTHING and opens NO realtime channel when initialWorkItem is absent (anti-stall)", () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<StageReview pipeline={makePipeline()} />);
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel")).not.toBeInTheDocument();
+    // KEY regression: no work_item realtime channel on an idle review stage.
+    expect(workItemListeners()).toHaveLength(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });
