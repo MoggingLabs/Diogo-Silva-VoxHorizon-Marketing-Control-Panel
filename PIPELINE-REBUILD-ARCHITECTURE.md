@@ -1,5 +1,17 @@
 # Pipeline Rebuild — Architecture
 
+> **PARTIALLY SUPERSEDED by the silent-failure redesign.** The orchestration
+> primitives this document specifies in present tense (the `pipelines.status`
+> compare-and-set cursor, the `integration_outbox` table and its drain relay,
+> and the `operator_dispatches` table) were replaced by a single unified
+> `work_item` queue (one durable queue per work unit, drained by in-process
+> consumers and swept by one `work_item_watchdog`) plus a long-running operator
+> daemon (`operator-daemon/`). The legacy tables were renamed `_legacy_*` by
+> migration 0051 and nothing writes to them anymore. The sections flagged inline
+> below describe the **pre-redesign** model; everything else (the 12-stage DAG,
+> the gate topology, the per-creative QA/compliance machine, the data model for
+> verdicts/evidence, Layers 3 to 6) remains accurate.
+
 The canonical 6-layer design for rebuilding the VoxHorizon image-ad pipeline from a 5-stage **renderer** into a 12-stage **ad producer** with QA + compliance as first-class, hard-gated, per-creative concerns. This is the design-of-record; `OPERATOR-BUILDOUT.md` carries the prior research + the issue/phase breakdown, and the GitHub epics (#306–313) carry the executable acceptance criteria. Grounded in three research waves and current best practice (orchestration, policy-as-code, human-in-the-loop, ad-platform integration).
 
 ## Scope & principles
@@ -21,16 +33,16 @@ Target stages: `configuration → ideation → review → generation → creativ
 
 **Two machines:**
 
-- **Pipeline machine** — one `pipelines.status` cursor over the 12 stages. Transitions are guarded by pure predicates (mirroring today's `lib/pipeline/transitions.ts` `canAdvance`) and applied with compare-and-set (`UPDATE … WHERE id=$ AND status=$expected`) for optimistic concurrency.
+- **Pipeline machine** -- one `pipelines.status` cursor over the 12 stages. Transitions are guarded by pure predicates (mirroring today's `lib/pipeline/transitions.ts` `canAdvance`) and applied with compare-and-set (`UPDATE … WHERE id=$ AND status=$expected`) for optimistic concurrency. **Superseded:** stage advancement now rides the unified `work_item` queue rather than a bare `pipelines.status` compare-and-set.
 - **Creative machine** — one row per `(creative_id, stage)` in `creative_stage_state` for `stage ∈ {creative_qa, compliance_review, copy, spec_validation}`. States: `pending → in_progress → {passed | failed | overridden | skipped}`. A `failed` compliance unit leaves only via an audited `override` (requires `override_note`) or `remediate`. Copy edits `rearm` a previously-`passed` compliance unit (two-pass).
 
 **Rollup gate.** A per-creative stage advances the pipeline only when `pipeline_rollup_cleared(pipeline_id, stage)` is true: every picked, non-killed creative ∈ {passed, overridden, skipped}. One SQL function; the advance route and the UI gate both read it so they agree by construction.
 
 **Work-unit ledger** (`pipeline_work_units`) replaces the count heuristic for AGENT_WORK stages (generation, finalize): closure = `no queued/running ∧ ≥1 done`. An all-error batch does **not** close as success.
 
-**Exactly-once side effects.** A transactional outbox (`integration_outbox` written in the same txn as the state change) drained by a `SELECT … FOR UPDATE SKIP LOCKED` relay; consumers dedupe on a deterministic `idempotency_key` (`integration_event_inbox`). The irreversible Meta launch is an **orchestrated saga**: create-campaign → adset → ad, each PAUSED-first with its own idempotency key; compensation = delete/leave-paused, never stop-live-spend.
+**Exactly-once side effects.** A transactional outbox (`integration_outbox` written in the same txn as the state change) drained by a `SELECT … FOR UPDATE SKIP LOCKED` relay; consumers dedupe on a deterministic `idempotency_key` (`integration_event_inbox`). The irreversible Meta launch is an **orchestrated saga**: create-campaign → adset → ad, each PAUSED-first with its own idempotency key; compensation = delete/leave-paused, never stop-live-spend. **Superseded:** the outbox surface is now `work_item` rows of the outbox kinds drained by the outbox consumer; the standalone `integration_outbox` table and relay were retired.
 
-**Gate topology.** Human gates: brief, picks, review, QA sign-off, copy approval, variant plan, launch, monitor. Auto: generation→creative_qa, spec→variant_plan, finalize→launch. HARD (audited, never count-auto-advanced): compliance, launch. Loops are forward-only: per-creative failures isolate to their row (targeted re-render / re-copy); monitor spawns a _new_ pipeline (not a back-edge).
+**Gate topology.** Human gates: brief, picks, review, QA sign-off, copy approval, variant plan, launch, monitor. Auto: `generation→creative_qa`, `spec→variant_plan`, `finalize→launch`. HARD (audited, never count-auto-advanced): compliance, launch. Loops are forward-only: per-creative failures isolate to their row (targeted re-render / re-copy); monitor spawns a _new_ pipeline (not a back-edge).
 
 ---
 
@@ -42,9 +54,9 @@ Target stages: `configuration → ideation → review → generation → creativ
 
 - `creative_stage_state` — per-creative gate state (`unique(creative_id, stage)`, `CHECK` requiring `override_note` when `status='overridden'`).
 - `pipeline_work_units` — the AGENT_WORK closure ledger.
-- `integration_outbox` + `integration_event_inbox` — exactly-once side effects.
+- `integration_outbox` + `integration_event_inbox` -- exactly-once side effects. **Superseded:** replaced by `work_item` rows of the outbox kinds; the table was renamed with a `_legacy_` prefix by migration 0051.
 - `compliance_rule` (**lookup table, not an enum** — Meta/FTC policy churns) + `compliance_finding` (append-only, tamper-evident: `rule_id` + `version`, severity, evidence, frozen citation, override audit). `qa_rubric` + `qa_result` (append-only, per attempt).
-- `spec_check` (per placement, derived crops), `variant_plan` + `variant_plan_cell`, `ad_entity` (Meta campaign/adset/ad/creative map, PAUSED-first state), `cost_ledger`, `operator_dispatches`, `concepts`, `client_integrations` (client → GHL/Drive/Meta ids).
+- `spec_check` (per placement, derived crops), `variant_plan` + `variant_plan_cell`, `ad_entity` (Meta campaign/adset/ad/creative map, PAUSED-first state), `cost_ledger`, `operator_dispatches`, `concepts`, `client_integrations` (client → GHL/Drive/Meta ids). **Superseded:** `operator_dispatches` was replaced by `work_item` rows of kind `operator_dispatch` owned by the operator daemon; the table was renamed with a `_legacy_` prefix by migration 0051.
 - **Rebuilt `copy_variants`** (empty today → drop+create): adds `platform`/`placement`/`description`/`variant_index`/`pattern`/`validation`/approval columns; `unique(creative_id, platform, variant_index)`.
 - Extend `creatives` (qa/compliance gate cols off the lifecycle axis, finalize/Drive cols), `launch_packages` (status enum + gate cols + pipeline link), `campaign_perf_image` (pipeline + ad_entity link).
 
