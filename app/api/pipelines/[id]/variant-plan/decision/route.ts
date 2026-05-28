@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { isOperatorDriven, operatorInstruction } from "@/lib/operator/dispatch";
+import { operatorInstruction } from "@/lib/operator/dispatch";
 import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { VariantPlanDecisionInput } from "@/lib/pipeline/decision-schemas";
 import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
@@ -139,30 +139,29 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   }
 
   // FIX-A: dispatch the finalize_assets PRODUCER on entry. finalize_assets is
-  // OPERATOR-ONLY this build -- the operator holds the Drive MCP, so an
-  // operator-driven pipeline gets an `operator_dispatch` that runs the finalize
-  // chat (apply naming, register, upload to Drive, verify). Deterministic-mode
-  // finalize is DEFERRED pending a product decision on an autonomous Drive
-  // connector, so a non-operator pipeline enqueues nothing here. A failed
+  // inherently OPERATOR-HELD work regardless of pipeline mode -- only the
+  // operator's Drive MCP can upload the finals, compute the md5, and stamp
+  // `finalize_verified`. So BOTH operator-driven and deterministic pipelines
+  // hand off to the operator for finalize: every approved variant_plan enqueues
+  // an `operator_dispatch(finalize_assets)` the daemon claims to run the
+  // finalize chat (apply naming, register, upload to Drive, verify). A failed
   // enqueue is a 5xx: the producer must never silently go missing.
-  if (isOperatorDriven(pipeline.config_draft)) {
-    try {
-      await enqueueWorkItem({
-        kind: "operator_dispatch",
-        pipelineId: id,
-        payload: {
-          instruction: operatorInstruction("finalize_assets", id),
-          stage: "finalize_assets",
-        },
-        idempotencyKey: `op-disp:${id}:finalize_assets:variant_plan_approve`,
-        createdBy: "api/pipelines/variant-plan/decision/dispatchFinalize",
-      });
-    } catch (e) {
-      return NextResponse.json(
-        { error: `finalize dispatch enqueue failed: ${String(e)}` },
-        { status: 500 },
-      );
-    }
+  try {
+    await enqueueWorkItem({
+      kind: "operator_dispatch",
+      pipelineId: id,
+      payload: {
+        instruction: operatorInstruction("finalize_assets", id),
+        stage: "finalize_assets",
+      },
+      idempotencyKey: `op-disp:${id}:finalize_assets:variant_plan_approve`,
+      createdBy: "api/pipelines/variant-plan/decision/dispatchFinalize",
+    });
+  } catch (e) {
+    return NextResponse.json(
+      { error: `finalize dispatch enqueue failed: ${String(e)}` },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({

@@ -129,11 +129,11 @@ describe("POST /api/pipelines/:id/variant-plan/decision", () => {
     warn.mockRestore();
   });
 
-  // FIX-A: finalize_assets is OPERATOR-ONLY this build -- the operator holds the
-  // Drive MCP. The approve path dispatches an operator_dispatch(finalize_assets)
-  // for an operator-driven pipeline; a deterministic pipeline enqueues nothing
-  // (deterministic-mode finalize is deferred pending a Drive-connector decision).
-  it("deterministic approve enqueues NO finalize dispatch", async () => {
+  // FIX-A: finalize_assets is inherently OPERATOR-HELD work in BOTH modes --
+  // only the operator's Drive MCP can upload the finals + verify, so every
+  // approved variant_plan hands off to the operator via
+  // operator_dispatch(finalize_assets), deterministic pipelines included.
+  it("deterministic approve ALSO enqueues operator_dispatch(finalize_assets) (operator hand-off)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "variant_plan", advanced_at: {} }, error: null } },
@@ -144,7 +144,12 @@ describe("POST /api/pipelines/:id/variant-plan/decision", () => {
     });
     const res = await POST(req({ decision: "approved" }), { params });
     expect(res.status).toBe(200);
-    expect(enqueueWorkItem).not.toHaveBeenCalled();
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.idempotencyKey).toBe(`op-disp:${id}:finalize_assets:variant_plan_approve`);
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.stage).toBe("finalize_assets");
   });
 
   it("operator-driven approve enqueues operator_dispatch(finalize_assets)", async () => {

@@ -27,8 +27,9 @@ import {
  *     (worker_qa deterministic / operator_dispatch operator);
  *   - the advance route enqueues compliance_review (worker_compliance) +
  *     spec_validation (worker_spec) on entry (operator -> operator_dispatch);
- *   - the variant-plan/decision approve enqueues finalize_assets
- *     (operator_dispatch only; deterministic finalize is deferred).
+ *   - the variant-plan/decision approve enqueues finalize_assets via
+ *     operator_dispatch in BOTH modes (finalize is inherently operator-held --
+ *     Drive MCP -- so deterministic pipelines hand off to the operator too).
  *
  * This file proves BOTH:
  *
@@ -209,16 +210,22 @@ test.describe("pipeline -- FIX-A post-generation dispatch (image track)", () => 
 
     // ===================================================================
     // variant_plan -> finalize_assets (manager variant-plan/decision approve).
-    // Deterministic finalize is DEFERRED (no autonomous Drive uploader), so no
-    // worker dispatch fires; finalize is recorded via the operator/dashboard
-    // finalize surface (legitimately, since finalize is operator-held).
+    // finalize is inherently operator-held (Drive MCP) in BOTH modes, so the
+    // approve hands off to the operator: it enqueues operator_dispatch(
+    // finalize_assets) even for this deterministic pipeline. We assert the
+    // hand-off fires, then stand in for the operator claiming+running the
+    // finalize tool below (no live hermes in CI), exactly as finalize is
+    // operator-held by design.
     // ===================================================================
     const vp = await managerPost(pipelineId, "variant-plan/decision", { decision: "approved" });
     expect(vp.status, JSON.stringify(vp.body)).toBe(200);
     expect(await readPipelineStatus(pipelineId)).toBe("finalize_assets");
+    // The operator hand-off dispatch must be enqueued for deterministic too.
+    await awaitWorkItemEnqueued(pipelineId, "operator_dispatch", "finalize_assets");
 
     // ===================================================================
-    // finalize_assets -> launch_handoff (operator finalize surface + advance)
+    // finalize_assets -> launch_handoff (stand in for the operator running the
+    // finalize tool it was just dispatched for, then manager advance)
     // ===================================================================
     const fin = await workerPost("/work/pipeline/tools/finalize_result", {
       pipeline_id: pipelineId,
