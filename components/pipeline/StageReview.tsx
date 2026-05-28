@@ -9,9 +9,11 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { CostBreakdownTable } from "@/components/pipeline/CostBreakdownTable";
 import { StageShell } from "@/components/pipeline/StageShell";
+import { WorkItemPanelSlot } from "@/components/pipeline/WorkItemPanel";
 import { submitReviewDecision } from "@/lib/pipeline/client";
 import { activeTracks, type PipelineTrack } from "@/lib/pipeline/tracks";
 import type { Pipeline } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
 import { estimatePipelineCost } from "@/lib/cost-estimator";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
 import {
@@ -30,6 +32,12 @@ export type StageReviewProps = {
    *  needs from `pipeline.picks` directly. */
   imageBriefId?: string | null;
   videoBriefId?: string | null;
+  /**
+   * SSR-seeded active work_item for this pipeline (silent-failure PR-5). Drives
+   * the auto-hiding `WorkItemPanelSlot` at the bottom of the stage; null leaves
+   * the layout unchanged and mounts no realtime channel.
+   */
+  initialWorkItem?: WorkItem | null;
 };
 
 /** Light projection of a `creatives` row — keep the preview card decoupled
@@ -73,7 +81,7 @@ type VideoPickRow = {
  * video tracks don't render a preview at the review stage (the captioned MP4
  * isn't built yet) — we show the script hook + b-roll plan summary instead.
  */
-export function StageReview({ pipeline }: StageReviewProps) {
+export function StageReview({ pipeline, initialWorkItem = null }: StageReviewProps) {
   const router = useRouter();
 
   const tracks = useMemo(() => activeTracks(pipeline.format_choice), [pipeline.format_choice]);
@@ -156,6 +164,8 @@ export function StageReview({ pipeline }: StageReviewProps) {
               router.refresh();
             }}
           />
+
+          <WorkItemPanelSlot pipelineId={pipeline.id} initialWorkItem={initialWorkItem} />
         </div>
       }
     />

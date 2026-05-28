@@ -62,7 +62,51 @@ vi.mock("@/lib/realtime/client-data", () => ({
   signStoragePath: vi.fn(async () => "https://x.example/x"),
 }));
 
+// The WorkItemPanelSlot embeds a DaemonHealthBadge (driven by useDaemonHealth,
+// which fetches on mount). It's the badge, not under test here -- stub it so
+// the slot tests focus on the slot's mount/null gate and the realtime channel
+// gate (asserted via the mocked useRealtimeStream above). useActiveWorkItem
+// stays REAL so the no-channel-when-idle assertion is meaningful.
+vi.mock("@/hooks/useDaemonHealth", () => ({
+  useDaemonHealth: () => ({ consumer: null, freshness: "down", isLoading: false, error: null }),
+}));
+
+import type { WorkItem } from "@/lib/work-queue/types";
+
 import { StageIdeation } from "./StageIdeation";
+
+function makeWorkItem(over: Partial<WorkItem> = {}): WorkItem {
+  return {
+    id: "wi-1",
+    kind: "operator_dispatch",
+    pipeline_id: "p1",
+    creative_id: null,
+    brief_id: null,
+    status: "running",
+    attempt: 1,
+    claim_token: "tok",
+    claimed_by: "operator-daemon-1",
+    claimed_at: "2026-05-26T12:00:00Z",
+    heartbeat_at: new Date().toISOString(),
+    completed_at: null,
+    error_kind: null,
+    error_detail: null,
+    payload: { stage: "ideation" },
+    result: null,
+    idempotency_key: "op-disp:p1:ideation:kickoff",
+    parent_work_item_id: null,
+    created_by: "api/pipelines/operator",
+    next_attempt_at: "2026-05-26T12:00:00Z",
+    created_at: "2026-05-26T11:55:00Z",
+    updated_at: "2026-05-26T12:00:00Z",
+    ...over,
+  };
+}
+
+/** Listeners the slot's hook registered for the `work_item` table. */
+function workItemListeners() {
+  return realtime.listeners.filter((l) => l.table === "work_item");
+}
 
 function makePipeline(over: Partial<Pipeline> = {}): Pipeline {
   return {
@@ -959,5 +1003,36 @@ describe("StageIdeation", () => {
       deleteHandler({ old: { id: "v1" } });
     });
     expect(screen.queryByText(/Concept v1/)).not.toBeInTheDocument();
+  });
+});
+
+describe("StageIdeation -- WorkItemPanelSlot (PR-5 SSR seed)", () => {
+  it("renders the dispatcher panel when initialWorkItem is provided", async () => {
+    render(
+      <StageIdeation
+        pipeline={makePipeline()}
+        imageBriefId="b1"
+        initialWorkItem={makeWorkItem({ status: "running" })}
+      />,
+    );
+    expect(await screen.findByTestId("work-item-panel-slot")).toBeInTheDocument();
+    expect(screen.getByTestId("work-item-panel")).toHaveAttribute("data-state", "running");
+  });
+
+  it("renders NOTHING and opens NO realtime channel when initialWorkItem is absent (anti-stall)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    render(<StageIdeation pipeline={makePipeline()} imageBriefId="b1" />);
+    await screen.findByText(/Image concepts/);
+
+    // Slot hidden -> no panel.
+    expect(screen.queryByTestId("work-item-panel-slot")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("work-item-panel")).not.toBeInTheDocument();
+
+    // KEY regression: the empty stage must NOT open a work_item realtime
+    // channel (the PR-3 stall). The stage's own creatives listener may exist;
+    // there must be ZERO work_item listeners.
+    expect(workItemListeners()).toHaveLength(0);
+    expect(errorSpy).not.toHaveBeenCalled();
+    errorSpy.mockRestore();
   });
 });

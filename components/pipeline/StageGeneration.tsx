@@ -14,6 +14,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { StageShell } from "@/components/pipeline/StageShell";
+import { WorkItemPanelSlot } from "@/components/pipeline/WorkItemPanel";
 import { usePipelineEvents } from "@/hooks/usePipelineEvents";
 import { CREATIVES_BUCKET } from "@/lib/creatives";
 import {
@@ -22,6 +23,7 @@ import {
   type GenerationTask,
 } from "@/lib/pipeline/generation-tasks";
 import type { Pipeline, PipelineEvent } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
 import { signStoragePath } from "@/lib/realtime/client-data";
 import { cn } from "@/lib/utils";
 
@@ -34,6 +36,12 @@ export type StageGenerationProps = {
    * its state from this list and folds in new rows via realtime.
    */
   initialEvents: PipelineEvent[];
+  /**
+   * SSR-seeded active work_item for this pipeline (silent-failure PR-5). Drives
+   * the auto-hiding `WorkItemPanelSlot` at the bottom of the stage; null leaves
+   * the layout unchanged and mounts no realtime channel.
+   */
+  initialWorkItem?: WorkItem | null;
 };
 
 /**
@@ -66,7 +74,11 @@ export type StageGenerationProps = {
  * Mobile: rows stack with smaller text; thumbnails clip to a fixed
  * 56-by-56 box so a long video filename can't push the row off-screen.
  */
-export function StageGeneration({ pipeline, initialEvents }: StageGenerationProps) {
+export function StageGeneration({
+  pipeline,
+  initialEvents,
+  initialWorkItem = null,
+}: StageGenerationProps) {
   const events = usePipelineEvents(pipeline.id, initialEvents);
   const router = useRouter();
 
@@ -115,6 +127,7 @@ export function StageGeneration({ pipeline, initialEvents }: StageGenerationProp
               ))}
             </ul>
           )}
+          <WorkItemPanelSlot pipelineId={pipeline.id} initialWorkItem={initialWorkItem} />
         </div>
       }
       // Custom footer message — `StageShell` always renders a CTA, so

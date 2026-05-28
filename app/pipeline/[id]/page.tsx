@@ -28,6 +28,8 @@ import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/revi
 import { getVariantPlanEditorData } from "@/lib/variant-plan/fetch";
 import type { VariantTestVariable } from "@/lib/variant-plan/schemas";
 import { type Pipeline, type PipelineEvent, type PipelineStatus } from "@/lib/pipeline/types";
+import type { WorkItem } from "@/lib/work-queue/types";
+import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
@@ -132,6 +134,46 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   const cplTarget =
     pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
 
+  // Silent-failure PR-5: SSR-seed the active OPERATOR dispatch for the stages
+  // that mount `WorkItemPanelSlot`. The WorkItemPanel is the "what is the
+  // operator dispatcher doing right now?" surface, so the slot only ever shows
+  // for an active `operator_dispatch` work_item (kickoff / recovery on an
+  // operator-driven pipeline).
+  //
+  // It deliberately does NOT seed off deterministic `worker_*` queue rows
+  // (worker_ideation / worker_generation): on the normal flow those are an
+  // internal implementation detail that can linger queued/claimed across the
+  // ideation/review/generation stages, and surfacing them would mount the panel
+  // (opening a realtime channel + daemon-health fetch) on every normal-flow
+  // stage -- the exact PR-3 stall. Filtering to `operator_dispatch` keeps the
+  // slot hidden on the deterministic flow (no panel, no channel) and live on the
+  // operator flow it is built for.
+  //
+  // Reads the active row DIRECTLY (not via `v_pipeline_dispatch_state`) so the
+  // render never depends on the view's per-row `compute_pipeline_status()`.
+  // Gated to the three slot-bearing stages; fully defensive so a seed failure
+  // can never break the stage (the slot just stays hidden).
+  const SLOT_STAGES: PipelineStatus[] = ["ideation", "review", "generation"];
+  let initialWorkItem: WorkItem | null = null;
+  if (SLOT_STAGES.includes(pipeline.status)) {
+    try {
+      const dispatch = await createAdminClient()
+        .from("work_item")
+        .select("*")
+        .eq("pipeline_id", pipeline.id)
+        .eq("kind", "operator_dispatch")
+        .in("status", ["queued", "claimed", "running"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      initialWorkItem = (dispatch.data as WorkItem | null) ?? null;
+    } catch {
+      // Seeding is best-effort: the slot falls back to hidden and the client
+      // re-seeds on the next router.refresh(). Never block the stage on it.
+      initialWorkItem = null;
+    }
+  }
+
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
   const isArchived = pipeline.deleted_at !== null;
   // Cancel is the in-flight escape hatch; archive is the "remove from my view"
@@ -211,15 +253,21 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
                 pipeline={pipeline}
                 imageBriefId={pipeline.image_brief_id}
                 videoBriefId={pipeline.video_brief_id}
+                initialWorkItem={initialWorkItem}
               />
             ) : pipeline.status === "review" ? (
               <StageReview
                 pipeline={pipeline}
                 imageBriefId={pipeline.image_brief_id}
                 videoBriefId={pipeline.video_brief_id}
+                initialWorkItem={initialWorkItem}
               />
             ) : pipeline.status === "generation" ? (
-              <StageGeneration pipeline={pipeline} initialEvents={initialEvents} />
+              <StageGeneration
+                pipeline={pipeline}
+                initialEvents={initialEvents}
+                initialWorkItem={initialWorkItem}
+              />
             ) : (pipeline.status === "creative_qa" ||
                 pipeline.status === "spec_validation" ||
                 pipeline.status === "compliance_review") &&

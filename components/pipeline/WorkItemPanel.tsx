@@ -131,6 +131,66 @@ export function WorkItemPanel({
   );
 }
 
+/**
+ * Silent-failure PR-5: an auto-hiding wrapper that mounts the WorkItemPanel at
+ * the bottom of the ideation/review/generation stages.
+ *
+ * The happy path on those stages has NO active work_item -- the dispatcher only
+ * runs during the operator-driven configuration kickoff and on recovery. So the
+ * slot renders NOTHING (returns null) unless there is an active work_item, which
+ * keeps the stage layout unchanged for the common case.
+ *
+ * Crucially, when there is no active work_item the slot does NOT mount
+ * `WorkItemPanel` at all, so `useActiveWorkItem` never runs: no work-state
+ * fetch, no realtime channel. This is the fix for the PR-3 stall, where the
+ * panel's hook subscribed + fetched unconditionally on every stage mount and
+ * stalled the review->generation flow. The seed comes from the page-level
+ * server component (`v_pipeline_dispatch_state`); when a work_item appears the
+ * page re-seeds via `router.refresh()` and the slot flips on with live data.
+ */
+export type WorkItemPanelSlotProps = {
+  pipelineId: string;
+  /** SSR-seeded active work_item for this pipeline (null when the dispatcher is idle). */
+  initialWorkItem: WorkItem | null;
+  /** Override the fetch URL (tests). */
+  url?: string;
+  /** Optional outer class forwarded to the panel. */
+  className?: string;
+};
+
+export function WorkItemPanelSlot({
+  pipelineId,
+  initialWorkItem,
+  url,
+  className,
+}: WorkItemPanelSlotProps) {
+  // No active work_item -> render nothing AND don't mount the panel (so the
+  // hook + its realtime channel never start). The common stage render stays
+  // byte-for-byte unchanged.
+  if (!initialWorkItem) return null;
+
+  const initialState: PipelineDispatchState = {
+    pipelineId,
+    derivedStatus: "configuration",
+    activeWorkItem: initialWorkItem,
+    recentEvents: [],
+    operatorDaemon: null,
+  };
+
+  return (
+    <section
+      data-testid="work-item-panel-slot"
+      aria-label="Dispatcher status"
+      className={cn("mt-2 border-t border-border pt-4", className)}
+    >
+      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Dispatcher status
+      </p>
+      <WorkItemPanel pipelineId={pipelineId} initialState={initialState} url={url} />
+    </section>
+  );
+}
+
 function HeaderRow({ workItem }: { workItem: WorkItem | null }) {
   if (!workItem) {
     return (
