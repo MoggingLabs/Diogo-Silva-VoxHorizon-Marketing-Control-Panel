@@ -67,7 +67,7 @@ WorkItemKind = Literal[
     "worker_ideation",
     "worker_generation",
     "worker_monitor",
-    # FIX-A: deterministic-mode post-generation consumers (migration 0053a).
+    # FIX-A: deterministic-mode post-generation consumers (migration 0053).
     "worker_qa",
     "worker_compliance",
     "worker_spec",

@@ -338,7 +338,7 @@ test.describe("pipeline -- FIX-A post-generation dispatch (image track)", () => 
         client_id: clientId,
         brief_id_human: `OPB-${Date.now()}`,
         status: "posted",
-        payload: { service: "remodeling" } as never,
+        payload: { service: "remodeling", budget: 5000 } as never,
         posted_at: new Date().toISOString(),
       } as never)
       .select("id")
@@ -370,9 +370,13 @@ test.describe("pipeline -- FIX-A post-generation dispatch (image track)", () => 
     expect(await readPipelineStatus(opId)).toBe("generation");
 
     // Seed a final creative (no PNG needed -- the operator dispatch path never
-    // runs the verdict engine in CI; only the enqueue is under test).
+    // runs the verdict engine in CI; only the enqueue is under test). This
+    // operator pipeline never enqueued a worker_generation work_item (it was
+    // created directly in generation, not via the review approve), so there is
+    // no consumer race to win -- emit a self-contained balanced closure (no
+    // open marker) so the closure predicate (done >= greatest(queued, running))
+    // is met and the trigger advances generation -> creative_qa.
     await seedFinalCreatives({ pipelineId: opId, briefId, count: 1 });
-    await seedGenerationOpenMarker(opId, 2);
     await emitGenerationClosure({ pipelineId: opId, taskCount: 2, outcome: "done" });
     await waitForStatus(opId, "creative_qa");
 

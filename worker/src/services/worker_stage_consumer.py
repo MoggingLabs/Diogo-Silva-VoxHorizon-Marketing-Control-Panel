@@ -317,7 +317,7 @@ def _resolve_in_scope_creatives(
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return ``(image_creatives, video_creatives)`` in scope for the gates.
 
-    Resolved EXACTLY as ``pipeline_events_auto_advance_done()`` (migration 0053b)
+    Resolved EXACTLY as ``pipeline_events_auto_advance_done()`` (migration 0054)
     seeded the creative_qa gate rows, so the deterministic consumer adjudicates
     the same set the gate predicate later reads:
 

@@ -1,11 +1,11 @@
--- 0053b_post_gen_dispatch_triggers.sql
+-- 0054_post_gen_dispatch_triggers.sql
 -- ----------------------------------------------------------------------------
 -- Silent-failure foundational redesign, FIX-A (post-generation dispatch), part B.
 --
--- 0053a added the ``worker_qa`` / ``worker_compliance`` / ``worker_spec`` enum
+-- 0053 added the ``worker_qa`` / ``worker_compliance`` / ``worker_spec`` enum
 -- values (in a separate transaction -- the enum-add-then-use hazard). This file
 -- USES them, so it MUST be a separate migration file (== a separate psql tx in
--- the Migration apply CI job) from 0053a.
+-- the Migration apply CI job) from 0053.
 --
 -- Two create-or-replace function bodies:
 --

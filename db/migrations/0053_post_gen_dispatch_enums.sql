@@ -1,4 +1,4 @@
--- 0053a_post_gen_dispatch_enums.sql
+-- 0053_post_gen_dispatch_enums.sql
 -- ----------------------------------------------------------------------------
 -- Silent-failure foundational redesign, FIX-A (post-generation dispatch), part A.
 --
@@ -18,13 +18,13 @@
 --     ``worker_spec`` work_item that the worker-stage consumer claims and runs
 --     the verdict-writer over the in-scope creatives in-process.
 --
--- This file (0053a) ONLY adds the three new ``work_item_kind`` enum values.
--- 0053b create-or-replaces the two trigger functions that USE them. The split
+-- This file (0053) ONLY adds the three new ``work_item_kind`` enum values.
+-- 0054 create-or-replaces the two trigger functions that USE them. The split
 -- into two files is deliberate: ``ALTER TYPE ... ADD VALUE`` cannot be used in
 -- the SAME transaction that later references the new value (Postgres rejects an
 -- enum value added and used in one tx). The Migration apply CI job runs each
 -- ``db/migrations/NNNN_*.sql`` file as its OWN ``psql`` invocation (its own
--- transaction), so adding the values here and using them in 0053b -- a separate
+-- transaction), so adding the values here and using them in 0054 -- a separate
 -- file == a separate transaction == a committed enum -- side-steps the hazard.
 --
 -- Forward-only + additive: ``add value if not exists`` is idempotent, so a
@@ -33,7 +33,7 @@
 -- ----------------------------------------------------------------------------
 
 -- Deterministic-mode post-generation consumers. They emit task_* pipeline_events
--- (see 0053b's work_item_emit_pipeline_event update) exactly like the other
+-- (see 0054's work_item_emit_pipeline_event update) exactly like the other
 -- worker_* kinds, so the reducer (compute_pipeline_status) -- which only folds
 -- stage_advanced -- never lets the per-creative gate work move the macro status.
 alter type work_item_kind add value if not exists 'worker_qa';
