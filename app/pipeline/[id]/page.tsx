@@ -134,20 +134,25 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   const cplTarget =
     pipeline.status === "monitor" ? await getClientCplTarget(pipeline.client_id) : null;
 
-  // Silent-failure PR-5: SSR-seed the active work_item for the stages that
-  // mount `WorkItemPanelSlot`. The happy path on ideation/review/generation has
-  // NO active work_item, so the slot renders nothing and opens no realtime
-  // channel -- but when the dispatcher IS running (operator kickoff / recovery)
-  // we hand the slot the seed so it surfaces live status without a client fetch
-  // on mount.
+  // Silent-failure PR-5: SSR-seed the active OPERATOR dispatch for the stages
+  // that mount `WorkItemPanelSlot`. The WorkItemPanel is the "what is the
+  // operator dispatcher doing right now?" surface, so the slot only ever shows
+  // for an active `operator_dispatch` work_item (kickoff / recovery on an
+  // operator-driven pipeline).
   //
-  // We read the active `work_item` row DIRECTLY (not via
-  // `v_pipeline_dispatch_state`) so the page render never depends on the view's
-  // per-row `compute_pipeline_status()` evaluation. The query mirrors the view's
-  // `active_work_item` subquery exactly (latest queued/claimed/running row).
-  // Gated to the three slot-bearing stages so other stages stay light, and made
-  // fully defensive: a seed failure must NEVER break the stage render -- it just
-  // leaves the slot hidden (initialWorkItem stays null).
+  // It deliberately does NOT seed off deterministic `worker_*` queue rows
+  // (worker_ideation / worker_generation): on the normal flow those are an
+  // internal implementation detail that can linger queued/claimed across the
+  // ideation/review/generation stages, and surfacing them would mount the panel
+  // (opening a realtime channel + daemon-health fetch) on every normal-flow
+  // stage -- the exact PR-3 stall. Filtering to `operator_dispatch` keeps the
+  // slot hidden on the deterministic flow (no panel, no channel) and live on the
+  // operator flow it is built for.
+  //
+  // Reads the active row DIRECTLY (not via `v_pipeline_dispatch_state`) so the
+  // render never depends on the view's per-row `compute_pipeline_status()`.
+  // Gated to the three slot-bearing stages; fully defensive so a seed failure
+  // can never break the stage (the slot just stays hidden).
   const SLOT_STAGES: PipelineStatus[] = ["ideation", "review", "generation"];
   let initialWorkItem: WorkItem | null = null;
   if (SLOT_STAGES.includes(pipeline.status)) {
@@ -156,6 +161,7 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         .from("work_item")
         .select("*")
         .eq("pipeline_id", pipeline.id)
+        .eq("kind", "operator_dispatch")
         .in("status", ["queued", "claimed", "running"])
         .order("created_at", { ascending: false })
         .limit(1)
