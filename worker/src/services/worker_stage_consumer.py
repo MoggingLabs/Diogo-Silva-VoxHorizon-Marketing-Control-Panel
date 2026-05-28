@@ -274,6 +274,311 @@ def _reraise_first_exception(results: list[Any]) -> None:
             raise result
 
 
+# ---------------------------------------------------------------------------
+# Deterministic post-generation gate handlers (FIX-A)
+# ---------------------------------------------------------------------------
+#
+# These are the deterministic-mode dispatch CONSUMERS for the three
+# post-generation per-creative gates that previously had no producer (every
+# pipeline deadlocked at creative_qa). Each one:
+#
+#   1. fetches the pipeline (LookupError -> terminal fault, watchdog drops it);
+#   2. resolves the in-scope creatives EXACTLY as the auto-advance trigger seeded
+#      them -- image: creatives.type='image' AND version like 'v1%' AND
+#      deleted_at is null AND status != 'killed'; video: video_creatives.status
+#      ='captioned' AND deleted_at is null;
+#   3. SKIPs creatives already terminal-good in creative_stage_state(stage)
+#      (resume-by-skip-done: a watchdog requeue must not re-adjudicate +
+#      double-charge a creative that already passed);
+#   4. calls the verdict-writer IN-PROCESS (no HTTP self-call) over the remaining
+#      creatives. The verdict-writers (qa_run / compliance_run /
+#      persist_spec_result) catch per-creative failures internally (they record a
+#      failed/pending verdict + an ``errors`` entry, they do NOT raise), so a bad
+#      creative never aborts the batch. Only an UNEXPECTED fault (pipeline row
+#      vanished, Supabase unreachable) raises -> the work_item fails + the
+#      watchdog rotates it.
+#
+# Deterministic COPY has NO consumer by design: copy stays manual (a manager
+# approves >=3 variants via /copy/decision). Deterministic FINALIZE is likewise
+# excluded (a separate pending product decision -- there is no autonomous Drive
+# uploader). Operator-mode dispatch for every post-gen stage lives in the Next
+# routes + the auto-advance trigger as operator_dispatch work_items.
+
+#: Terminal-good creative_stage_state statuses -- a creative already in one of
+#: these for the stage is SKIPPED (resume-by-skip-done). Mirrors the gate
+#: predicate's cleared set (lib/pipeline/rollup.ts + the SQL rollup).
+_TERMINAL_GOOD_STAGE_STATES: frozenset[str] = frozenset(
+    {"passed", "overridden", "skipped"}
+)
+
+
+def _resolve_in_scope_creatives(
+    sb: Any, pipeline: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(image_creatives, video_creatives)`` in scope for the gates.
+
+    Resolved EXACTLY as ``pipeline_events_auto_advance_done()`` (migration 0053b)
+    seeded the creative_qa gate rows, so the deterministic consumer adjudicates
+    the same set the gate predicate later reads:
+
+      * image -- ``creatives`` where ``brief_id = image_brief_id`` AND
+        ``type='image'`` AND ``version like 'v1%'`` AND ``deleted_at is null``
+        AND ``status != 'killed'`` (a killed creative drops out of scope);
+      * video -- ``video_creatives`` where ``brief_id = video_brief_id`` AND
+        ``status='captioned'`` AND ``deleted_at is null``.
+
+    Returns the rows (dicts with at least ``id``) for each active track; an
+    inactive track returns an empty list.
+    """
+    image_brief_id = pipeline.get("image_brief_id")
+    video_brief_id = pipeline.get("video_brief_id")
+    format_choice = str(pipeline.get("format_choice") or "image")
+    image_track = format_choice in ("image", "both") and bool(image_brief_id)
+    video_track = format_choice in ("video", "both") and bool(video_brief_id)
+
+    image_rows: list[dict[str, Any]] = []
+    if image_track:
+        resp = (
+            sb.table("creatives")
+            .select("id, status, file_path_supabase")
+            .eq("brief_id", str(image_brief_id))
+            .eq("type", "image")
+            .like("version", "v1%")
+            .is_("deleted_at", "null")
+            .execute()
+        )
+        rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+        image_rows = [
+            r for r in rows if isinstance(r, dict) and r.get("status") != "killed"
+        ]
+
+    video_rows: list[dict[str, Any]] = []
+    if video_track:
+        resp = (
+            sb.table("video_creatives")
+            .select("id, status")
+            .eq("brief_id", str(video_brief_id))
+            .eq("status", "captioned")
+            .is_("deleted_at", "null")
+            .execute()
+        )
+        rows = resp.data if (resp is not None and isinstance(resp.data, list)) else []
+        video_rows = [r for r in rows if isinstance(r, dict) and r.get("id")]
+
+    return image_rows, video_rows
+
+
+def _already_terminal_good(sb: Any, *, creative_id: str, stage: str) -> bool:
+    """True iff the creative's gate state for ``stage`` is already terminal-good.
+
+    Resume-by-skip-done: a watchdog requeue (or a duplicate dispatch) must not
+    re-adjudicate a creative that already passed -- re-running QA / compliance
+    would re-download + re-probe + potentially re-charge. A row in
+    ``passed | overridden | skipped`` is skipped; a ``pending`` / ``failed`` /
+    ``in_progress`` row (or no row) is (re)adjudicated.
+    """
+    resp = (
+        sb.table("creative_stage_state")
+        .select("status")
+        .eq("creative_id", creative_id)
+        .eq("stage", stage)
+        .maybe_single()
+        .execute()
+    )
+    row = resp.data if (resp is not None and isinstance(resp.data, dict)) else None
+    return bool(row) and row.get("status") in _TERMINAL_GOOD_STAGE_STATES
+
+
+async def _handle_worker_qa(pipeline_id: str) -> dict[str, Any]:
+    """Deterministic creative_qa: fan ``qa_run`` over the in-scope creatives.
+
+    Imports the worker-owned ``qa_run`` verdict-writer in-process (NOT over HTTP)
+    and calls it once with a batch of the not-yet-passed creatives. The writer
+    fetches the bytes (image) or probes the MP4 (video), runs the deterministic
+    backstops, adjudicates, and rolls ``creative_stage_state(creative_qa)`` per
+    creative; per-creative failures land in its ``errors`` list, never as a
+    raise. Raises ``LookupError`` only when the pipeline row is gone.
+    """
+    from ..routes.qa_compliance import QAItem, QARunInput, qa_run
+    from .pipeline_runner import fetch_pipeline
+
+    pipeline = fetch_pipeline(pipeline_id)
+    if pipeline is None:
+        raise LookupError(f"pipeline not found: {pipeline_id}")
+
+    sb = _sb_for_handler()
+    image_rows, video_rows = _resolve_in_scope_creatives(sb, pipeline)
+
+    items: list[QAItem] = []
+    for r in image_rows:
+        cid = str(r["id"])
+        if _already_terminal_good(sb, creative_id=cid, stage="creative_qa"):
+            continue
+        items.append(QAItem(creative_id=cid, surface="image"))
+    for r in video_rows:
+        cid = str(r["id"])
+        if _already_terminal_good(sb, creative_id=cid, stage="creative_qa"):
+            continue
+        items.append(QAItem(creative_id=cid, surface="video"))
+
+    if not items:
+        log.info("worker_stage_qa_nothing_to_do", pipeline_id=pipeline_id)
+        return {"pipeline_id": pipeline_id, "adjudicated": 0, "skipped_all": True}
+
+    result = await qa_run(QARunInput(pipeline_id=pipeline_id, items=items))
+    log.info(
+        "worker_stage_qa_done",
+        pipeline_id=pipeline_id,
+        adjudicated=len(result.get("results", [])),
+        errors=len(result.get("errors", [])),
+        rollup=result.get("rollup"),
+    )
+    return {
+        "pipeline_id": pipeline_id,
+        "stage": "creative_qa",
+        "adjudicated": len(result.get("results", [])),
+        "errors": len(result.get("errors", [])),
+        "rollup": result.get("rollup"),
+    }
+
+
+async def _handle_worker_compliance(pipeline_id: str) -> dict[str, Any]:
+    """Deterministic compliance_review: fan ``compliance_run`` (rules only).
+
+    Calls the worker-owned ``compliance_run`` verdict-writer in-process with
+    EMPTY ``llm_candidates`` for each not-yet-passed creative -- the deterministic
+    compliance engine still applies its rules-as-data ruleset (the operator's LLM
+    candidates are an ADD-ON, not a precondition). The writer rolls
+    ``creative_stage_state(compliance_review)`` per creative; a block-severity
+    finding fails the unit (the HARD gate). Raises ``LookupError`` only when the
+    pipeline row is gone.
+    """
+    from ..routes.qa_compliance import ComplianceItem, ComplianceRunInput, compliance_run
+    from .pipeline_runner import fetch_pipeline
+
+    pipeline = fetch_pipeline(pipeline_id)
+    if pipeline is None:
+        raise LookupError(f"pipeline not found: {pipeline_id}")
+
+    sb = _sb_for_handler()
+    image_rows, video_rows = _resolve_in_scope_creatives(sb, pipeline)
+
+    items: list[ComplianceItem] = []
+    for r in image_rows:
+        cid = str(r["id"])
+        if _already_terminal_good(sb, creative_id=cid, stage="compliance_review"):
+            continue
+        items.append(ComplianceItem(creative_id=cid, surface="image", llm_candidates=[]))
+    for r in video_rows:
+        cid = str(r["id"])
+        if _already_terminal_good(sb, creative_id=cid, stage="compliance_review"):
+            continue
+        items.append(ComplianceItem(creative_id=cid, surface="video", llm_candidates=[]))
+
+    if not items:
+        log.info("worker_stage_compliance_nothing_to_do", pipeline_id=pipeline_id)
+        return {"pipeline_id": pipeline_id, "adjudicated": 0, "skipped_all": True}
+
+    result = await compliance_run(
+        ComplianceRunInput(pipeline_id=pipeline_id, items=items)
+    )
+    log.info(
+        "worker_stage_compliance_done",
+        pipeline_id=pipeline_id,
+        adjudicated=len(result.get("results", [])),
+        errors=len(result.get("errors", [])),
+        rollup=result.get("rollup"),
+    )
+    return {
+        "pipeline_id": pipeline_id,
+        "stage": "compliance_review",
+        "adjudicated": len(result.get("results", [])),
+        "errors": len(result.get("errors", [])),
+        "rollup": result.get("rollup"),
+    }
+
+
+#: Deterministic-mode default placement for the spec gate. The spec verdict
+#: writer keys derived crops off (platform, placement); ``feed`` is the
+#: universal Meta placement every creative validates against. The worker spec
+#: backstop recomputes VIDEO placements from the real asset (and can only
+#: tighten the verdict); image creatives keep this ``pass`` (the qa_run route is
+#: the worker-owned image backstop).
+_DETERMINISTIC_SPEC_PLATFORM = "meta"
+_DETERMINISTIC_SPEC_PLACEMENT = "feed"
+
+
+async def _handle_worker_spec(pipeline_id: str) -> dict[str, Any]:
+    """Deterministic spec_validation: fan ``persist_spec_result`` per creative.
+
+    Calls the worker-owned ``persist_spec_result`` verdict-writer in-process with
+    one ``feed`` placement per not-yet-passed creative. For a VIDEO creative the
+    writer's worker backstop downloads the asset, probes it, and DOWNGRADES the
+    submitted ``pass`` to ``fail`` when the asset violates the placement spec --
+    the operator (or here, the deterministic submission) can never pass a
+    non-conformant asset. Image creatives keep the ``pass``. Rolls
+    ``creative_stage_state(spec_validation)`` per creative. Raises ``LookupError``
+    only when the pipeline row is gone.
+    """
+    from ..routes.operator_stage_tools import SpecInput, SpecResult, persist_spec_result
+    from .pipeline_runner import fetch_pipeline
+
+    pipeline = fetch_pipeline(pipeline_id)
+    if pipeline is None:
+        raise LookupError(f"pipeline not found: {pipeline_id}")
+
+    sb = _sb_for_handler()
+    image_rows, video_rows = _resolve_in_scope_creatives(sb, pipeline)
+
+    results: list[SpecResult] = []
+    for r in [*image_rows, *video_rows]:
+        cid = str(r["id"])
+        if _already_terminal_good(sb, creative_id=cid, stage="spec_validation"):
+            continue
+        results.append(
+            SpecResult(
+                creative_id=cid,
+                platform=_DETERMINISTIC_SPEC_PLATFORM,
+                placement=_DETERMINISTIC_SPEC_PLACEMENT,
+                status="pass",
+                checks={"source": "deterministic_worker_spec"},
+            )
+        )
+
+    if not results:
+        log.info("worker_stage_spec_nothing_to_do", pipeline_id=pipeline_id)
+        return {"pipeline_id": pipeline_id, "adjudicated": 0, "skipped_all": True}
+
+    result = await persist_spec_result(
+        SpecInput(pipeline_id=pipeline_id, results=results)
+    )
+    log.info(
+        "worker_stage_spec_done",
+        pipeline_id=pipeline_id,
+        placements=len(result.get("results", [])),
+        creatives=len(result.get("rollup", [])),
+    )
+    return {
+        "pipeline_id": pipeline_id,
+        "stage": "spec_validation",
+        "placements": len(result.get("results", [])),
+        "creatives": len(result.get("rollup", [])),
+    }
+
+
+def _sb_for_handler() -> Any:
+    """The service-role supabase client the deterministic handlers read with.
+
+    The verdict-writers call ``get_supabase_admin()`` themselves for their
+    writes; the handlers need the same client for the in-scope-creative
+    resolution + the skip-done probe. Lazily imported to mirror the peer
+    handlers (which import ``pipeline_runner`` lazily to avoid an import cycle).
+    """
+    from ..supabase_client import get_supabase_admin
+
+    return get_supabase_admin()
+
+
 async def _handle_worker_monitor(pipeline_id: str) -> dict[str, Any]:
     """Acknowledge a terminal monitor verdict (no-op shell -- see PR-8 report).
 
@@ -304,6 +609,11 @@ _HANDLERS: dict[str, StageHandler] = {
     "worker_ideation": _handle_worker_ideation,
     "worker_generation": _handle_worker_generation,
     "worker_monitor": _handle_worker_monitor,
+    # FIX-A: deterministic post-generation gate consumers (the missing
+    # producers that left every pipeline deadlocked at creative_qa).
+    "worker_qa": _handle_worker_qa,
+    "worker_compliance": _handle_worker_compliance,
+    "worker_spec": _handle_worker_spec,
 }
 
 

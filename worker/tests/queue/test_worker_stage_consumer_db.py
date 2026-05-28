@@ -270,3 +270,69 @@ def test_drain_no_due_rows_is_no_op(db_conn: psycopg.Connection) -> None:
         )
     )
     assert tally == {"worker_ideation": 0, "worker_generation": 0}
+
+
+@pytest.mark.parametrize(
+    "kind,stage",
+    [
+        ("worker_qa", "creative_qa"),
+        ("worker_compliance", "compliance_review"),
+        ("worker_spec", "spec_validation"),
+    ],
+)
+def test_fix_a_kinds_drain_through_lifecycle(
+    db_conn: psycopg.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    stage: str,
+) -> None:
+    """FIX-A: each new deterministic gate kind claims->runs->completes on real PG.
+
+    Validates the migration-0053a enum value + the 0053b auto-emit mapping at the
+    DB level (the emit trigger must map the new kind to task_queued/done, not
+    crash on an unknown kind). The handler is stubbed -- the in-process
+    verdict-writer fan-out is covered by the unit tests + the e2e.
+    """
+
+    async def _ok(pipeline_id: str) -> dict[str, Any]:
+        return {"pipeline_id": pipeline_id, "stage": stage}
+
+    monkeypatch.setitem(_HANDLERS, kind, _ok)
+
+    with db_conn.cursor() as cur:
+        pipeline_id = _seed_pipeline(cur)
+        cur.execute(
+            """
+            insert into work_item (kind, pipeline_id, payload, idempotency_key, created_by)
+            values (%s, %s, %s::jsonb, %s, 'test')
+            returning id
+            """,
+            (kind, pipeline_id, f'{{"stage":"{stage}"}}', f"wi:{pipeline_id}:{stage}"),
+        )
+        work_item_id = str(cur.fetchone()[0])
+    db_conn.commit()
+
+    sb = _PgSupabaseAdapter(db_conn)
+    tally = asyncio.run(run_worker_stage_drain_once(_settings(), kinds=[kind], sb=sb))
+    db_conn.commit()
+    assert tally[kind] == 1
+
+    with db_conn.cursor() as cur:
+        cur.execute(
+            "select status, claim_token from work_item where id = %s", (work_item_id,)
+        )
+        status, claim_token = cur.fetchone()
+        assert status == "completed"
+        assert claim_token is None
+        # The auto-emit trigger mapped the new kind to task_* events (NOT
+        # stage_advanced), so the per-creative gate work never moves the macro
+        # status -- assert the queued event is task_queued, not stage_advanced.
+        cur.execute(
+            "select kind from pipeline_events where pipeline_id = %s "
+            "and payload->>'work_item_id' = %s order by seq",
+            (pipeline_id, work_item_id),
+        )
+        emitted = [str(r[0]) for r in cur.fetchall()]
+        assert "task_queued" in emitted
+        assert "task_done" in emitted
+        assert "stage_advanced" not in emitted
