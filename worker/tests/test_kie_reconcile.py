@@ -1,13 +1,16 @@
 """Tests for the kie video render reconciliation sweep (E5.2 / #514).
 
 ``services.scheduler.run_kie_reconcile_once`` is the durable safety net for the
-kie video render bug: it finds renders persisted as ``submitted`` in
-``video_render_tasks`` (the callback never resolved them -- a restart mid-poll or
-a dropped callback), polls kie once for each via a FAKE kie client, and records
-the result. We assert: a completed render is downloaded + marked ``completed``; a
-failed render is marked ``failed``; a still-pending render is left + its attempt
-bumped; the pass is bounded; a per-row failure never aborts the sweep; and an
-empty open-set is a logged no-op.
+kie video render bug the watchdog CANNOT cover: a kie render can FINISH remotely
+while no callback ever arrives, and only an explicit poll of the kie API
+discovers that. Silent-failure PR-6: the durable record is the
+``work_item(kind='kie_video_render')`` (the legacy ``video_render_tasks`` table
+is retired). The sweep finds the open (``claimed`` / ``running``) work_items,
+polls kie once for each via a FAKE kie client, and closes the work_item. We
+assert: a completed render is downloaded + the work_item closed ``completed``; a
+failed render is closed ``failed``; a still-pending render is left + its attempt
+bumped with backoff; the pass is bounded; a per-row failure never aborts the
+sweep; and an empty open-set is a logged no-op.
 """
 
 from __future__ import annotations
@@ -57,6 +60,48 @@ def _install_kie(monkeypatch: pytest.MonkeyPatch, by_task: dict[str, RenderStatu
     monkeypatch.setattr(kie_video, "KieVideoClient", lambda *a, **k: _FakeKie(by_task))
 
 
+def _seed_render(
+    sb: FakeSupabase,
+    task_id: str,
+    *,
+    is_veo: bool = True,
+    status: str = "running",
+    attempt: int = 0,
+    theme: str | None = None,
+    creative_id: str | None = None,
+) -> None:
+    """Seed an open ``work_item(kind='kie_video_render')`` for a task_id.
+
+    Silent-failure PR-6: the render record is a work_item; the reconcile reads
+    the open (claimed/running) rows and closes them by idempotency_key. The
+    task_id / is_veo / theme live in the payload.
+    """
+    sb.seed(
+        "work_item",
+        [
+            {
+                "id": f"wi-{task_id}",
+                "kind": "kie_video_render",
+                "status": status,
+                "attempt": attempt,
+                "idempotency_key": f"kie:render:{task_id}",
+                "creative_id": creative_id,
+                "payload": {
+                    "task_id": task_id,
+                    "is_veo": is_veo,
+                    "theme": theme,
+                    "creative_id": creative_id,
+                },
+            }
+        ],
+    )
+
+
+def _render_updates(sb: FakeSupabase) -> list[dict[str, object]]:
+    """The work_item UPDATE patches the reconcile wrote (newest last)."""
+    return [r for n, r in sb.updates if n == "work_item"]
+
+
 @pytest.fixture
 def _stub_store(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     stored: list[str] = []
@@ -78,18 +123,7 @@ async def test_reconcile_records_completed_render(
     _stub_store: list[str],
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [
-            {
-                "task_id": "veo-done",
-                "is_veo": True,
-                "status": "submitted",
-                "theme": "roofing",
-                "creative_id": "vc-1",
-            }
-        ],
-    )
+    _seed_render(sb, "veo-done", theme="roofing", creative_id="vc-1")
     _install_kie(
         monkeypatch,
         {"veo-done": RenderStatus("veo-done", "success", urls=["https://k/d.mp4"])},
@@ -98,9 +132,11 @@ async def test_reconcile_records_completed_render(
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 1
     assert _stub_store == ["veo-done"]
-    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
+    # Closed ONLY the work_item -- no legacy render-tasks write.
+    assert not [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
+    upd = _render_updates(sb)
     assert upd and upd[-1]["status"] == "completed"
-    assert upd[-1]["clip_id"] == "clip-veo-done"
+    assert upd[-1]["result"]["clip_id"] == "clip-veo-done"
 
 
 async def test_reconcile_marks_failed_render(
@@ -109,10 +145,7 @@ async def test_reconcile_marks_failed_render(
     _stub_store: list[str],
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [{"task_id": "veo-f", "is_veo": True, "status": "submitted"}],
-    )
+    _seed_render(sb, "veo-f")
     _install_kie(
         monkeypatch, {"veo-f": RenderStatus("veo-f", "failed", error="quota")}
     )
@@ -120,9 +153,11 @@ async def test_reconcile_marks_failed_render(
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 1
     assert _stub_store == []  # a failure never stores
-    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
+    assert not [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
+    upd = _render_updates(sb)
     assert upd and upd[-1]["status"] == "failed"
-    assert upd[-1]["error"] == "quota"
+    assert upd[-1]["error_kind"] == "kie_render_failed"
+    assert upd[-1]["error_detail"]["message"] == "quota"
 
 
 async def test_reconcile_leaves_pending_and_bumps_attempt(
@@ -131,18 +166,17 @@ async def test_reconcile_leaves_pending_and_bumps_attempt(
     _stub_store: list[str],
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [{"task_id": "veo-p", "is_veo": True, "status": "submitted", "attempts": 1}],
-    )
+    _seed_render(sb, "veo-p", attempt=1)
     _install_kie(monkeypatch, {"veo-p": RenderStatus("veo-p", "pending")})
 
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 0  # nothing terminal this pass
     assert _stub_store == []
-    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
-    # The pending render's attempt was bumped (1 -> 2), status untouched.
-    assert upd and upd[-1]["attempts"] == 2
+    upd = _render_updates(sb)
+    # The pending render's attempt was bumped (1 -> 2) + next_attempt_at pushed
+    # out; the work_item status is left running (untouched).
+    assert upd and upd[-1]["attempt"] == 2
+    assert "next_attempt_at" in upd[-1]
     assert all("status" not in u for u in upd)
 
 
@@ -159,13 +193,8 @@ async def test_reconcile_bounded_per_pass(
     _stub_store: list[str],
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [
-            {"task_id": f"veo-{i}", "is_veo": True, "status": "submitted"}
-            for i in range(5)
-        ],
-    )
+    for i in range(5):
+        _seed_render(sb, f"veo-{i}")
     by_task = {
         f"veo-{i}": RenderStatus(f"veo-{i}", "success", urls=[f"https://k/{i}.mp4"])
         for i in range(5)
@@ -186,13 +215,8 @@ async def test_reconcile_poll_failure_skips_row(
     _stub_store: list[str],
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [
-            {"task_id": "veo-boom", "is_veo": True, "status": "submitted"},
-            {"task_id": "veo-good", "is_veo": True, "status": "submitted"},
-        ],
-    )
+    _seed_render(sb, "veo-boom")
+    _seed_render(sb, "veo-good")
 
     class _FlakyKie:
         async def poll_status(self, task_id: str, is_veo: bool) -> RenderStatus:  # noqa: ARG002
@@ -213,10 +237,7 @@ async def test_reconcile_store_failure_bumps_attempt(
     _patch_supabase: FakeSupabase,
 ) -> None:
     sb = _patch_supabase
-    sb.seed(
-        "_legacy_video_render_tasks",
-        [{"task_id": "veo-sf", "is_veo": True, "status": "submitted"}],
-    )
+    _seed_render(sb, "veo-sf")
     _install_kie(
         monkeypatch, {"veo-sf": RenderStatus("veo-sf", "success", urls=["https://k/s.mp4"])}
     )
@@ -227,10 +248,10 @@ async def test_reconcile_store_failure_bumps_attempt(
     monkeypatch.setattr(video_callback, "_store_render_result", _boom)
 
     resolved = await scheduler.run_kie_reconcile_once(_settings())
-    assert resolved == 0  # store failed -> not marked completed
-    upd = [r for n, r in sb.updates if n == "_legacy_video_render_tasks"]
+    assert resolved == 0  # store failed -> not closed completed
+    upd = _render_updates(sb)
     # The render stays open (attempt bumped), recoverable next pass.
-    assert all("status" not in u or u.get("status") != "completed" for u in upd)
+    assert all(u.get("status") != "completed" for u in upd)
 
 
 async def test_reconcile_skips_row_without_task_id(
@@ -238,9 +259,20 @@ async def test_reconcile_skips_row_without_task_id(
     _patch_supabase: FakeSupabase,
     _stub_store: list[str],
 ) -> None:
-    """A malformed open row (no task_id) is skipped, not crashed on."""
+    """A malformed open row (no task_id in payload) is skipped, not crashed on."""
     sb = _patch_supabase
-    sb.seed("_legacy_video_render_tasks", [{"task_id": "", "is_veo": True, "status": "submitted"}])
+    sb.seed(
+        "work_item",
+        [
+            {
+                "kind": "kie_video_render",
+                "status": "running",
+                "attempt": 0,
+                "idempotency_key": "kie:render:",
+                "payload": {"task_id": "", "is_veo": True},
+            }
+        ],
+    )
     _install_kie(monkeypatch, {})
     resolved = await scheduler.run_kie_reconcile_once(_settings())
     assert resolved == 0
@@ -255,7 +287,17 @@ def test_bump_render_attempt_never_raises() -> None:
             raise RuntimeError("supabase down")
 
     # Must not raise even when the supabase double explodes.
-    scheduler._bump_render_attempt(_Boom(), "t", "2026-05-24T00:00:00Z")
+    scheduler._bump_render_attempt(_Boom(), {"id": "wi-1", "attempt": 0})
+
+
+def test_bump_render_attempt_skips_row_without_id() -> None:
+    """A row with no id is a no-op (nothing to update); never raises."""
+
+    class _NeverTable:
+        def table(self, _name: str):  # noqa: ANN202
+            raise AssertionError("must not touch supabase when id is missing")
+
+    scheduler._bump_render_attempt(_NeverTable(), {"attempt": 2})
 
 
 def test_start_scheduler_includes_kie_reconcile_loop(

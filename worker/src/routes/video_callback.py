@@ -12,19 +12,20 @@ the result + an HMAC-SHA256 signature; we:
   1. verify the signature via the existing
      :meth:`services.kie_video.KieVideoClient.verify_webhook_signature` (reading
      the shared secret from config) -- a bad/absent signature is rejected;
-  2. look up the in-flight render in ``video_render_tasks`` by ``task_id``
-     (the durable record migration 0033 adds);
+  2. look up the in-flight render's ``work_item(kind='kie_video_render')`` by
+     its kie idempotency key (the durable record on the unified queue);
   3. download the result clip + store it in the b-roll pool, mirroring the
      polling path's completion handling in ``routes.video.search_broll``;
-  4. mark the render terminal (``completed`` / ``failed``).
+  4. close the work_item terminal (``completed`` / ``failed``).
 
 Idempotency + never-5xx: a duplicate or late callback for an already-terminal
 render is a 200 no-op (``deduped: true``) -- it NEVER re-downloads, NEVER
 re-bills, and NEVER 5xxes (kie retries on a 5xx, which would amplify the
-problem). The same ``task_id`` uniqueness that makes this idempotent also lets
-the reconciliation sweep (``services.scheduler.run_kie_reconcile_once``) and the
-callback race safely: whichever resolves the render first wins; the loser sees a
-terminal row and no-ops. The dedupe pattern mirrors the GHL webhook inbox in
+problem). The ``kie_render_idempotency_key`` UNIQUE on ``work_item`` is what
+makes this idempotent and lets the reconciliation sweep
+(``services.scheduler.run_kie_reconcile_once``) and the callback race safely:
+whichever resolves the render first wins; the loser sees a terminal work_item
+status and no-ops. The dedupe pattern mirrors the GHL webhook inbox in
 ``routes.integrations`` (probe-then-act on a unique key, drop a replay).
 
 This route is deliberately NOT bearer-authed (kie cannot present the worker's
@@ -59,11 +60,12 @@ log = structlog.get_logger(__name__)
 router = APIRouter()
 
 
-# Silent-failure PR-4 / migration 0051: the table was renamed to
-# ``_legacy_video_render_tasks``. Kie video renders are not yet on the
-# ``work_item`` queue, so the callback receiver keeps resolving rows from
-# the renamed table. TODO(follow-up issue): migrate to work_item.
-RENDER_TASKS_TABLE = "_legacy_video_render_tasks"
+#: The terminal ``work_item_status`` values an already-resolved render sits in.
+#: A callback arriving for any of these is a duplicate / late replay -- a 200
+#: no-op (never re-download, never re-bill).
+_TERMINAL_WORK_ITEM_STATUSES = frozenset(
+    {"completed", "failed", "timed_out", "cancelled"}
+)
 
 
 class KieCallbackBody(BaseModel):
@@ -122,11 +124,20 @@ def _extract_result_urls(body: dict[str, Any]) -> list[str]:
 
 
 def _fetch_render_task(task_id: str) -> dict[str, Any] | None:
+    """Look up the in-flight render's ``work_item`` by its kie idempotency key.
+
+    Silent-failure PR-6: the durable render record is the
+    ``work_item(kind='kie_video_render')`` enqueued at submit
+    (``persist_submitted_render_work_item``). Both producer and this closer use
+    ``kie_render_idempotency_key(task_id)``, so the UNIQUE collapses any
+    duplicate-submit race to one row. Returns the row (status + ``payload`` with
+    ``theme`` / ``creative_id``) or ``None`` when no render was recorded.
+    """
     sb = get_supabase_admin()
     resp = (
-        sb.table(RENDER_TASKS_TABLE)
+        sb.table("work_item")
         .select("*")
-        .eq("task_id", task_id)
+        .eq("idempotency_key", kie_render_idempotency_key(task_id))
         .maybe_single()
         .execute()
     )
@@ -159,20 +170,16 @@ async def _store_render_result(
 
 
 def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> None:
+    """Close the render's work_item ``completed`` (silent-failure PR-6).
+
+    Idempotency-key targeted UPDATE so the same task_id always resolves the one
+    canonical ``work_item(kind='kie_video_render')`` row (even if a duplicate
+    enqueue ever raced past the UNIQUE backstop). This is the sole durable
+    record now -- the legacy ``video_render_tasks`` write is retired.
+    Best-effort -- a closure failure must not 5xx the callback (kie retries on a
+    5xx), the watchdog sweeps any unclosed row past the heartbeat threshold.
+    """
     sb = get_supabase_admin()
-    sb.table(RENDER_TASKS_TABLE).update(
-        {
-            "status": "completed",
-            "result_url": result_url,
-            "clip_id": clip_id,
-            "completed_at": _now_iso(),
-        }
-    ).eq("task_id", task_id).execute()
-    # Silent-failure PR-4: also close the work_item(kind='kie_video_render').
-    # Idempotency-key targeted UPDATE so the same task_id always resolves the
-    # one canonical row (even if a duplicate enqueue ever raced past the
-    # UNIQUE backstop). Best-effort -- a closure failure must not 5xx the
-    # callback (kie retries on a 5xx), the watchdog will sweep the row.
     try:
         sb.table("work_item").update(
             {
@@ -195,9 +202,9 @@ def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> No
 def _mark_work_item_failed(task_id: str, *, error: str) -> None:
     """Close the work_item(kind='kie_video_render') as failed for a kie failure.
 
-    Silent-failure PR-4 mirror of the legacy table's failure stamp. Best-effort
-    -- a closure failure must not 5xx the callback; the watchdog sweeps any
-    unclosed rows past the heartbeat threshold.
+    Silent-failure PR-6: the sole durable failure stamp (the legacy table is
+    retired). Best-effort -- a closure failure must not 5xx the callback; the
+    watchdog sweeps any unclosed rows past the heartbeat threshold.
     """
     sb = get_supabase_admin()
     try:
@@ -230,11 +237,12 @@ async def kie_video_callback(
 
     Auth is the HMAC signature (kie cannot present the worker bearer). Order:
     (1) extract + verify the signature over ``f"{taskId}.{timestamp}"``; a bad
-    or unverifiable signature 401s; (2) look up the in-flight render; an unknown
-    task 404s (kie won't retry a 404 forever, and there's nothing to record);
-    (3) if the render is ALREADY terminal, no-op + 200 (idempotent -- duplicate /
-    late callback); (4) otherwise download + store the result, mark the row
-    terminal, and 200. NEVER 5xxes on a duplicate/late callback.
+    or unverifiable signature 401s; (2) look up the in-flight render's
+    work_item; an unknown task 404s (kie won't retry a 404 forever, and there's
+    nothing to record); (3) if the work_item is ALREADY terminal, no-op + 200
+    (idempotent -- duplicate / late callback); (4) otherwise download + store
+    the result, close the work_item terminal, and 200. NEVER 5xxes on a
+    duplicate/late callback.
     """
     payload: dict[str, Any] = dict(body.model_dump())
 
@@ -246,7 +254,7 @@ async def kie_video_callback(
     if not secret:
         # Cannot verify without the key -- refuse rather than trust an unsigned
         # body. 503 (config gap), and the reconciliation sweep recovers the
-        # render durably from video_render_tasks regardless.
+        # render durably from the work_item queue regardless.
         log.error("kie_callback_no_secret_configured", task_id=task_id)
         raise HTTPException(
             status_code=503, detail="kie webhook secret not configured"
@@ -263,9 +271,11 @@ async def kie_video_callback(
         log.warning("kie_callback_unknown_task", task_id=task_id)
         raise HTTPException(status_code=404, detail=f"unknown render task: {task_id}")
 
-    # (3) Idempotent: an already-terminal render is a 200 no-op. This is the
+    # (3) Idempotent: an already-terminal work_item is a 200 no-op. This is the
     # never-re-download / never-re-bill guard AND the duplicate-callback guard.
-    if task.get("status") in ("completed", "failed"):
+    # A row the watchdog dead-lettered (``timed_out``) or a pipeline cancel
+    # closed (``cancelled``) is terminal too -- never re-open it.
+    if task.get("status") in _TERMINAL_WORK_ITEM_STATUSES:
         log.info("kie_callback_duplicate", task_id=task_id, status=task.get("status"))
         return {
             "ok": True,
@@ -274,34 +284,30 @@ async def kie_video_callback(
             "status": task.get("status"),
         }
 
-    # (4) Resolve the result. A callback can also report a failure -- record it
-    # terminal so the sweep never re-polls a dead render.
-    sb = get_supabase_admin()
+    # The render's metadata (theme / creative_id) lives in the work_item payload;
+    # creative_id is also mirrored to the top-level column at enqueue.
+    render_payload = task.get("payload") if isinstance(task.get("payload"), dict) else {}
+    theme = render_payload.get("theme")
+    creative_id = task.get("creative_id") or render_payload.get("creative_id")
+
+    # (4) Resolve the result. A callback can also report a failure -- close the
+    # work_item terminal so the sweep never re-polls a dead render.
     state = _callback_state(payload)
     if state == "failed":
         error_msg = _callback_error(payload)
-        sb.table(RENDER_TASKS_TABLE).update(
-            {
-                "status": "failed",
-                "error": error_msg,
-                "completed_at": _now_iso(),
-            }
-        ).eq("task_id", task_id).execute()
         _mark_work_item_failed(task_id, error=error_msg)
         log.info("kie_callback_failed", task_id=task_id)
         return {"ok": True, "deduped": False, "task_id": task_id, "status": "failed"}
 
     urls = _extract_result_urls(payload)
-    stored = await _store_render_result(
-        task_id=task_id, theme=task.get("theme"), urls=urls
-    )
+    stored = await _store_render_result(task_id=task_id, theme=theme, urls=urls)
     _mark_completed(
         task_id, result_url=urls[0], clip_id=str(stored.get("clip_id") or "") or None
     )
     log.info(
         "kie_callback_recorded",
         task_id=task_id,
-        creative_id=task.get("creative_id"),
+        creative_id=creative_id,
         clip_id=stored.get("clip_id"),
     )
     return {
@@ -342,7 +348,6 @@ __all__ = [
     "router",
     "KieCallbackBody",
     "kie_video_callback",
-    "RENDER_TASKS_TABLE",
     "_mark_completed",
     "_mark_work_item_failed",
 ]
