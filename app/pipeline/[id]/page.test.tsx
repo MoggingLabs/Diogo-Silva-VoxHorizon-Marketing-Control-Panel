@@ -165,15 +165,11 @@ function pipeline(over: Record<string, unknown>) {
 
 describe("PipelineDetailPage", () => {
   beforeEach(() => {
-    // Default: the dispatch-state view returns no active work_item, so the
-    // slot stays hidden. Tests that need a seed override `currentAdmin`.
+    // Default: no active work_item row, so the slot stays hidden. Tests that
+    // need a seed override `currentAdmin`.
     currentAdmin = mockSupabaseClient({
-      v_pipeline_dispatch_state: {
-        select: {
-          data: null,
-          error: null,
-          single: { data: { active_work_item: null }, error: null },
-        },
+      work_item: {
+        select: { data: null, error: null, single: { data: null, error: null } },
       },
     });
   });
@@ -266,11 +262,11 @@ describe("PipelineDetailPage", () => {
     });
     currentSupabase = mockSupabaseClient();
     currentAdmin = mockSupabaseClient({
-      v_pipeline_dispatch_state: {
+      work_item: {
         select: {
           data: null,
           error: null,
-          single: { data: { active_work_item: { id: "wi-42" } }, error: null },
+          single: { data: { id: "wi-42" }, error: null },
         },
       },
     });
@@ -279,8 +275,8 @@ describe("PipelineDetailPage", () => {
     const stage = screen.getByTestId("stage");
     expect(stage).toHaveAttribute("data-stage", "ideation");
     expect(stage).toHaveAttribute("data-work-item", "wi-42");
-    // The dispatch-state view was read via the admin client.
-    expect(currentAdmin._spies.from).toHaveBeenCalledWith("v_pipeline_dispatch_state");
+    // The active work_item was read via the admin client.
+    expect(currentAdmin._spies.from).toHaveBeenCalledWith("work_item");
   });
 
   it("PR-5: threads a null seed when the dispatcher is idle on review", async () => {
@@ -296,14 +292,14 @@ describe("PipelineDetailPage", () => {
     expect(stage).toHaveAttribute("data-work-item", "none");
   });
 
-  it("PR-5: does NOT read the dispatch-state view on non-slot stages", async () => {
+  it("PR-5: does NOT read the work_item seed on non-slot stages", async () => {
     getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "monitor" }), events: [] });
     currentSupabase = mockSupabaseClient();
     const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
     render(el);
     // The slot only lives on ideation/review/generation -- monitor must not
-    // pay for the admin view read.
-    expect(currentAdmin._spies.from).not.toHaveBeenCalledWith("v_pipeline_dispatch_state");
+    // pay for the admin seed read.
+    expect(currentAdmin._spies.from).not.toHaveBeenCalledWith("work_item");
   });
 
   it("renders done stage and hides cancel button", async () => {

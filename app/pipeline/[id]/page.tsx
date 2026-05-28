@@ -139,18 +139,33 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   // NO active work_item, so the slot renders nothing and opens no realtime
   // channel -- but when the dispatcher IS running (operator kickoff / recovery)
   // we hand the slot the seed so it surfaces live status without a client fetch
-  // on mount. Reads ONE row from `v_pipeline_dispatch_state` via the admin
-  // client (RLS deny-all on the work_item tables), mirroring the work-state
-  // route. Gated to the three slot-bearing stages so other stages stay light.
+  // on mount.
+  //
+  // We read the active `work_item` row DIRECTLY (not via
+  // `v_pipeline_dispatch_state`) so the page render never depends on the view's
+  // per-row `compute_pipeline_status()` evaluation. The query mirrors the view's
+  // `active_work_item` subquery exactly (latest queued/claimed/running row).
+  // Gated to the three slot-bearing stages so other stages stay light, and made
+  // fully defensive: a seed failure must NEVER break the stage render -- it just
+  // leaves the slot hidden (initialWorkItem stays null).
   const SLOT_STAGES: PipelineStatus[] = ["ideation", "review", "generation"];
   let initialWorkItem: WorkItem | null = null;
   if (SLOT_STAGES.includes(pipeline.status)) {
-    const dispatch = await createAdminClient()
-      .from("v_pipeline_dispatch_state")
-      .select("active_work_item")
-      .eq("pipeline_id", pipeline.id)
-      .maybeSingle();
-    initialWorkItem = (dispatch.data?.active_work_item as WorkItem | null) ?? null;
+    try {
+      const dispatch = await createAdminClient()
+        .from("work_item")
+        .select("*")
+        .eq("pipeline_id", pipeline.id)
+        .in("status", ["queued", "claimed", "running"])
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+      initialWorkItem = (dispatch.data as WorkItem | null) ?? null;
+    } catch {
+      // Seeding is best-effort: the slot falls back to hidden and the client
+      // re-seeds on the next router.refresh(). Never block the stage on it.
+      initialWorkItem = null;
+    }
   }
 
   const placeholder = STAGE_PLACEHOLDER_LABEL[pipeline.status];
