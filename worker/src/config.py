@@ -173,6 +173,20 @@ class Settings(BaseSettings):
     scheduler_outbox_drain_interval_s: int = 5
     outbox_max_attempts: int = 5
 
+    # === Silent-failure redesign PR-8: worker-stage consumer ===
+    # The worker-stage drain loop
+    # (``services.worker_stage_consumer.run_worker_stage_drain_once``) claims
+    # work_item rows of the deterministic ``worker_ideation`` /
+    # ``worker_generation`` kinds and runs the in-process producer for each --
+    # the missing consumer half of the PR-3 cutover (which removed the routes'
+    # fire-and-forget HTTP kicks but never built a claimant for these kinds).
+    # These stages are LONGER-running than the outbox handlers (each calls Kie /
+    # renders), so the consumer heartbeats the claimed row throughout the run
+    # (cadence = ``work_item_consumer_heartbeat_s``) to keep the watchdog from
+    # reclaiming it mid-render. A slightly slower interval than the outbox drain
+    # is fine: ideation/generation are kicked by a manager gate, not high-volume.
+    scheduler_worker_stage_interval_s: int = 5
+
     # Slack approval fan-out (HI-17, post-Slack-pivot 2026-05-18). The worker
     # posts high-urgency approval notifications to a single Slack channel via
     # chat.postMessage. The bot token is sourced at deploy time from
