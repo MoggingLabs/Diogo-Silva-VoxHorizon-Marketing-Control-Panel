@@ -356,6 +356,38 @@ def test_start_scheduler_retires_legacy_watchdogs(
     assert "scheduler:work_item_watchdog" in names
 
 
+def test_start_scheduler_includes_worker_stage_drain_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Silent-failure PR-8: the worker-stage consumer drain loop is wired.
+
+    The drain claims the deterministic ``worker_ideation`` / ``worker_generation``
+    work_item rows the Next routes enqueue for non-operator-driven pipelines (the
+    PR-3 cutover removed the fire-and-forget HTTP kicks but never built a
+    claimant). Its loop MUST be in the scheduler's task set alongside the outbox
+    drain + the unified watchdog.
+    """
+    import asyncio
+
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "secret")
+    get_settings.cache_clear()
+
+    names: list[str] = []
+
+    async def _run() -> None:
+        sched = scheduler.start_scheduler(get_settings())
+        names.extend(t.get_name() for t in sched._tasks)
+        await sched.stop()
+
+    asyncio.run(_run())
+    get_settings.cache_clear()
+    assert "scheduler:worker_stage_drain" in names
+    # The outbox drain + unified watchdog are still wired (regression guard).
+    assert "scheduler:outbox_drain" in names
+    assert "scheduler:work_item_watchdog" in names
+
+
 # Silent-failure PR-4: the `run_outbox_relay_once` scheduler wrapper +
 # the `outbox_relay` module it delegated to were deleted. The unified
 # `work_item_watchdog` covers the equivalent surface now.

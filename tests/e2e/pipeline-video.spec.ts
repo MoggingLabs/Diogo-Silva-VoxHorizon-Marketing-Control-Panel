@@ -5,6 +5,7 @@ import { mockWorkerIdeation } from "./_mocks/sse-harness";
 import {
   CLEAN_VIDEO_SCRIPT_OUTLINE,
   assertWorkerHealthy,
+  awaitWorkerStageClosed,
   dropVideoIdeationDrafts,
   emitGenerationClosure,
   qaVideoItems,
@@ -13,6 +14,7 @@ import {
   readStageStates,
   readVideoCopyVariants,
   seedFinalVideoCreatives,
+  seedGenerationOpenMarker,
   waitForStatus,
   workerPost,
 } from "./_mocks/workflow-driver";
@@ -177,24 +179,52 @@ test.describe("pipeline - video format", () => {
     // the config view - reload to render the ideation grid over the seeded rows.
     await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText(/Picked:\s*0\s*of\s*3/)).toBeVisible({ timeout: 15_000 });
-    await page
-      .getByRole("checkbox", { name: /pick video concept/i })
-      .nth(0)
-      .click();
-    await expect(page.getByText(/Video:\s*1\s*picked/)).toBeVisible();
 
-    await page.getByRole("button", { name: /continue to review/i }).click();
+    // Record the pick + drive ideation->review through the API. The ideation
+    // checkbox + "continue to review" button update `pipelines.picks` and the
+    // status OPTIMISTICALLY in the UI before the writes commit server-side, so an
+    // immediately-following API advance/approve raced them (insufficient-picks
+    // 422 / wrong-state 409). The API picks write is the same route the checkbox
+    // calls and is committed on return, so the advance gate sees the pick.
+    const picksRes = await managerPost(pipelineId, "picks", { video: [seeded.video[0]!.id] });
+    expect(picksRes.status, JSON.stringify(picksRes.body)).toBe(200);
+    await expectAdvance(pipelineId, "review");
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Review", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
 
     // ===================================================================
-    // review → generation (UI Approve)
+    // review → generation (API Approve, then open the batch atomically)
     // ===================================================================
-    await page.getByRole("button", { name: /^approve$/i }).click();
+    // Silent-failure PR-8: drive the approve through the API so the route's
+    // `worker_generation` enqueue has COMPLETED on return, then immediately open
+    // the generation batch (a fast write, no UI-visibility wait in between) so
+    // the producer's `generation_state` probe reports `already_running` before
+    // the consumer's next poll. For VIDEO the real render chain (TTS / compose /
+    // caption) has NO fake mode in CI, so the captioned final + its closure are
+    // seeded below; the consumer claims + closes the work_item as a
+    // no-op-but-real re-entry (proven via emitGenerationClosure's await) without
+    // emitting conflicting task_error events that would unbalance the closure.
+    const approve = await managerPost(pipelineId, "review/decision", {
+      decision: "approved",
+    });
+    expect(approve.status, JSON.stringify(approve.body)).toBe(200);
+    await seedGenerationOpenMarker(pipelineId, 2);
+    expect(await readPipelineStatus(pipelineId)).toBe("generation");
+
+    // Focused UI assertion: the Generation stage renders after the API advance.
+    await page.goto(`/pipeline/${pipelineId}`);
     await expect(page.getByText("Generation", { exact: true }).first()).toBeVisible({
       timeout: 15_000,
     });
+
+    // Prove the worker-stage consumer claimed + closed the worker_ideation row
+    // the configuration->ideation advance enqueued (the seeded video drafts
+    // satisfy the producer's idempotency probe, so the real service runs as a
+    // no-op-but-real re-entry and closes the row).
+    const ideationClose = await awaitWorkerStageClosed(pipelineId, "worker_ideation");
+    expect(ideationClose === null || ideationClose === "completed").toBeTruthy();
 
     // ===================================================================
     // generation → creative_qa (AUTO B1 trigger, migration 0046)
@@ -213,7 +243,12 @@ test.describe("pipeline - video format", () => {
       briefId: videoBriefId,
       count: 1,
     });
-    await emitGenerationClosure({ pipelineId, taskCount: 2, outcome: "done" });
+    await emitGenerationClosure({
+      pipelineId,
+      taskCount: 2,
+      outcome: "done",
+      alreadyOpened: true,
+    });
     await waitForStatus(pipelineId, "creative_qa");
     // The B1 trigger seeded a pending creative_qa gate row per final VIDEO
     // creative (joined on video_brief_id, status='captioned').

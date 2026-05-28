@@ -10,6 +10,7 @@ import {
 import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
 import type { Database, Json } from "@/lib/supabase/types.gen";
+import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -146,12 +147,30 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     }
   }
 
-  // Forward the verdict to the worker (kill → pause/archive; scale → budget
-  // bump). Best-effort: the run already terminated, so a worker outage must
-  // not undo it.
-  void fireWorkerMonitor(id, decision, campaign_id).catch((e) => {
-    console.warn(`[pipelines.monitor.decision] worker monitor kick failed for ${id}: ${String(e)}`);
-  });
+  // Forward the verdict to the worker queue (kill → pause/archive; scale →
+  // budget bump). Silent-failure PR-8: this used to fire-and-forget at
+  // `POST /work/pipeline/monitor`, which DOES NOT EXIST in the worker (the
+  // monitor ACTION was never implemented as a service) -- so the kick 404'd
+  // and was swallowed, leaving the verdict's side effect untracked + invisible.
+  // The honest fix is to enqueue a `worker_monitor` work_item: the row makes
+  // the verdict tracked + visible on the dashboard, and the worker-stage
+  // consumer claims + acknowledges it (the real Meta pause / budget write is a
+  // one-function drop-in there, mirroring the outbox no-op shells). Best-effort:
+  // the run already reached `done`, so an enqueue failure must NOT undo it --
+  // we log and continue rather than 5xx.
+  try {
+    await enqueueWorkItem({
+      kind: "worker_monitor",
+      pipelineId: id,
+      payload: { decision, campaign_id: campaign_id ?? null, stage: "done" },
+      idempotencyKey: `wm:${id}:${decision}`,
+      createdBy: "api/pipelines/monitor/decision",
+    });
+  } catch (e) {
+    console.warn(
+      `[pipelines.monitor.decision] worker_monitor enqueue failed for ${id}: ${String(e)}`,
+    );
+  }
 
   return NextResponse.json({
     pipeline: { ...updated, status: "done" as PipelineStatus },
@@ -229,31 +248,4 @@ async function spawnNextBriefPipeline(
   }
 
   return { ok: true, pipelineId: child.id };
-}
-
-/**
- * Fire-and-forget POST to the worker's monitor endpoint. Same contract as the
- * other worker helpers: skip when unconfigured, swallow 404, throw otherwise.
- */
-async function fireWorkerMonitor(
-  pipelineId: string,
-  decision: "kill" | "scale",
-  campaignId?: string,
-): Promise<void> {
-  const base = process.env.WORKER_URL?.replace(/\/$/, "");
-  const secret = process.env.WORKER_SHARED_SECRET;
-  if (!base || !secret) return;
-  const res = await fetch(`${base}/work/pipeline/monitor`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${secret}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ pipeline_id: pipelineId, decision, campaign_id: campaignId }),
-    cache: "no-store",
-  });
-  if (!res.ok && res.status !== 404) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`worker /work/pipeline/monitor -> ${res.status}: ${text.slice(0, 200)}`);
-  }
 }

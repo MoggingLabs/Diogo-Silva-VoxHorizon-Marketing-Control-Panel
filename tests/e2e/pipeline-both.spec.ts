@@ -4,6 +4,7 @@ import { makeSquarePngBase64 } from "./_mocks/png-fixture";
 import {
   CLEAN_VIDEO_SCRIPT_OUTLINE,
   assertWorkerHealthy,
+  awaitWorkerStageClosed,
   dropVideoIdeationDrafts,
   emitGenerationClosure,
   qaPassItems,
@@ -14,6 +15,7 @@ import {
   readVideoCopyVariants,
   seedFinalCreatives,
   seedFinalVideoCreatives,
+  seedGenerationOpenMarker,
   waitForStatus,
   workerPost,
 } from "./_mocks/workflow-driver";
@@ -205,6 +207,19 @@ test.describe("pipeline - both formats", () => {
     expect(reviewDecision.status, JSON.stringify(reviewDecision.body)).toBe(200);
     expect(await readPipelineStatus(pipelineId)).toBe("generation");
 
+    // Silent-failure PR-8: open the generation batch immediately so the real
+    // worker-stage consumer (now draining `worker_generation`) treats the stage
+    // as in-flight and skips the in-process producer for BOTH tracks -- so it
+    // does not add image v1.0 finals (FAKE_RENDER) or attempt the video render
+    // chain (no fake mode in CI). The seeded finals below are the exact gate
+    // scope; the consumer still claims + closes the work_item (a no-op-but-real
+    // re-entry), proven via awaitWorkerStageClosed in emitGenerationClosure.
+    await seedGenerationOpenMarker(pipelineId, 2);
+
+    // Prove the worker-stage consumer claimed + closed the worker_ideation row.
+    const ideationClose = await awaitWorkerStageClosed(pipelineId, "worker_ideation");
+    expect(ideationClose === null || ideationClose === "completed").toBeTruthy();
+
     // ===================================================================
     // generation → creative_qa (AUTO B1 trigger seeds image AND video QA gates)
     // Seed 1 image final (v1.0) + 1 video captioned final; drop the video
@@ -217,7 +232,12 @@ test.describe("pipeline - both formats", () => {
       briefId: videoBriefId,
       count: 1,
     });
-    await emitGenerationClosure({ pipelineId, taskCount: 2, outcome: "done" });
+    await emitGenerationClosure({
+      pipelineId,
+      taskCount: 2,
+      outcome: "done",
+      alreadyOpened: true,
+    });
     await waitForStatus(pipelineId, "creative_qa");
 
     const qaStates = (await readStageStates(pipelineId)).filter((s) => s.stage === "creative_qa");

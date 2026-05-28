@@ -110,60 +110,154 @@ export async function seedFinalCreatives(args: {
 }
 
 /**
- * Emit the generation work-closure events the real producer would, so the
- * migration-0024 trigger fires `generation → creative_qa` and seeds the QA gate
- * rows. The trigger keys off the latest `stage_advanced→generation` cutoff
- * (written by the review/decision approve) and the queued/done counts after it,
- * with the all-failed guard (`v_done >= 1`).
+ * Open the generation batch so the PR-8 worker-stage consumer treats it as
+ * already-in-flight and does NOT re-render. Call this IMMEDIATELY after the
+ * review approve (which enqueues the `worker_generation` work_item) and BEFORE
+ * seeding the finals.
  *
- * Pass `outcome: "done"` for the happy path (≥1 success ⇒ advance) or
- * `outcome: "error"` for the NEGATIVE no-stall case (all task_error ⇒ the
- * pipeline must STAY in generation).
+ * Why: with a real consumer draining `worker_generation`, there is a race
+ * between the route enqueuing the row and the spec seeding the deterministic
+ * closure. If the consumer claimed the row in that window it would run the real
+ * generation producer (rendering image finals under FAKE_RENDER), which would
+ * add v1.0 creatives that break the per-creative QA-gate assertions. Emitting an
+ * OPEN batch (`taskCount` × `task_queued` + `task_running`, no `task_done`)
+ * makes the producer's `generation_state` probe report `already_running`, so the
+ * consumer claims the row, runs the in-process service, finds the stage in
+ * flight, and closes the work_item WITHOUT rendering. This is a fast DB write
+ * right after approve, so it deterministically wins the race against the
+ * consumer's poll interval -- and `emitGenerationClosure` (terminal events only)
+ * then balances these and drives the actual `generation → creative_qa` advance.
  *
- * Silent-failure PR-3 cutover: the work_item is the single source of truth.
- * The review/decision approve route enqueues a `worker_generation` work_item
- * which fires the auto-emit trigger's matching `task_queued, stage=generation`
- * event. The mock no longer writes pipeline_events directly -- we only flip
- * the work_item to `completed` / `failed` and let the trigger emit the
- * `task_done` / `task_error` event. The trigger emits ONE event per status
- * transition, so the migration-0024 closure count (v_done + v_error >=
- * greatest(v_queued, v_running)) is met by the single work_item lifecycle.
+ * Contract: pair this with `emitGenerationClosure({ taskCount })` using the SAME
+ * `taskCount` so the migration-0051 closure predicate balances
+ * (`done >= greatest(queued, running)`).
+ */
+export async function seedGenerationOpenMarker(pipelineId: string, taskCount = 2): Promise<void> {
+  const admin = getAdminClient();
+  const count = Math.max(1, taskCount);
+  for (let i = 0; i < count; i += 1) {
+    const payload = { kind: "image", concept: `e2e-open-${i + 1}` } as Json;
+    for (const kind of ["task_queued", "task_running"] as const) {
+      const { error } = await admin.from("pipeline_events").insert({
+        pipeline_id: pipelineId,
+        kind,
+        stage: "generation",
+        payload,
+      });
+      if (error) {
+        throw new Error(`seedGenerationOpenMarker (${kind}) failed: ${error.message}`);
+      }
+    }
+  }
+}
+
+/**
+ * Drive the `generation → creative_qa` transition AND prove the real PR-8
+ * worker-stage consumer ran the deterministic generation work.
  *
- * `taskCount` is retained on the signature so the spec stays unchanged; under
- * the unified queue, the lifecycle is per-work_item, not per-task, so a
- * second work_item per pipeline would simply ride the same enqueue path. The
- * tests that need multiple "tasks" enqueue multiple work_items upstream.
+ * Silent-failure PR-8 reconciliation: the worker-stage consumer
+ * (`services.worker_stage_consumer`) now runs in the e2e worker and CLAIMS the
+ * `worker_generation` work_item the review approve enqueued. This helper no
+ * longer SIMULATES generation by flipping that work_item itself (wrong +
+ * duplicative now that a real consumer owns the row). Instead it seeds the
+ * deterministic closure the migration-0051 trigger keys off (the
+ * `task_done(stage=generation)` chains -- the UPSTREAM-output stand-in, since
+ * image finals run for real under FAKE_RENDER but the VIDEO render chain has no
+ * fake mode in CI) and then awaits the real consumer claiming + closing the row.
+ *
+ * Pair the happy path with `seedGenerationOpenMarker(taskCount)` right after the
+ * approve + pass `alreadyOpened: true` here; see those two docstrings for the
+ * race-elimination contract.
  */
 export async function emitGenerationClosure(args: {
   pipelineId: string;
   taskCount: number;
   outcome: "done" | "error";
+  alreadyOpened?: boolean;
 }): Promise<void> {
-  void args.taskCount; // retained for signature stability; see docstring
   const admin = getAdminClient();
-  // Flip the dual-written work_item to a terminal status. The auto-emit
-  // trigger fires the matching task_done / task_error pipeline_events row
-  // keyed to `stage='generation'`, which the migration-0024 trigger counts.
-  // Skip silently when no row exists (e.g. unit tests that bypass the
-  // approval route).
-  const finalStatus = args.outcome === "done" ? "completed" : "failed";
-  const completedAt = new Date().toISOString();
-  const update: {
-    status: "completed" | "failed";
-    completed_at: string;
-    error_kind?: string;
-  } = { status: finalStatus, completed_at: completedAt };
-  if (finalStatus === "failed") {
-    // The work_item_failure_explained CHECK constraint requires `error_kind`
-    // when status flips to failed/timed_out.
-    update.error_kind = "synthetic_e2e_closure";
+  const count = Math.max(1, args.taskCount);
+  const terminal = args.outcome === "done" ? "task_done" : "task_error";
+  // When the batch was pre-opened by `seedGenerationOpenMarker` (the happy path,
+  // to win the consumer race), emit ONLY the terminal events to balance + close.
+  // Otherwise (the negative all-failed case on a throwaway pipeline that never
+  // opened a batch) emit a self-contained balanced chain. The migration-0051
+  // closure predicate is `done >= greatest(queued, running) and done >= 1`, so
+  // balanced counts advance on `done` and leave an all-error batch stuck.
+  const kinds: ReadonlyArray<"task_queued" | "task_running" | "task_done" | "task_error"> =
+    args.alreadyOpened ? [terminal] : ["task_queued", "task_running", terminal];
+  for (let i = 0; i < count; i += 1) {
+    const payload = { kind: "image", concept: `e2e-closure-${i + 1}` } as Json;
+    for (const kind of kinds) {
+      const { error } = await admin.from("pipeline_events").insert({
+        pipeline_id: args.pipelineId,
+        kind,
+        stage: "generation",
+        payload,
+      });
+      if (error) {
+        throw new Error(`emitGenerationClosure (${kind}) failed: ${error.message}`);
+      }
+    }
   }
-  await admin
-    .from("work_item")
-    .update(update as never)
-    .eq("pipeline_id", args.pipelineId)
-    .eq("kind", "worker_generation")
-    .eq("status", "queued");
+
+  // Prove the real consumer claimed + closed the worker_generation row. Only
+  // the happy-path pipelines actually enqueued one (the review approve route);
+  // the negative case seeds a throwaway pipeline with no real work_item, so
+  // there is nothing for the consumer to close -- skip the wait there.
+  if (args.outcome === "done") {
+    await awaitWorkerStageClosed(args.pipelineId, "worker_generation");
+  }
+}
+
+/**
+ * Wait for the PR-8 worker-stage consumer to CLAIM and CLOSE (terminal status)
+ * the `work_item` of `kind` for a pipeline. This is the e2e proof that the
+ * deterministic ideation/generation consumer half runs end-to-end: the route
+ * enqueued the row `queued`, the consumer claimed it (`claimed`/`running`), ran
+ * the in-process service, and closed it (`completed`, or `failed`/`timed_out`
+ * if it genuinely faulted). Returns the terminal status observed.
+ *
+ * Tolerates the row never having been enqueued (returns `null`) so a spec that
+ * runs with the Next→worker push off (no `WORKER_URL`) and never created the
+ * row does not hang -- but in CI the routes always enqueue it via the admin
+ * client regardless of `WORKER_URL`, so the consumer path IS exercised.
+ */
+export async function awaitWorkerStageClosed(
+  pipelineId: string,
+  kind: "worker_ideation" | "worker_generation" | "worker_monitor",
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<string | null> {
+  const admin = getAdminClient();
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const intervalMs = opts.intervalMs ?? 400;
+  const deadline = Date.now() + timeoutMs;
+  const terminal = new Set(["completed", "failed", "timed_out", "cancelled"]);
+  let lastStatus: string | null = null;
+  let everSeen = false;
+  while (Date.now() < deadline) {
+    const { data } = await admin
+      .from("work_item")
+      .select("status")
+      .eq("pipeline_id", pipelineId)
+      .eq("kind", kind)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    const status = (data as { status?: string } | null)?.status ?? null;
+    if (status) {
+      everSeen = true;
+      lastStatus = status;
+      if (terminal.has(status)) return status;
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  if (!everSeen) return null;
+  throw new Error(
+    `awaitWorkerStageClosed: ${kind} for pipeline ${pipelineId} stuck at '${lastStatus}' ` +
+      `(never reached a terminal status within ${timeoutMs}ms) -- the worker-stage consumer ` +
+      `did not claim+close it. Is the scheduler's worker_stage_drain loop running?`,
+  );
 }
 
 /** The four universal QA vision rubric items (non-roofing vertical). */

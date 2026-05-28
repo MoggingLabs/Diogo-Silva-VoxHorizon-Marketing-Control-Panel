@@ -43,6 +43,7 @@ import structlog
 from ..config import Settings, get_settings
 from . import observability, work_queue
 from .outbox_consumer import run_outbox_drain_once
+from .worker_stage_consumer import run_worker_stage_drain_once
 from .work_item_watchdog import (
     StaleConsumer,
     StuckWorkItem,
@@ -1095,6 +1096,29 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
             ),
             name="scheduler:outbox_drain",
         ),
+        # Silent-failure PR-8: worker-stage consumer. Drains the deterministic
+        # ``worker_ideation`` / ``worker_generation`` work_item rows the Next
+        # advance + review-approve routes enqueue for NON-operator-driven
+        # pipelines (the PR-3 cutover removed the fire-and-forget HTTP kicks but
+        # never built a claimant for these kinds, so they sat queued forever).
+        # The drain runs the in-process producer for each claimed row to
+        # completion under a live heartbeat; the watchdog above retries /
+        # dead-letters a stuck or failed row so retry policy lives in one place.
+        # ``worker_monitor`` rides the same drain (the monitor decision route
+        # enqueues it); its handler is a no-op acknowledgement shell until the
+        # Meta-pause / budget connector lands -- see the consumer module.
+        loop.create_task(
+            _interval_loop(
+                "worker_stage_drain",
+                float(settings.scheduler_worker_stage_interval_s),
+                lambda: run_worker_stage_drain_once(
+                    settings,
+                    kinds=["worker_ideation", "worker_generation", "worker_monitor"],
+                ),
+                initial_delay_s=12.0,
+            ),
+            name="scheduler:worker_stage_drain",
+        ),
     ]
     log.info("scheduler_started", jobs=len(tasks))
     return Scheduler(tasks)
@@ -1113,5 +1137,6 @@ __all__ = [
     "run_outbox_drain_once",
     "run_reconciliation_once",
     "run_work_item_watchdog_once",
+    "run_worker_stage_drain_once",
     "start_scheduler",
 ]

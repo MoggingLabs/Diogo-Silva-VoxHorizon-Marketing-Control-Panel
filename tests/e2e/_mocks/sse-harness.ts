@@ -1,5 +1,7 @@
 import type { Page, Route } from "@playwright/test";
 
+import type { Json } from "@/lib/supabase/types.gen";
+
 import {
   getAdminClient,
   seedGenerationTasks,
@@ -155,6 +157,29 @@ export async function mockWorkerIdeation(
   // no-ops. We just need to seed the rows the worker would have produced.
 
   const admin = getAdminClient();
+
+  // Silent-failure PR-8: the configuration→ideation advance route enqueues a
+  // `worker_ideation` work_item, and the worker-stage consumer (now running in
+  // the e2e worker) drains it by invoking the REAL ideation producer. To keep
+  // that real producer from racing this seed (it would add its own concepts +
+  // break the "Picked: 0 of N" count assertions), emit an ideation task event
+  // FIRST: the producer's `ideation_already_ran` probe keys off any task event
+  // since the latest `stage_advanced→ideation`, so the consumer claims the row,
+  // sees the stage already underway, and closes the work_item WITHOUT
+  // re-producing. This is a single fast write right after the advance, so it
+  // deterministically wins the race against the consumer's poll interval. The
+  // seeded variants below carry their own `task_done(stage=ideation)` events.
+  {
+    const { error: markerErr } = await admin.from("pipeline_events").insert({
+      pipeline_id: opts.pipelineId,
+      kind: "task_running",
+      stage: "ideation",
+      payload: { kind: "ideation", concept: "e2e-ideation-open-marker" } as unknown as Json,
+    });
+    if (markerErr) {
+      throw new Error(`mockWorkerIdeation (open marker) failed: ${markerErr.message}`);
+    }
+  }
 
   // The configuration→ideation advance route mints the brief(s) and stamps
   // image_brief_id / video_brief_id on the pipeline, but the spec reaches this
