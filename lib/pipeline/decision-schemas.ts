@@ -67,15 +67,21 @@ export const LaunchDecisionInput = z
 export type LaunchDecisionInputT = z.infer<typeof LaunchDecisionInput>;
 
 /**
- * Body for `POST /api/pipelines/:id/monitor/decision` — the kill/scale verdict.
- * `scale` keeps the run and moves to `done`; `kill` records the kill and moves
- * to `done` (the monitor loop spawns a NEW pipeline, not a back-edge). Both
- * verdicts accept optional notes; an optional `campaign_id` scopes a per-ad
- * verdict when the manager acts on a single campaign.
+ * Body for `POST /api/pipelines/:id/monitor/decision`: the kill/scale verdict.
+ * Both verdicts move the run to `done` and ENQUEUE an operator dispatch that
+ * EXECUTES the approved action on Meta (operator-held MCP):
+ *   - `kill`  -> pause the live campaign (ads_update_entity -> status PAUSED).
+ *   - `scale` -> raise the winning campaign's daily budget (ads_update_entity
+ *     -> daily_budget = `target_budget`).
+ * Both verdicts accept optional notes; an optional `campaign_id` scopes a
+ * per-campaign verdict when the manager acts on a single campaign. `scale`
+ * carries an optional `target_budget` (the new daily budget, minor currency
+ * units, e.g. cents) the operator writes to Meta.
  */
 export const MonitorDecisionInput = z.object({
   decision: z.enum(["kill", "scale"]),
   campaign_id: z.string().max(200).optional(),
   notes: z.string().max(5000).optional(),
+  target_budget: z.number().positive().optional(),
 });
 export type MonitorDecisionInputT = z.infer<typeof MonitorDecisionInput>;

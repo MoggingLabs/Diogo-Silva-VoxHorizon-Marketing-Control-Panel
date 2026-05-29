@@ -608,36 +608,19 @@ def _sb_for_handler() -> Any:
     return get_supabase_admin()
 
 
-async def _handle_worker_monitor(pipeline_id: str) -> dict[str, Any]:
-    """Acknowledge a terminal monitor verdict (no-op shell -- see PR-8 report).
-
-    The monitor decision route (``monitor/decision``) enqueues a
-    ``worker_monitor`` row to forward the operator's kill/scale verdict to the
-    worker. The actual ACTION -- pausing the Meta entities on ``kill`` or bumping
-    the budget on ``scale`` -- was NEVER implemented as a worker service (the old
-    route fire-and-forgot at a ``/work/pipeline/monitor`` endpoint that does not
-    exist; the 404 was swallowed). Rather than INVENT that side effect here, this
-    handler is a no-op acknowledgement shell -- IDENTICAL in spirit to the outbox
-    handlers (``services.outbox_consumer``), which also acknowledge an
-    operator-held MCP follow-through they do not yet perform.
-
-    Why a no-op shell and not a stranded queued row: leaving ``worker_monitor``
-    unhandled would recreate the very silent-failure this PR fixes (a row queued
-    forever with no consumer). Acknowledging it closes the row ``completed`` so
-    the verdict is TRACKED + VISIBLE on the dashboard, and the real Meta-pause /
-    budget write drops in here as a one-function change. The monitor stage is
-    terminal best-effort (the pipeline already reached ``done``), so an
-    acknowledgement is the honest terminal state until that connector lands.
-    """
-    log.info("worker_stage_monitor_acknowledged", pipeline_id=pipeline_id)
-    return {"pipeline_id": pipeline_id, "acknowledged": True}
+# Monitor connector: the ``worker_monitor`` no-op acknowledgement handler was
+# DELETED. The monitor decision route no longer enqueues ``worker_monitor`` --
+# it enqueues an ``operator_dispatch(monitor_action)`` so the operator EXECUTES
+# the approved kill/scale on Meta (Meta is operator-held MCP) and records the
+# outcome via ``/work/pipeline/tools/monitor_action_result``. With no producer,
+# the consumer has nothing to claim, so the dead handler is removed (the
+# ``worker_monitor`` enum value stays in the DB, forward-only, now unused).
 
 
 # Per-kind dispatch table. A new deterministic worker stage wires here.
 _HANDLERS: dict[str, StageHandler] = {
     "worker_ideation": _handle_worker_ideation,
     "worker_generation": _handle_worker_generation,
-    "worker_monitor": _handle_worker_monitor,
     # FIX-A: deterministic post-generation gate consumers (the missing
     # producers that left every pipeline deadlocked at creative_qa).
     "worker_qa": _handle_worker_qa,

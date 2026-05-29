@@ -2,15 +2,17 @@
 name: campaign-monitor
 description: |
   Read live VoxHorizon ad performance against thresholds and call
-  kill/watch/keep/scale, recommendations only. This is the operator's `monitor`
-  stage skill: it computes Real CPL = Meta spend / GHL leads (GHL is the lead
-  source of truth, never Meta), applies the decision thresholds (CTR,
-  frequency, CPL, spend-without-leads), protects starved ads from a kill call,
-  and feeds the winning angle into the next brief. It recommends; the manager
-  approves kill/scale at the gate, and monitor never loops back, it seeds a new
-  pipeline. Trigger phrases: "monitor the campaign", "run the monitor stage",
-  "kill/watch/keep verdict", "which ads should I kill", "campaign health",
-  "read the performance", "what's the real CPL".
+  kill/watch/keep/scale. This is the operator's `monitor` stage skill: it
+  computes Real CPL = Meta spend / GHL leads (GHL is the lead source of truth,
+  never Meta), applies the decision thresholds (CTR, frequency, CPL,
+  spend-without-leads), protects starved ads from a kill call, and feeds the
+  winning angle into the next brief. The READ phase recommends only; the manager
+  approves kill/scale at the gate. After approval the skill EXECUTES the verdict
+  on Meta via the Meta MCP `ads_update_entity` (kill -> status PAUSED; scale ->
+  raise daily_budget) and records the action via monitor_action_result. Trigger
+  phrases: "monitor the campaign", "run the monitor stage", "kill/watch/keep
+  verdict", "which ads should I kill", "campaign health", "read the
+  performance", "what's the real CPL", "execute the approved kill/scale".
 ---
 
 # campaign-monitor
@@ -51,6 +53,7 @@ Seeded from the VoxHorizon Ekko donor monitoring assets:
 ## The thresholds (binding — `references/decision-thresholds.md`)
 
 **Creative health:**
+
 - CTR below 1%: underperforming, flag for review.
 - CTR above 2%: strong, candidate to scale spend.
 - Frequency above 3: creative fatigue likely, prepare replacements.
@@ -58,10 +61,12 @@ Seeded from the VoxHorizon Ekko donor monitoring assets:
 - $75 spend with zero leads: kill (ads that don't convert by $75 never do).
 
 **Campaign health:**
+
 - No leads in 48 hours: immediate alert.
 - CPL trending up 3 consecutive days: flag and recommend action.
 
 **Hold before a verdict:**
+
 - Under 48 hours live: watch (the 48-hour rule), never kill.
 - Under 1,000 impressions: insufficient data.
 - Minimum 3-5 days or 1,000 impressions before declaring a winner.
@@ -76,12 +81,12 @@ tests; recommend pausing the budget sink to force redistribution.
 
 ## Verdicts
 
-| Verdict | Trigger                                                                                      |
-| ------- | ------------------------------------------------------------------------------------------- |
+| Verdict | Trigger                                                                                                                               |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `kill`  | CPL 2x+ target after meaningful spend with near-zero GHL leads; OR $75 spend / 0 GHL leads; OR frequency >3 with collapsing GHL flow. |
-| `watch` | Under 48h live; under 1,000 impressions; CPL above target but under 2x.                      |
-| `keep`  | CPL at/under target with consistent GHL lead flow over 3+ days.                              |
-| `scale` | CTR above 2% and CPL under target with headroom.                                            |
+| `watch` | Under 48h live; under 1,000 impressions; CPL above target but under 2x.                                                               |
+| `keep`  | CPL at/under target with consistent GHL lead flow over 3+ days.                                                                       |
+| `scale` | CTR above 2% and CPL under target with headroom.                                                                                      |
 
 Each verdict needs **one specific, data-backed reason**. "Creative fatigue" is
 banned unless you point to the CTR decay curve or the frequency number. No
@@ -106,7 +111,7 @@ vanity metrics (impressions/reach/CPM) as primary verdicts.
       "ad_entity_id": "ae-01",
       "ad_name": "05.18 | Owner Selfie 1.0 | As Low As $99/mo",
       "verdict": "keep",
-      "spend": 312.40,
+      "spend": 312.4,
       "ghl_leads": 9,
       "real_cpl": 34.71,
       "ctr": 0.021,
@@ -124,8 +129,33 @@ vanity metrics (impressions/reach/CPM) as primary verdicts.
 
 Roll the winners up by offer bucket (e.g. "As Low As $99/mo", "Starting at
 $7,500", trust/local/reviews) and name the winning angle as the input to the
-next pipeline's brief. Monitor closes the loop by spawning a new pipeline, not
-by editing this one.
+next pipeline's brief.
+
+---
+
+## After the manager approves: EXECUTE the verdict on Meta
+
+The verdicts above are **recommendations**: you stop for the manager's call.
+Once the manager **approves** a kill or scale at the gate, the pipeline
+dispatches a separate **monitor action** instruction (`monitor_action`) and you
+**execute** it on Meta. This is the one monitor path where you DO write to Meta;
+the recommend phase still never does.
+
+1. Look up the target campaign's live Meta id from `ad_entity` (`kind='campaign'`
+   for this pipeline's launch). The instruction names the verdict and the
+   campaign.
+2. **Kill**: call the Meta MCP `ads_update_entity` with `status='PAUSED'` on the
+   campaign. Never delete or archive; pause only.
+3. **Scale**: call `ads_update_entity` to raise the campaign's `daily_budget`
+   to the approved target budget the instruction carries.
+4. **Record the executed action** via `pipeline_operator_monitor_action_result`
+   (POST `/work/pipeline/tools/monitor_action_result`): the decision, the
+   `campaign_id`, the `ad_entity_id`, the new `target_budget` (for a scale), the
+   approver, and the Meta MCP echo as `meta_payload`. The worker audits it; the
+   worker itself never touches Meta.
+
+If the campaign's `meta_id` is missing or the Meta write fails, stop and report
+to the manager. Do not silently swallow it.
 
 ---
 
@@ -138,8 +168,10 @@ by editing this one.
    bare "fatigue")?
 5. A **next-brief angle** named from the winners?
 
-These are recommendations; the manager approves kill/scale at the gate. Never
-execute a Meta change from this stage.
+In the **recommend** phase these are recommendations only; the manager approves
+kill/scale at the gate, and you never write to Meta. In the **post-approval
+`monitor_action`** phase you EXECUTE the approved kill/scale on Meta via
+`ads_update_entity` and record it via `monitor_action_result`.
 
 ## Related
 
