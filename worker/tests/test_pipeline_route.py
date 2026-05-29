@@ -2278,3 +2278,299 @@ def test_generation_image_no_cancel_runs_normally_regression(
         and d["payload"].get("reason") == "cancelled_by_operator"
     ]
     assert cancel_errors == []
+
+
+# ===========================================================================
+# FIX-B: the server-side cost hard cap on the IMAGE generation path (#506).
+#
+# The hard cap (cost_ledger.reserve_budget) was enforced ONLY on the video
+# b-roll submit (routes/video.py). The image producers -- the PRIMARY
+# production path -- called Kie with no pre-flight reservation, so an
+# image-track pipeline could overrun its cap unbounded across retries /
+# many-concept fan-out. FIX-B mirrors the video reserve-then-spend pattern in
+# both image producers: reserve BEFORE the render, raise a 402 on overrun
+# (caught per-render as a task_error so the substage fails loudly), and keep
+# emit_cost recording the ACTUAL after the spend (reserve = pre-flight read;
+# emit_cost = the actual ledger write -- no double-count).
+# ===========================================================================
+
+
+def _patch_cost_ledger_supabase(
+    monkeypatch: pytest.MonkeyPatch, sb: _PipelineSupabase
+) -> None:
+    """Point the cost-ledger reads/writes at the pipeline Supabase double.
+
+    The ``pipeline_sb`` fixture wires the route + pipeline_runner + atomic
+    inserts at the fake, but NOT ``cost_ledger`` -- so reserve_budget's
+    sum_costs / resolve_pipeline_cap reads would otherwise hit the real client.
+    The image producers' reservation reads the ledger + the pipeline cap, so
+    the cost-ledger module must share the same fake for these tests.
+    """
+    from src.services import cost_ledger
+
+    monkeypatch.setattr(cost_ledger, "get_supabase_admin", lambda: sb)
+
+
+def test_ideation_image_over_cap_emits_task_error_per_concept(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-B: an over-cap ideation render is refused BEFORE the Kie call.
+
+    A per-pipeline ``budget_cap_usd`` below the per-image estimate makes every
+    concept's reservation overrun. The producer must surface a ``task_error``
+    per concept (the 402 caught by the per-concept handler) and never call Kie
+    or insert a creative row -- the cap held, no spend happened.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-cap-ideation",
+        "status": "ideation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-cap",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        # A cap below the per-concept estimate ($0.02) -> every reservation
+        # overruns before any render.
+        "budget_cap_usd": 0.001,
+    }
+    pipeline_sb.brief_row = {
+        "id": "ib-cap",
+        "brief_id_human": "ACM-CAP",
+        "status": "approved",
+        "payload": {"market": "Austin, TX", "offer_text": "$99"},
+        "clients": {"slug": "acme", "name": "Acme", "service_type": "roofing"},
+    }
+    _patch_cost_ledger_supabase(monkeypatch, pipeline_sb)
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/ideation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-cap-ideation"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    # One task_error per concept (the default ideation fan-out count).
+    assert len(errors) == 4
+    for d in errors:
+        assert d["payload"]["kind"] == "image"
+        assert "budget cap exceeded" in d["payload"]["error"]
+    # The render never happened: no creative rows, no cost lines, no storage.
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+    assert not any(n == "cost_ledger" for n, _ in pipeline_sb.inserts)
+    cost = [d for d in pe if d.get("kind") == "cost_recorded"]
+    assert cost == []
+    assert pipeline_sb.storage_uploads == []
+
+
+def test_generation_image_over_cap_emits_task_error_per_ratio(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-B: an over-cap generation render is refused BEFORE the Kie call.
+
+    Same hard-cap guard on the final-render path: a cap below the per-ratio
+    estimate ($0.05) makes both ratios overrun, so each emits a ``task_error``
+    and no paid render / cost line is produced.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-cap-gen",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-cap-g",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"], "video": []},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        "budget_cap_usd": 0.001,
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-cap-g",
+        "concept": "sunny",
+        "offer_text": "$99",
+        "prompt_used": {"prompt": "sunny roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-cap-g/sunny.png",
+    }
+    pipeline_sb.events_data = []
+    _patch_cost_ledger_supabase(monkeypatch, pipeline_sb)
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-cap-gen"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    errors = [d for d in pe if d.get("kind") == "task_error"]
+    image_errors = [d for d in errors if d["payload"].get("kind") == "image"]
+    # One refusal per ratio (1x1 + 9x16).
+    assert len(image_errors) == 2
+    assert sorted(d["payload"]["ratio"] for d in image_errors) == ["1x1", "9x16"]
+    for d in image_errors:
+        assert "budget cap exceeded" in d["payload"]["error"]
+    assert not any(n == "creatives" for n, _ in pipeline_sb.inserts)
+    assert not any(n == "cost_ledger" for n, _ in pipeline_sb.inserts)
+    assert [d for d in pe if d.get("kind") == "cost_recorded"] == []
+    assert pipeline_sb.storage_uploads == []
+
+
+def test_generation_image_under_cap_proceeds_and_records_cost(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-B: an under-cap render proceeds normally and records its spend.
+
+    With a generous cap the reservation passes, both ratios render, and a
+    ``cost_ledger`` row + ``cost_recorded`` event land per render -- proving
+    the guard adds no regression on the happy path.
+    """
+    pipeline_sb.pipeline_row = {
+        "id": "p-undercap",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-uc",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"], "video": []},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        "budget_cap_usd": 100.0,
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-uc",
+        "concept": "sunny",
+        "offer_text": "$99",
+        "prompt_used": {"prompt": "sunny roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-uc/sunny.png",
+    }
+    pipeline_sb.events_data = []
+    _patch_cost_ledger_supabase(monkeypatch, pipeline_sb)
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-undercap"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    creative_inserts = [d for n, d in pipeline_sb.inserts if n == "creatives"]
+    assert len(creative_inserts) == 2
+    pe = [d for n, d in pipeline_sb.inserts if n == "pipeline_events"]
+    assert [d for d in pe if d.get("kind") == "task_error"] == []
+    cost_events = [d for d in pe if d.get("kind") == "cost_recorded"]
+    assert len(cost_events) == 2
+    # No budget overrun was surfaced.
+    for d in cost_events:
+        assert d["payload"]["api"] == "kie.ai"
+
+
+def test_image_reservation_amount_matches_per_image_estimate(
+    client: TestClient,
+    pipeline_sb: _PipelineSupabase,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """FIX-B: the reserved amount equals the per-image estimate emit_cost
+    records, AND reserve + emit_cost do not double-count.
+
+    We capture every ``reserve_budget`` estimate and assert it matches the
+    per-ratio generation cost constant -- the same ``subtotal`` emit_cost
+    records as the ACTUAL spend. Then we assert exactly ONE cost_ledger row is
+    written per render (the emit_cost write), proving reserve is a read-only
+    pre-flight check that never adds a second ledger line.
+    """
+    from src.routes.pipeline import GENERATION_IMAGE_COST_USD
+    from src.services import cost_ledger
+
+    pipeline_sb.pipeline_row = {
+        "id": "p-reserve-amt",
+        "status": "generation",
+        "format_choice": "image",
+        "client_id": "c-1",
+        "image_brief_id": "ib-ra",
+        "video_brief_id": None,
+        "config_draft": {},
+        "picks": {"image": ["cr-parent"], "video": []},
+        "advanced_at": {},
+        "created_at": "2025-01-01T00:00:00Z",
+        "budget_cap_usd": 100.0,
+    }
+    pipeline_sb.creative_row = {
+        "id": "cr-parent",
+        "brief_id": "ib-ra",
+        "concept": "sunny",
+        "offer_text": "$99",
+        "prompt_used": {"prompt": "sunny roof"},
+        "version": "v0.ideation",
+        "file_path_supabase": "ib-ra/sunny.png",
+    }
+    pipeline_sb.events_data = []
+    _patch_cost_ledger_supabase(monkeypatch, pipeline_sb)
+    monkeypatch.setenv("KIE_AI_API_KEY", "test-kie")
+    from src.config import get_settings
+
+    get_settings.cache_clear()
+    from src.routes import pipeline as pipeline_route
+
+    monkeypatch.setattr(pipeline_route, "KieClient", _StubKieClient)
+
+    reserved: list[float] = []
+    real_reserve = cost_ledger.reserve_budget
+
+    def _spy_reserve(pipeline_id: str, estimate_usd: float, **kw: Any) -> Any:
+        reserved.append(estimate_usd)
+        return real_reserve(pipeline_id, estimate_usd, **kw)
+
+    # The producer references the symbol on the module, so patch it there.
+    monkeypatch.setattr(pipeline_route.cost_ledger, "reserve_budget", _spy_reserve)
+
+    resp = client.post(
+        "/work/pipeline/generation",
+        headers={"Authorization": f"Bearer {SHARED_SECRET}"},
+        json={"pipeline_id": "p-reserve-amt"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    # One reservation per ratio, each for exactly the per-image estimate.
+    assert reserved == [GENERATION_IMAGE_COST_USD, GENERATION_IMAGE_COST_USD]
+    # No double-count: exactly one cost_ledger row per render (emit_cost only).
+    ledger_rows = [d for n, d in pipeline_sb.inserts if n == "cost_ledger"]
+    assert len(ledger_rows) == 2
+    for row in ledger_rows:
+        assert row["amount_usd"] == GENERATION_IMAGE_COST_USD
