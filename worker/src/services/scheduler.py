@@ -530,16 +530,26 @@ async def run_reconciliation_once(settings: Settings) -> int:
 # (kie still produced + billed the clip, nothing recorded it), and even with the
 # callback receiver a dropped/never-delivered callback would still lose it. This
 # sweep is the durable safety net the watchdog CANNOT replace: the watchdog only
-# rotates stale claims, but a kie render can FINISH remotely while no callback
+# rotates stale CLAIMS, but a kie render can FINISH remotely while no callback
 # ever arrives -- only an explicit poll of the kie API discovers that. The sweep
 # reads the open ``work_item(kind='kie_video_render')`` rows (silent-failure
 # PR-6 -- the durable record is the work_item now, not ``video_render_tasks``),
 # polls kie for each via a single non-blocking probe, and closes the work_item
-# -- exactly what the callback would have done. Idempotent (the callback + the
-# sweep both resolve a task by its idempotency key; the loser sees a terminal
-# work_item and no-ops) and BOUNDED per pass
-# (``scheduler_kie_reconcile_max_per_pass``), mirroring the dispatch watchdog's
-# redispatch cap so a backlog can't fan out an unbounded burst.
+# -- exactly what the callback would have done.
+#
+# FIX-C: the open-row read MUST include ``queued`` rows. The live submit path
+# (``kie_video._submit`` -> ``persist_submitted_render_work_item``) persists the
+# render's work_item ``queued`` and passes NO callback_url, and nothing claims
+# the ``kie_video_render`` kind -- so the row sits ``queued`` forever. Reading
+# only claimed/running left every queued (billed-but-unresolved) render in a
+# blind spot: the callback was never armed, the watchdog only rotates
+# claimed/running rows, and the billed clip was silently lost. Including
+# ``queued`` is what closes the blind spot PR-6 claimed to. The sweep is
+# idempotent (the callback + the sweep both resolve a task by its idempotency
+# key, and the close is scoped to non-terminal rows, so the loser writes 0 rows)
+# and BOUNDED per pass (``scheduler_kie_reconcile_max_per_pass``), mirroring the
+# dispatch watchdog's redispatch cap so a backlog can't fan out an unbounded
+# burst. A queued row with no submitted task_id yet is skipped, never failed.
 
 
 def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
@@ -547,10 +557,24 @@ def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
 
     Silent-failure PR-6: the durable render record is the
     ``work_item(kind='kie_video_render')``. The reconciliation sweep reads the
-    rows a consumer is holding (``claimed`` / ``running``) -- those are the
-    renders submitted-and-awaiting-resolution that a poll of kie can close. The
-    ``task_id`` / ``is_veo`` / ``theme`` / ``creative_id`` live in the
-    work_item ``payload``.
+    open (non-terminal) rows -- those are the renders submitted-and-awaiting-
+    resolution that a poll of kie can close. The ``task_id`` / ``is_veo`` /
+    ``theme`` / ``creative_id`` live in the work_item ``payload``.
+
+    FIX-C: the read MUST include ``queued`` rows, not just ``claimed`` /
+    ``running``. The live broll/video submit path persists the render's
+    work_item in ``status='queued'`` (``persist_submitted_render_work_item``,
+    called from ``kie_video._submit`` AFTER kie returns the ``taskId``) but
+    passes NO ``callback_url`` and NOTHING claims the ``kie_video_render`` kind
+    -- so the row never advances past ``queued``. Reading only claimed/running
+    made every queued (billed-but-unresolved) render INVISIBLE to the sweep:
+    the callback was never armed, the watchdog only rotates claimed/running
+    rows, and the billed kie clip was silently lost with the row stuck
+    ``queued`` forever. Including ``queued`` here is what lets the sweep poll
+    kie for the submitted ``taskId`` and close the work_item. A queued row
+    with no ``taskId`` yet in its payload is NEVER failed prematurely -- the
+    sweep skips any row whose ``payload.task_id`` is missing/empty (see
+    :func:`run_kie_reconcile_once`).
     """
     resp = (
         sb.table("work_item")
@@ -559,7 +583,7 @@ def _open_render_tasks(sb: Any, *, limit: int) -> list[dict[str, Any]]:
             "pipeline_id, creative_id, brief_id, claim_token"
         )
         .eq("kind", "kie_video_render")
-        .in_("status", ["claimed", "running"])
+        .in_("status", ["queued", "claimed", "running"])
         .order("created_at", desc=False)
         .limit(limit)
         .execute()
@@ -576,16 +600,32 @@ def _render_payload(row: Mapping[str, Any]) -> dict[str, Any]:
 async def run_kie_reconcile_once(settings: Settings) -> int:
     """One pass of the kie video render reconciliation. Returns rows resolved.
 
-    Reads the open ``work_item(kind='kie_video_render')`` rows (bounded by
-    ``scheduler_kie_reconcile_max_per_pass``), polls kie once for each via
+    Reads the open ``work_item(kind='kie_video_render')`` rows -- ``queued``,
+    ``claimed``, or ``running`` (bounded by
+    ``scheduler_kie_reconcile_max_per_pass``) -- polls kie once for each via
     :meth:`services.kie_video.KieVideoClient.poll_status`, and closes the
     outcome on the work_item: a success downloads + stores the clip and marks it
     ``completed``; a terminal kie failure marks it ``failed``; a still-pending
     render bumps its attempt + pushes ``next_attempt_at`` out via the watchdog's
     exponential backoff and is left for the next pass. A per-row failure is
-    logged and skipped so one bad render never aborts the sweep. Idempotent: a
-    row the callback already resolved is terminal (not claimed/running) and is
-    no longer read.
+    logged and skipped so one bad render never aborts the sweep.
+
+    FIX-C: ``queued`` rows are recovered too. The live submit path enqueues the
+    render's work_item ``queued`` with NO callback armed and NOTHING claiming
+    the kind, so the row never leaves ``queued`` -- previously invisible to the
+    sweep AND the watchdog, silently losing the billed clip. The sweep now polls
+    kie for a queued row's submitted ``task_id`` (always present in the payload
+    -- the producer writes it AFTER kie returns it) and closes the work_item via
+    the same path. A row whose ``payload.task_id`` is missing/empty is SKIPPED
+    (left ``queued``, never failed prematurely): only a row with a submitted
+    task_id is polled.
+
+    No double-resolve: the close path (``video_callback._mark_completed`` /
+    ``_mark_work_item_failed``) is scoped to non-terminal rows, so if a callback
+    is ever armed and both touch the same render, whichever writes the terminal
+    status first wins and the loser's UPDATE matches 0 rows. A row the callback
+    already resolved is terminal (not queued/claimed/running) and is no longer
+    even read by :func:`_open_render_tasks`.
     """
     from ..routes import video_callback
     from ..supabase_client import get_supabase_admin  # lazy: never forces a client
