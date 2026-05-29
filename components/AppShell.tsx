@@ -211,6 +211,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  // The login screen renders OUTSIDE the dashboard chrome: an unauthenticated
+  // operator has no nav to use, and the header's worker/approval widgets poll
+  // service-role routes that the session gate would 401. Render the bare page.
+  // Placed AFTER the hooks above so hook order stays stable across renders.
+  if (pathname === "/login") {
+    return <>{children}</>;
+  }
+
   return (
     <div className="flex min-h-dvh flex-col bg-background">
       <header className="sticky top-0 z-40 flex items-center justify-between gap-2 border-b border-border bg-background/95 px-3 py-2 backdrop-blur sm:gap-3 sm:px-6">

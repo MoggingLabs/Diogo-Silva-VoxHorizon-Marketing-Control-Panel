@@ -1,33 +1,57 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { issueSessionToken, SESSION_COOKIE } from "./lib/auth/session";
+
+const SECRET = "test-session-secret-0123456789";
+
 type MiddlewareModule = typeof import("./middleware");
 
+/**
+ * Build a `NextRequest`-shaped object the middleware can read. The middleware
+ * only touches `req.nextUrl.{pathname,search,clone}` and
+ * `req.headers.get("cookie")`, so we stub exactly that surface. `clone()`
+ * returns a mutable URL the redirect path mutates.
+ */
 function makeReq(opts: {
-  ip?: string | null;
-  realIp?: string | null;
   path?: string;
+  search?: string;
+  cookie?: string | null;
 }): import("next/server").NextRequest {
+  const pathname = opts.path ?? "/";
+  const search = opts.search ?? "";
   const headers = new Headers();
-  if (opts.ip !== undefined && opts.ip !== null) headers.set("x-forwarded-for", opts.ip);
-  if (opts.realIp !== undefined && opts.realIp !== null) headers.set("x-real-ip", opts.realIp);
+  if (opts.cookie) headers.set("cookie", opts.cookie);
+
+  const nextUrl = {
+    pathname,
+    search,
+    clone() {
+      // A real URL so `.searchParams.set` + `.pathname=` behave like Next's.
+      return new URL(`http://localhost${pathname}${search}`);
+    },
+  };
+
   return {
     headers,
-    nextUrl: { pathname: opts.path ?? "/" },
+    nextUrl,
   } as unknown as import("next/server").NextRequest;
 }
 
-async function loadMiddleware(env: Record<string, string | undefined>): Promise<MiddlewareModule> {
-  for (const [k, v] of Object.entries(env)) {
-    if (v === undefined) vi.unstubAllEnvs();
-    else vi.stubEnv(k, v);
-  }
+async function loadMiddleware(): Promise<MiddlewareModule> {
   vi.resetModules();
   return await import("./middleware");
 }
 
-describe("middleware (Tailscale gate)", () => {
+async function validCookie(email = "operator@example.com"): Promise<string> {
+  vi.stubEnv("SESSION_SECRET", SECRET);
+  const token = await issueSessionToken(email);
+  return `${SESSION_COOKIE}=${token}`;
+}
+
+describe("middleware (single-operator session gate)", () => {
   beforeEach(() => {
     vi.unstubAllEnvs();
+    vi.stubEnv("SESSION_SECRET", SECRET);
     vi.resetModules();
   });
 
@@ -36,142 +60,91 @@ describe("middleware (Tailscale gate)", () => {
     vi.unstubAllEnvs();
   });
 
-  describe("disabled mode (TAILSCALE_ONLY unset)", () => {
-    it("passes every request through without inspecting IP", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "" });
-      const res = mod.middleware(makeReq({ ip: "203.0.113.5" }));
-      // NextResponse.next() resolves to a 200-ish response with no body.
-      expect(res).toBeDefined();
+  describe("public paths (no session required)", () => {
+    it.each(["/login", "/api/auth/login", "/api/auth/logout", "/api/health"])(
+      "allows %s without a session cookie",
+      async (path) => {
+        const mod = await loadMiddleware();
+        const res = await mod.middleware(makeReq({ path }));
+        expect(res.status).toBeLessThan(400);
+        // No redirect Location header for a public route.
+        expect(res.headers.get("location")).toBeNull();
+      },
+    );
+  });
+
+  describe("m2m exemption (worker -> Next bearer routes)", () => {
+    it("lets /api/internal/approval-email through WITHOUT a session cookie", async () => {
+      const mod = await loadMiddleware();
+      // No cookie at all — proves the worker callback is not blocked by the gate.
+      const res = await mod.middleware(makeReq({ path: "/api/internal/approval-email" }));
       expect(res.status).toBeLessThan(400);
+      expect(res.headers.get("location")).toBeNull();
     });
   });
 
-  describe("log mode (TAILSCALE_ONLY=1)", () => {
-    it("allows tailnet IPv4 without logging", async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "1" });
-      const res = mod.middleware(makeReq({ ip: "100.96.0.5" }));
-      expect(res.status).toBeLessThan(400);
-      expect(warn).not.toHaveBeenCalled();
+  describe("page requests without a valid session", () => {
+    it("redirects an unauthenticated page request to /login with ?next", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/pipeline", search: "?a=1" }));
+      expect(res.status).toBe(307);
+      const loc = res.headers.get("location");
+      expect(loc).toBeTruthy();
+      const url = new URL(loc!);
+      expect(url.pathname).toBe("/login");
+      expect(url.searchParams.get("next")).toBe("/pipeline?a=1");
     });
 
-    it("logs off-tailnet IPv4 but lets it through", async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "1" });
-      const res = mod.middleware(makeReq({ ip: "203.0.113.5", path: "/dashboard" }));
-      expect(res.status).toBeLessThan(400);
-      expect(warn).toHaveBeenCalledWith(
-        expect.stringContaining("non-tailnet request ip=203.0.113.5 path=/dashboard"),
-      );
-    });
-
-    it("warns when no IP header is present and passes through", async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "1" });
-      const res = mod.middleware(makeReq({}));
-      expect(res.status).toBeLessThan(400);
-      expect(warn).toHaveBeenCalledWith(expect.stringContaining("no client IP header"));
-    });
-
-    it("reads x-real-ip when x-forwarded-for is absent", async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "1" });
-      const res = mod.middleware(makeReq({ realIp: "100.96.0.7" }));
-      expect(res.status).toBeLessThan(400);
-      expect(warn).not.toHaveBeenCalled();
-    });
-
-    it("uses only the first IP from a comma-separated x-forwarded-for chain", async () => {
-      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "1" });
-      // First hop is tailnet → allowed; downstream non-tailnet IPs in the chain don't matter.
-      const res = mod.middleware(makeReq({ ip: "100.96.0.5, 10.0.0.1, 203.0.113.5" }));
-      expect(res.status).toBeLessThan(400);
-      expect(warn).not.toHaveBeenCalled();
+    it("does not set ?next when the destination is already /login", async () => {
+      const mod = await loadMiddleware();
+      // A bare "/" page request: next would be "/" which is fine to round-trip.
+      const res = await mod.middleware(makeReq({ path: "/" }));
+      expect(res.status).toBe(307);
+      const url = new URL(res.headers.get("location")!);
+      expect(url.pathname).toBe("/login");
+      expect(url.searchParams.get("next")).toBe("/");
     });
   });
 
-  describe("strict mode (TAILSCALE_ONLY=strict)", () => {
-    it("403s off-tailnet IPv4 requests", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "strict" });
-      const res = mod.middleware(makeReq({ ip: "203.0.113.5" }));
-      expect(res.status).toBe(403);
+  describe("api requests without a valid session", () => {
+    it("returns 401 JSON (no redirect) for a gated /api/* route", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/api/pipelines" }));
+      expect(res.status).toBe(401);
+      expect(res.headers.get("location")).toBeNull();
+      const body = await res.json();
+      expect(body.error).toBe("unauthenticated");
+    });
+  });
+
+  describe("authenticated requests", () => {
+    it("allows a gated page request with a valid session cookie", async () => {
+      const cookie = await validCookie();
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/pipeline", cookie }));
+      expect(res.status).toBeLessThan(400);
+      expect(res.headers.get("location")).toBeNull();
     });
 
-    it("403s requests with no client IP header", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "strict" });
-      const res = mod.middleware(makeReq({}));
-      expect(res.status).toBe(403);
-    });
-
-    it("permits in-range tailnet IPv4 traffic", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "strict" });
-      const res = mod.middleware(makeReq({ ip: "100.64.0.1" }));
+    it("allows a gated /api/* request with a valid session cookie", async () => {
+      const cookie = await validCookie();
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/api/pipelines", cookie }));
       expect(res.status).toBeLessThan(400);
     });
-  });
 
-  describe("custom TAILSCALE_CIDRS", () => {
-    it("respects an additional IPv4 CIDR override", async () => {
-      const mod = await loadMiddleware({
-        TAILSCALE_ONLY: "strict",
-        TAILSCALE_CIDRS: "10.0.0.0/8",
-      });
-      // 10.x is allowed by the override; default 100.64/10 is replaced not added.
-      expect(mod.middleware(makeReq({ ip: "10.5.5.5" })).status).toBeLessThan(400);
-      expect(mod.middleware(makeReq({ ip: "100.64.0.1" })).status).toBe(403);
-    });
-
-    it("filters out malformed CIDR entries silently", async () => {
-      const mod = await loadMiddleware({
-        TAILSCALE_ONLY: "strict",
-        TAILSCALE_CIDRS: "not-a-cidr,10.0.0.0/8,bogus/99",
-      });
-      // The one valid CIDR still works.
-      expect(mod.middleware(makeReq({ ip: "10.0.0.1" })).status).toBeLessThan(400);
-    });
-
-    it("matches IPv6 CIDRs", async () => {
-      const mod = await loadMiddleware({
-        TAILSCALE_ONLY: "strict",
-        TAILSCALE_CIDRS: "fd7a:115c:a1e0::/48",
-      });
-      expect(mod.middleware(makeReq({ ip: "fd7a:115c:a1e0::1" })).status).toBeLessThan(400);
-      expect(mod.middleware(makeReq({ ip: "fe80::1" })).status).toBe(403);
-    });
-
-    it("treats /0 as match-all", async () => {
-      const mod = await loadMiddleware({
-        TAILSCALE_ONLY: "strict",
-        TAILSCALE_CIDRS: "0.0.0.0/0",
-      });
-      expect(mod.middleware(makeReq({ ip: "203.0.113.5" })).status).toBeLessThan(400);
-    });
-  });
-
-  describe("CIDR / IP parsing edge cases", () => {
-    it("rejects malformed IPv4 octets without crashing", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "strict" });
-      // Out-of-range octet → unparseable → no match → 403 in strict mode.
-      expect(mod.middleware(makeReq({ ip: "999.0.0.1" })).status).toBe(403);
-      expect(mod.middleware(makeReq({ ip: "1.2.3" })).status).toBe(403);
-      // Non-numeric octet (the parser also guards against e.g. "1.2.3.04").
-      expect(mod.middleware(makeReq({ ip: "1.2.3.04" })).status).toBe(403);
-    });
-
-    it("rejects malformed IPv6 addresses", async () => {
-      const mod = await loadMiddleware({
-        TAILSCALE_ONLY: "strict",
-        TAILSCALE_CIDRS: "fd00::/8",
-      });
-      expect(mod.middleware(makeReq({ ip: "::xyzz" })).status).toBe(403);
-      expect(mod.middleware(makeReq({ ip: "1::2::3" })).status).toBe(403);
+    it("rejects a tampered cookie (treated as no session)", async () => {
+      const cookie = await validCookie();
+      const tampered = `${cookie}TAMPER`;
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/api/pipelines", cookie: tampered }));
+      expect(res.status).toBe(401);
     });
   });
 
   describe("config", () => {
     it("excludes Next internals and api/health from the matcher", async () => {
-      const mod = await loadMiddleware({ TAILSCALE_ONLY: "strict" });
+      const mod = await loadMiddleware();
       expect(mod.config.matcher).toEqual([
         "/((?!_next/static|_next/image|favicon.ico|api/health).*)",
       ]);
