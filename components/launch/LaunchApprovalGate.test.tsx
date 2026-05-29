@@ -1,29 +1,17 @@
 /**
- * Tests for the video launch approval gate.
+ * Tests for the image launch approval gate.
  *
- * Same shape as VideoApprovalGate but POSTs to `/api/launches/video/:id/decision`.
+ * Mirrors VideoLaunchApprovalGate but POSTs to `/api/launches/:id/decision`.
+ * Covers the optimistic status flip (pill flips from the decision response
+ * without the slow server re-render) and the revert on a failed POST.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { VideoLaunchApprovalGate } from "./VideoLaunchApprovalGate";
+import { LaunchApprovalGate } from "./LaunchApprovalGate";
 import { LaunchStatusBadge, LaunchStatusProvider } from "./LaunchStatusBadge";
 import { spyOnFetch, jsonResponse } from "@/tests/unit/helpers/worker-mock";
-
-/**
- * Render the gate inside the shared status provider with the header badge, so
- * the optimistic-flip assertions can read the pill text the way the live page
- * (and the e2e) does.
- */
-function renderWithStatus(launchId: string, serverStatus = "posted") {
-  return render(
-    <LaunchStatusProvider serverStatus={serverStatus}>
-      <LaunchStatusBadge status={serverStatus} />
-      <VideoLaunchApprovalGate launchId={launchId} />
-    </LaunchStatusProvider>,
-  );
-}
 
 function createDeferred<T>(): {
   promise: Promise<T>;
@@ -52,9 +40,18 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("VideoLaunchApprovalGate", () => {
+function renderWithStatus(launchId: string, serverStatus = "posted") {
+  return render(
+    <LaunchStatusProvider serverStatus={serverStatus}>
+      <LaunchStatusBadge status={serverStatus} />
+      <LaunchApprovalGate launchId={launchId} />
+    </LaunchStatusProvider>,
+  );
+}
+
+describe("LaunchApprovalGate", () => {
   it("renders three decision buttons", () => {
-    render(<VideoLaunchApprovalGate launchId="L1" />);
+    render(<LaunchApprovalGate launchId="L1" />);
 
     expect(screen.getByRole("button", { name: /^Approve$/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Approve with changes/ })).toBeInTheDocument();
@@ -63,43 +60,47 @@ describe("VideoLaunchApprovalGate", () => {
 
   it("requires notes for approved_with_changes", async () => {
     const fetchSpy = spyOnFetch();
-    render(<VideoLaunchApprovalGate launchId="L1" />);
+    render(<LaunchApprovalGate launchId="L1" />);
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("button", { name: /Approve with changes/ }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByTestId("launch-decision-error")).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("requires notes for rejected", async () => {
     const fetchSpy = spyOnFetch();
-    render(<VideoLaunchApprovalGate launchId="L1" />);
+    render(<LaunchApprovalGate launchId="L1" />);
     const user = userEvent.setup();
 
     await user.click(screen.getByRole("button", { name: /^Reject$/ }));
-    expect(await screen.findByRole("alert")).toBeInTheDocument();
+    expect(await screen.findByTestId("launch-decision-error")).toBeInTheDocument();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("submits a clean approve to the video decision endpoint", async () => {
+  it("submits a clean approve to the launch decision endpoint", async () => {
     const fetchSpy = spyOnFetch();
-    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse({ ok: true })));
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(jsonResponse({ launch: { status: "approved" } })),
+    );
 
-    render(<VideoLaunchApprovalGate launchId="L1" />);
+    render(<LaunchApprovalGate launchId="L1" />);
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Approve$/ }));
 
     await waitFor(() => expect(refresh).toHaveBeenCalled());
-    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/launches/video/L1/decision");
+    expect(fetchSpy.mock.calls[0]![0]).toBe("/api/launches/L1/decision");
     const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
     expect(body.decision).toBe("approved");
   });
 
   it("submits rejection with notes", async () => {
     const fetchSpy = spyOnFetch();
-    fetchSpy.mockImplementation(() => Promise.resolve(jsonResponse({ ok: true })));
+    fetchSpy.mockImplementation(() =>
+      Promise.resolve(jsonResponse({ launch: { status: "rejected" } })),
+    );
 
-    render(<VideoLaunchApprovalGate launchId="L1" />);
+    render(<LaunchApprovalGate launchId="L1" />);
     const user = userEvent.setup();
     await user.type(screen.getByLabelText(/Notes/), "wrong tone");
     await user.click(screen.getByRole("button", { name: /^Reject$/ }));
@@ -108,51 +109,6 @@ describe("VideoLaunchApprovalGate", () => {
     const body = JSON.parse(fetchSpy.mock.calls[0]![1]!.body as string);
     expect(body.decision).toBe("rejected");
     expect(body.notes).toBe("wrong tone");
-  });
-
-  it("surfaces an error body on failure", async () => {
-    spyOnFetch().mockImplementation(() =>
-      Promise.resolve(jsonResponse({ error: "conflict" }, { status: 409 })),
-    );
-
-    render(<VideoLaunchApprovalGate launchId="L1" />);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
-    expect(await screen.findByText(/conflict/)).toBeInTheDocument();
-  });
-
-  it("falls back to 'Request failed' fallback on non-JSON body", async () => {
-    spyOnFetch().mockImplementation(() => Promise.resolve(new Response("oops", { status: 500 })));
-
-    render(<VideoLaunchApprovalGate launchId="L1" />);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
-    expect(await screen.findByText(/Request failed \(500\)/)).toBeInTheDocument();
-  });
-
-  it("falls back to String() for non-Error throws", async () => {
-    spyOnFetch().mockImplementation(() => {
-      throw "plain string fail";
-    });
-
-    render(<VideoLaunchApprovalGate launchId="L1" />);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
-    expect(await screen.findByText(/plain string fail/)).toBeInTheDocument();
-  });
-
-  it("shows 'Submitting…' label while in flight", async () => {
-    const deferred = createDeferred<Response>();
-    spyOnFetch().mockImplementation(() => deferred.promise);
-
-    render(<VideoLaunchApprovalGate launchId="L1" />);
-    const user = userEvent.setup();
-    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
-
-    expect(screen.getByRole("button", { name: /Submitting…/ })).toBeInTheDocument();
-
-    deferred.resolve(jsonResponse({ ok: true }));
-    await waitFor(() => expect(refresh).toHaveBeenCalled());
   });
 
   it("flips the status pill optimistically from the decision response and hides the gate", async () => {
@@ -166,8 +122,6 @@ describe("VideoLaunchApprovalGate", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Approve$/ }));
 
-    // The pill flips from the returned launch status without waiting on the
-    // slow server re-render, and the gate folds away.
     await waitFor(() => expect(screen.getByText("Approved", { exact: true })).toBeInTheDocument());
     expect(screen.queryByText("Posted", { exact: true })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Approve$/ })).not.toBeInTheDocument();
@@ -179,7 +133,7 @@ describe("VideoLaunchApprovalGate", () => {
 
     renderWithStatus("L1");
     const user = userEvent.setup();
-    await user.type(screen.getByLabelText(/Notes/), "tighten the hook");
+    await user.type(screen.getByLabelText(/Notes/), "adjust the body copy");
     await user.click(screen.getByRole("button", { name: /Approve with changes/ }));
 
     await waitFor(() =>
@@ -211,11 +165,54 @@ describe("VideoLaunchApprovalGate", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: /^Approve$/ }));
 
-    // The error surfaces and the pill never lies: it stays on the server status
-    // and the gate remains so the operator can retry.
     expect(await screen.findByText(/conflict/)).toBeInTheDocument();
     expect(screen.getByText("Posted", { exact: true })).toBeInTheDocument();
     expect(screen.queryByText("Approved", { exact: true })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^Approve$/ })).toBeInTheDocument();
+  });
+
+  it("surfaces an error body on failure", async () => {
+    spyOnFetch().mockImplementation(() =>
+      Promise.resolve(jsonResponse({ error: "conflict" }, { status: 409 })),
+    );
+
+    render(<LaunchApprovalGate launchId="L1" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
+    expect(await screen.findByText(/conflict/)).toBeInTheDocument();
+  });
+
+  it("falls back to 'Request failed' fallback on non-JSON body", async () => {
+    spyOnFetch().mockImplementation(() => Promise.resolve(new Response("oops", { status: 500 })));
+
+    render(<LaunchApprovalGate launchId="L1" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
+    expect(await screen.findByText(/Request failed \(500\)/)).toBeInTheDocument();
+  });
+
+  it("falls back to String() for non-Error throws", async () => {
+    spyOnFetch().mockImplementation(() => {
+      throw "plain string fail";
+    });
+
+    render(<LaunchApprovalGate launchId="L1" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
+    expect(await screen.findByText(/plain string fail/)).toBeInTheDocument();
+  });
+
+  it("shows 'Submitting…' label while in flight", async () => {
+    const deferred = createDeferred<Response>();
+    spyOnFetch().mockImplementation(() => deferred.promise);
+
+    render(<LaunchApprovalGate launchId="L1" />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: /^Approve$/ }));
+
+    expect(screen.getByRole("button", { name: /Submitting…/ })).toBeInTheDocument();
+
+    deferred.resolve(jsonResponse({ launch: { status: "approved" } }));
+    await waitFor(() => expect(refresh).toHaveBeenCalled());
   });
 });

@@ -3,45 +3,52 @@
 import { useRouter } from "next/navigation";
 import * as React from "react";
 
-import { VideoLaunchDecision, type VideoLaunchDecisionT } from "@/lib/video-launches";
+import { LaunchDecision, type LaunchDecisionT } from "@/lib/launches";
 import { useLaunchStatus, type LaunchStatusValue } from "@/components/launch/LaunchStatusBadge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 
-const DECISION_LABELS: Record<VideoLaunchDecisionT, string> = {
+const DECISION_LABELS: Record<LaunchDecisionT, string> = {
   approved: "Approve",
   approved_with_changes: "Approve with changes",
   rejected: "Reject",
 };
 
-const DECISION_VARIANTS: Record<VideoLaunchDecisionT, "default" | "secondary" | "destructive"> = {
+const DECISION_VARIANTS: Record<LaunchDecisionT, "default" | "secondary" | "destructive"> = {
   approved: "default",
   approved_with_changes: "secondary",
   rejected: "destructive",
 };
 
-export interface VideoLaunchApprovalGateProps {
+export interface LaunchApprovalGateProps {
   launchId: string;
 }
 
 /**
- * Approval gate for a posted video launch package. Mirrors
- * ``<VideoApprovalGate />`` from the brief-side, but POSTs to
- * ``/api/launches/video/:id/decision`` and validates with the launch-side
- * zod schema. ``approved_with_changes`` and ``rejected`` require notes.
+ * Approval gate for a posted image launch package. Mirrors
+ * ``<VideoLaunchApprovalGate />`` but POSTs to ``/api/launches/:id/decision``
+ * and validates with the image-side launch zod schema. ``approved_with_changes``
+ * and ``rejected`` require notes.
+ *
+ * The image detail page previously reused the shared brief ``<ApprovalGate />``;
+ * it now has its own gate so it can drive the optimistic status flip (the
+ * shared brief gate is kept brief-specific). On a successful decision POST the
+ * gate pushes the new status into the shared status context so the header pill
+ * flips immediately, then calls ``router.refresh()`` in the background. Same
+ * philosophy as #636.
  */
-export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGateProps) {
+export function LaunchApprovalGate({ launchId }: LaunchApprovalGateProps) {
   const router = useRouter();
   const launchStatus = useLaunchStatus();
   const [notes, setNotes] = React.useState("");
-  const [decision, setDecision] = React.useState<VideoLaunchDecisionT | null>(null);
+  const [decision, setDecision] = React.useState<LaunchDecisionT | null>(null);
   const [submitting, setSubmitting] = React.useState(false);
   const [decided, setDecided] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
 
   const handleSubmit = React.useCallback(
-    async (chosen: VideoLaunchDecisionT) => {
+    async (chosen: LaunchDecisionT) => {
       setError(null);
 
       const requiresNotes = chosen !== "approved";
@@ -51,7 +58,7 @@ export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGatePro
         return;
       }
 
-      const parsed = VideoLaunchDecision.safeParse(chosen);
+      const parsed = LaunchDecision.safeParse(chosen);
       if (!parsed.success) {
         setError("Invalid decision.");
         return;
@@ -60,7 +67,7 @@ export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGatePro
       setSubmitting(true);
       setDecision(chosen);
       try {
-        const res = await fetch(`/api/launches/video/${launchId}/decision`, {
+        const res = await fetch(`/api/launches/${launchId}/decision`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -75,11 +82,11 @@ export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGatePro
         const body = (await res.json().catch(() => ({}))) as {
           launch?: { status?: string };
         };
-        // Optimistic flip: the decision route returns the updated launch, and
-        // the resulting status equals the chosen decision. Push it into the
-        // shared status context so the header pill flips immediately and hide
-        // this gate, instead of waiting on the slow ``router.refresh()``
-        // re-render of the Supabase-heavy detail page. Same philosophy as #636.
+        // Optimistic flip: the decision route returns the updated launch whose
+        // status equals the chosen decision. Push it into the shared status
+        // context so the header pill flips immediately and hide this gate,
+        // instead of waiting on the slow ``router.refresh()`` re-render of the
+        // Supabase-heavy detail page. Same philosophy as #636.
         const nextStatus = (body.launch?.status ?? chosen) as LaunchStatusValue;
         launchStatus?.setOptimisticStatus(nextStatus);
         setDecided(true);
@@ -132,7 +139,7 @@ export function VideoLaunchApprovalGate({ launchId }: VideoLaunchApprovalGatePro
       )}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-        {VideoLaunchDecision.options.map((d) => (
+        {LaunchDecision.options.map((d) => (
           <Button
             key={d}
             type="button"
