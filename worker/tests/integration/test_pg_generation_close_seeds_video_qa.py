@@ -217,9 +217,15 @@ def test_image_only_generation_close_unchanged(db_conn) -> None:
         assert _qa_creative_ids(cur, pid) == {ic_id}
 
 
-def test_video_non_captioned_is_not_seeded(db_conn) -> None:
-    """Only the finished (captioned) render enters QA; a composed-only creative
-    is not seeded (it is not a shippable final)."""
+def test_video_non_captioned_without_error_is_not_seeded(db_conn) -> None:
+    """A non-captioned video creative with NO generation task_error is not seeded.
+
+    Only the finished (captioned) render -- or (FIX-E) a render that demonstrably
+    FAILED mid-substage -- enters QA. A composed-only creative with no failure
+    signal is neither (it is not a shippable final and there is no billed failure
+    to surface), so the gate stays empty for it. This is the FIX-E regression that
+    guards against over-seeding every intermediate-status creative.
+    """
     with db_conn.cursor() as cur:
         client_id = _seed_client(cur)
         vbrief = _seed_video_brief(cur, client_id)
@@ -232,8 +238,210 @@ def test_video_non_captioned_is_not_seeded(db_conn) -> None:
             (vbrief,),
         )
         _emit_generation_closure(cur, pid)
-        # Advanced (the batch closed) but the non-captioned creative is excluded.
+        # Advanced (the batch closed) but the non-captioned, non-failed creative
+        # is excluded.
         assert _qa_creative_ids(cur, pid) == set()
+
+
+# ---------------------------------------------------------------------------
+# FIX-E: a video render that FAILED mid-substage is surfaced as a BLOCKING
+# creative_qa gate row instead of being silently dropped (migration 0056).
+# ---------------------------------------------------------------------------
+#
+# The bug: the closure heuristic counts the failed render's generation
+# task_error toward closure, but the captioned-only video seed (0046/0054) never
+# seeds the failed creative -- so a partially-rendered (and billed) video
+# advanced to creative_qa INVISIBLE to the QA rollup. FIX-E seeds it as a
+# 'failed' (blocking) row keyed off the substage failure event, which carries
+# payload.kind = 'video' + payload.creative_id (worker pipeline.py
+# _run_generation_video_substages).
+
+
+def _emit_generation_closure_with_video_error(
+    cur,
+    pipeline_id: str,
+    failed_creative_id: str,
+    *,
+    substage: str = "caption",
+) -> None:
+    """Cutoff + a CLOSED generation batch where one video substage failed.
+
+    Mirrors the real generation close for a multi-concept video run: one
+    `stage_advanced -> generation` cutoff, one queued + one done event (a sibling
+    concept / the image track that DID finish, so v_done >= 1), and one
+    `task_error` carrying the failed video creative's id in the payload (exactly
+    the envelope `_run_generation_video_substages` emits on a substage HTTPError).
+    The closure heuristic sees v_expected = 1, v_done = 1, v_error = 1 ->
+    (v_done + v_error) >= v_expected AND v_done >= 1 -> advance.
+    """
+    cur.execute(
+        """
+        insert into pipeline_events (pipeline_id, kind, stage, payload)
+        values (%s, 'stage_advanced', 'generation', '{"from": "review"}'::jsonb)
+        """,
+        (pipeline_id,),
+    )
+    cur.execute(
+        """
+        insert into pipeline_events (pipeline_id, kind, stage, payload)
+        values (%s, 'task_queued', 'generation', '{}'::jsonb)
+        """,
+        (pipeline_id,),
+    )
+    cur.execute(
+        """
+        insert into pipeline_events (pipeline_id, kind, stage, payload)
+        values (%s, 'task_done', 'generation', '{}'::jsonb)
+        """,
+        (pipeline_id,),
+    )
+    cur.execute(
+        """
+        insert into pipeline_events (pipeline_id, kind, stage, payload)
+        values (%s, 'task_error', 'generation',
+                jsonb_build_object('kind', 'video', 'substage', %s,
+                                   'creative_id', %s, 'error', 'render boom'))
+        """,
+        (pipeline_id, substage, failed_creative_id),
+    )
+
+
+def _qa_creative_statuses(cur, pipeline_id: str) -> dict[str, str]:
+    cur.execute(
+        """
+        select creative_id, status::text from creative_stage_state
+         where pipeline_id = %s and stage = 'creative_qa'
+        """,
+        (pipeline_id,),
+    )
+    return {str(r[0]): str(r[1]) for r in cur.fetchall()}
+
+
+def test_failed_video_substage_is_seeded_as_blocking(db_conn) -> None:
+    """A video creative that failed mid-substage is seeded as a 'failed' (blocking)
+    creative_qa row, NOT silently dropped (FIX-E)."""
+    with db_conn.cursor() as cur:
+        client_id = _seed_client(cur)
+        vbrief = _seed_video_brief(cur, client_id)
+        pid = _seed_pipeline_in_generation(
+            cur, client_id, image_brief_id=None, video_brief_id=vbrief
+        )
+        # The render reached 'composed' then caption failed: status never becomes
+        # 'captioned', so the legacy seed would skip it.
+        cur.execute(
+            "insert into video_creatives (brief_id, version, status) "
+            "values (%s, 1, 'composed') returning id",
+            (vbrief,),
+        )
+        failed_vc = str(cur.fetchone()[0])
+
+        _emit_generation_closure_with_video_error(cur, pid, failed_vc)
+
+        assert _status(cur, pid) == "creative_qa"
+        statuses = _qa_creative_statuses(cur, pid)
+        # The failed render is now VISIBLE in the gate, and BLOCKING.
+        assert failed_vc in statuses, "the failed video creative must own a gate row"
+        assert statuses[failed_vc] == "failed", (
+            "the failed render must be a blocking 'failed' gate row, not pending/cleared"
+        )
+        # The rollup must NOT be cleared while the failed render holds the gate.
+        cur.execute(
+            "select pipeline_rollup_cleared(%s, 'creative_qa')", (pid,)
+        )
+        assert cur.fetchone()[0] is False
+
+
+def test_failed_and_captioned_video_both_seeded(db_conn) -> None:
+    """A batch with one captioned render and one failed render seeds BOTH: the
+    captioned as 'pending', the failed as 'failed' (FIX-E)."""
+    with db_conn.cursor() as cur:
+        client_id = _seed_client(cur)
+        vbrief = _seed_video_brief(cur, client_id)
+        pid = _seed_pipeline_in_generation(
+            cur, client_id, image_brief_id=None, video_brief_id=vbrief
+        )
+        cur.execute(
+            "insert into video_creatives (brief_id, version, status) "
+            "values (%s, 1, 'captioned') returning id",
+            (vbrief,),
+        )
+        good_vc = str(cur.fetchone()[0])
+        cur.execute(
+            "insert into video_creatives (brief_id, version, status) "
+            "values (%s, 2, 'composed') returning id",
+            (vbrief,),
+        )
+        failed_vc = str(cur.fetchone()[0])
+
+        # A closed batch: one task_done (the captioned render) + one video error.
+        _emit_generation_closure_with_video_error(cur, pid, failed_vc)
+
+        assert _status(cur, pid) == "creative_qa"
+        statuses = _qa_creative_statuses(cur, pid)
+        assert statuses.get(good_vc) == "pending", "captioned render seeded as before"
+        assert statuses.get(failed_vc) == "failed", "failed render surfaced as blocking"
+
+
+def test_captioned_video_seed_status_unchanged(db_conn) -> None:
+    """Regression: a captioned video with no failure is still seeded 'pending'
+    (the FIX-E failed-seed does not alter the captioned path)."""
+    with db_conn.cursor() as cur:
+        client_id = _seed_client(cur)
+        vbrief = _seed_video_brief(cur, client_id)
+        pid = _seed_pipeline_in_generation(
+            cur, client_id, image_brief_id=None, video_brief_id=vbrief
+        )
+        cur.execute(
+            "insert into video_creatives (brief_id, version, status) "
+            "values (%s, 1, 'captioned') returning id",
+            (vbrief,),
+        )
+        vc_id = str(cur.fetchone()[0])
+        _emit_generation_closure(cur, pid)
+        assert _qa_creative_statuses(cur, pid) == {vc_id: "pending"}
+
+
+def test_image_error_does_not_seed_a_phantom_video_row(db_conn) -> None:
+    """An image-track task_error (payload.kind='image', no creative_id) must NOT
+    cause any video gate seeding -- the failed-video seed keys strictly on
+    kind='video' + creative_id (FIX-E)."""
+    with db_conn.cursor() as cur:
+        client_id = _seed_client(cur)
+        ibrief = _seed_image_brief(cur, client_id)
+        pid = _seed_pipeline_in_generation(
+            cur, client_id, image_brief_id=ibrief, video_brief_id=None
+        )
+        cur.execute(
+            "insert into creatives (brief_id, type, concept, ratio, version, status) "
+            "values (%s, 'image', 'fresh-roof', '1x1', 'v1.0', 'draft') returning id",
+            (ibrief,),
+        )
+        ic_id = str(cur.fetchone()[0])
+        # Cutoff + one queued + one done + one IMAGE error (closes the batch).
+        cur.execute(
+            "insert into pipeline_events (pipeline_id, kind, stage, payload) "
+            "values (%s, 'stage_advanced', 'generation', '{\"from\": \"review\"}'::jsonb)",
+            (pid,),
+        )
+        cur.execute(
+            "insert into pipeline_events (pipeline_id, kind, stage, payload) "
+            "values (%s, 'task_queued', 'generation', '{}'::jsonb)",
+            (pid,),
+        )
+        cur.execute(
+            "insert into pipeline_events (pipeline_id, kind, stage, payload) "
+            "values (%s, 'task_done', 'generation', '{}'::jsonb)",
+            (pid,),
+        )
+        cur.execute(
+            "insert into pipeline_events (pipeline_id, kind, stage, payload) "
+            "values (%s, 'task_error', 'generation', "
+            "'{\"kind\": \"image\", \"error\": \"kie 429\"}'::jsonb)",
+            (pid,),
+        )
+        assert _status(cur, pid) == "creative_qa"
+        # Only the image creative is seeded; no phantom video row.
+        assert _qa_creative_ids(cur, pid) == {ic_id}
 
 
 # ---------------------------------------------------------------------------
