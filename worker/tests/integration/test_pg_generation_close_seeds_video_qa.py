@@ -303,8 +303,8 @@ def _emit_generation_closure_with_video_error(
         """
         insert into pipeline_events (pipeline_id, kind, stage, payload)
         values (%s, 'task_error', 'generation',
-                jsonb_build_object('kind', 'video', 'substage', %s,
-                                   'creative_id', %s, 'error', 'render boom'))
+                jsonb_build_object('kind', 'video', 'substage', %s::text,
+                                   'creative_id', %s::text, 'error', 'render boom'))
         """,
         (pipeline_id, substage, failed_creative_id),
     )
