@@ -270,13 +270,21 @@ def _emit_generation_closure_with_video_error(
 ) -> None:
     """Cutoff + a CLOSED generation batch where one video substage failed.
 
-    Mirrors the real generation close for a multi-concept video run: one
-    `stage_advanced -> generation` cutoff, one queued + one done event (a sibling
-    concept / the image track that DID finish, so v_done >= 1), and one
-    `task_error` carrying the failed video creative's id in the payload (exactly
-    the envelope `_run_generation_video_substages` emits on a substage HTTPError).
-    The closure heuristic sees v_expected = 1, v_done = 1, v_error = 1 ->
-    (v_done + v_error) >= v_expected AND v_done >= 1 -> advance.
+    Mirrors a real multi-concept generation close: one `stage_advanced ->
+    generation` cutoff, TWO `task_queued` (two concepts were dispatched -- the
+    sibling that finishes + the one that fails), one `task_done` (the sibling /
+    image track that DID finish, so v_done >= 1), and one `task_error` carrying
+    the failed video creative's id (exactly the envelope
+    `_run_generation_video_substages` emits on a substage HTTPError).
+
+    Crucially the failure's task_error is emitted LAST and is the CLOSING event:
+    with v_expected = greatest(queued)=2, the task_done alone (v_done=1, v_error=0)
+    does NOT close (1 < 2); the batch only closes on the task_error
+    (v_done=1, v_error=1 -> 2 >= 2 AND v_done >= 1 -> advance). This matches
+    production -- a concept that fails was itself queued, so the batch cannot
+    close until its terminal (error) event exists, guaranteeing the failed-video
+    seed sees it. (The earlier 1-queued helper let the task_done close the batch
+    and advance BEFORE the error row existed, so the seed found nothing.)
     """
     cur.execute(
         """
@@ -285,13 +293,16 @@ def _emit_generation_closure_with_video_error(
         """,
         (pipeline_id,),
     )
-    cur.execute(
-        """
-        insert into pipeline_events (pipeline_id, kind, stage, payload)
-        values (%s, 'task_queued', 'generation', '{}'::jsonb)
-        """,
-        (pipeline_id,),
-    )
+    # Two concepts dispatched -> v_expected = 2, so the batch cannot close until
+    # BOTH terminal events (the done AND the error) exist.
+    for _ in range(2):
+        cur.execute(
+            """
+            insert into pipeline_events (pipeline_id, kind, stage, payload)
+            values (%s, 'task_queued', 'generation', '{}'::jsonb)
+            """,
+            (pipeline_id,),
+        )
     cur.execute(
         """
         insert into pipeline_events (pipeline_id, kind, stage, payload)
@@ -299,6 +310,9 @@ def _emit_generation_closure_with_video_error(
         """,
         (pipeline_id,),
     )
+    # The failure's error is the CLOSING event (emitted after the done), so the
+    # trigger advances on it while compute_pipeline_status is still 'generation'
+    # and the failed-video seed catches it.
     cur.execute(
         """
         insert into pipeline_events (pipeline_id, kind, stage, payload)
