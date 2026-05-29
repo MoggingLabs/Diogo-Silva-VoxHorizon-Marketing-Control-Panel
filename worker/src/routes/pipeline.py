@@ -62,6 +62,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..auth import verify_secret
+from ..services import cost_ledger
 from ..services.atomic_inserts import record_creative_stage
 from ..services.atomic_inserts_video import record_video_stage
 from ..services.chat_abort import get_store
@@ -95,6 +96,16 @@ router = APIRouter()
 # Same heartbeat cadence as chat_stream — keeps idle SSE connections alive
 # behind proxy timeouts.
 _HEARTBEAT_INTERVAL_S = 15.0
+
+
+# Per-image Kie.ai render cost (USD). These are the SAME figures emit_cost
+# records as the ACTUAL ledger spend after each render; sharing one constant
+# per stage keeps the pre-flight reservation (cost_ledger.reserve_budget, the
+# E4.4 #506 hard cap) and the recorded amount in lockstep so the cap reserves
+# exactly what the render goes on to spend. Ideation renders at 1K (cheap
+# concept previews); generation renders at 2K (final assets).
+IDEATION_IMAGE_COST_USD = 0.02
+GENERATION_IMAGE_COST_USD = 0.05
 
 
 # ---------------------------------------------------------------------------
@@ -682,6 +693,24 @@ async def _produce_ideation_image_track(
                 payload={"kind": "image", "concept": concept, "ratio": "1x1"},
             )
             try:
+                # E4.4 (#506) per-pipeline HARD CAP: refuse BEFORE the paid
+                # render if this concept's estimated spend plus the pipeline's
+                # already-recorded ACTUAL spend would exceed the cap. Mirrors
+                # the video b-roll submit gate (routes/video.py) so the image
+                # track -- the primary production path -- is bounded across
+                # retries / many-concept fan-out the same way, and the hard cap
+                # holds regardless of approval mode (it reads the real ledger
+                # the auto-approve path also writes to). On overrun this raises
+                # a 402 caught by the per-concept handler below as a task_error,
+                # so an over-cap concept fails its render loudly instead of
+                # spending unbounded. The estimate equals the figure emit_cost
+                # records after the spend, so the cap reserves exactly what the
+                # render costs (reserve = pre-flight read-only check; emit_cost
+                # = the actual ledger write -- no double-count).
+                try:
+                    cost_ledger.reserve_budget(pipeline_id, IDEATION_IMAGE_COST_USD)
+                except cost_ledger.BudgetExceeded as exc:
+                    raise HTTPException(status_code=402, detail=str(exc)) from exc
                 result = await kie_client.generate_image_full(
                     prompt, "1x1", resolution="1K"
                 )
@@ -734,14 +763,15 @@ async def _produce_ideation_image_track(
                         "file_path_supabase": storage_path,
                     },
                 )
-                # 1K Kie.ai render cost — approximate; the aggregator
+                # 1K Kie.ai render cost -- approximate; the aggregator
                 # uses these as estimates. The real per-tenant price
-                # plumbing lands in PF-F.
+                # plumbing lands in PF-F. Same constant the reserve gate
+                # above checks, so the recorded ACTUAL matches the reservation.
                 emit_cost(
                     pipeline_id=pipeline_id,
                     api="kie.ai",
                     units=1,
-                    subtotal=0.02,
+                    subtotal=IDEATION_IMAGE_COST_USD,
                     task_event_id=done_id or running_id,
                     stage="ideation",
                     extra={"creative_id": insert.creative_id, "resolution": "1K"},
@@ -1275,6 +1305,29 @@ async def _run_generation_image_substages(
                     },
                 )
                 try:
+                    # E4.4 (#506) per-pipeline HARD CAP: refuse BEFORE the paid
+                    # render if this ratio's estimated spend plus the pipeline's
+                    # already-recorded ACTUAL spend would exceed the cap. Mirrors
+                    # the video b-roll submit gate (routes/video.py) so the image
+                    # track -- the primary production path -- is bounded across
+                    # retries / many-ratio fan-out the same way, and the hard cap
+                    # holds regardless of approval mode (it reads the real ledger
+                    # the auto-approve path also writes to). On overrun this
+                    # raises a 402 caught by the per-ratio handler below as a
+                    # task_error, so an over-cap render fails its substage loudly
+                    # instead of spending unbounded. The estimate equals the
+                    # figure emit_cost records after the spend, so the cap
+                    # reserves exactly what the render costs (reserve = pre-flight
+                    # read-only check; emit_cost = the actual ledger write -- no
+                    # double-count).
+                    try:
+                        cost_ledger.reserve_budget(
+                            pipeline_id, GENERATION_IMAGE_COST_USD
+                        )
+                    except cost_ledger.BudgetExceeded as exc:
+                        raise HTTPException(
+                            status_code=402, detail=str(exc)
+                        ) from exc
                     result = await kie_client.generate_image_full(
                         prompt_text, ratio, resolution="2K"
                     )
@@ -1334,7 +1387,9 @@ async def _run_generation_image_substages(
                         pipeline_id=pipeline_id,
                         api="kie.ai",
                         units=1,
-                        subtotal=0.05,
+                        # Same constant the reserve gate above checks, so the
+                        # recorded ACTUAL matches the pre-flight reservation.
+                        subtotal=GENERATION_IMAGE_COST_USD,
                         task_event_id=done_id or running_id,
                         stage="generation",
                         extra={
