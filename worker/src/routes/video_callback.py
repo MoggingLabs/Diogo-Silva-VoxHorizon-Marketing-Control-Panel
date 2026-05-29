@@ -169,6 +169,15 @@ async def _store_render_result(
     return stored.to_dict()
 
 
+#: The non-terminal statuses a render's work_item can be closed FROM. Every
+#: terminal close (here + the reconcile sweep, which calls these same helpers)
+#: scopes its UPDATE to this set so a row already resolved by the other path is
+#: never re-closed -- the no-double-resolve guard. Mirrors
+#: ``work_queue.OPEN_STATUSES`` (kept inline to avoid importing the facade into
+#: the route module just for one constant).
+_OPEN_WORK_ITEM_STATUSES = ("queued", "claimed", "running")
+
+
 def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> None:
     """Close the render's work_item ``completed`` (silent-failure PR-6).
 
@@ -178,6 +187,12 @@ def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> No
     record now -- the legacy ``video_render_tasks`` write is retired.
     Best-effort -- a closure failure must not 5xx the callback (kie retries on a
     5xx), the watchdog sweeps any unclosed row past the heartbeat threshold.
+
+    FIX-C no-double-resolve: the UPDATE is scoped to NON-terminal statuses
+    (``queued`` / ``claimed`` / ``running``), so if the reconcile sweep and a
+    callback both resolve the same render, whichever writes the terminal status
+    first wins and the loser's UPDATE matches 0 rows -- a render can never be
+    double-closed (e.g. a ``failed`` overwriting a ``completed``).
     """
     sb = get_supabase_admin()
     try:
@@ -190,7 +205,9 @@ def _mark_completed(task_id: str, *, result_url: str, clip_id: str | None) -> No
                 "claimed_by": None,
                 "claimed_at": None,
             }
-        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).execute()
+        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).in_(
+            "status", list(_OPEN_WORK_ITEM_STATUSES)
+        ).execute()
     except Exception as exc:  # noqa: BLE001 -- watchdog sweeps unclosed rows
         log.warning(
             "kie_callback_work_item_close_failed",
@@ -205,6 +222,10 @@ def _mark_work_item_failed(task_id: str, *, error: str) -> None:
     Silent-failure PR-6: the sole durable failure stamp (the legacy table is
     retired). Best-effort -- a closure failure must not 5xx the callback; the
     watchdog sweeps any unclosed rows past the heartbeat threshold.
+
+    FIX-C no-double-resolve: scoped to non-terminal statuses (see
+    :func:`_mark_completed`) so a render the callback / sweep already closed is
+    never re-closed by the other path.
     """
     sb = get_supabase_admin()
     try:
@@ -218,7 +239,9 @@ def _mark_work_item_failed(task_id: str, *, error: str) -> None:
                 "claimed_by": None,
                 "claimed_at": None,
             }
-        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).execute()
+        ).eq("idempotency_key", kie_render_idempotency_key(task_id)).in_(
+            "status", list(_OPEN_WORK_ITEM_STATUSES)
+        ).execute()
     except Exception as exc:  # noqa: BLE001 -- watchdog sweeps unclosed rows
         log.warning(
             "kie_callback_work_item_fail_failed",

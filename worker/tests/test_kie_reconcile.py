@@ -279,6 +279,155 @@ async def test_reconcile_skips_row_without_task_id(
     assert _stub_store == []
 
 
+# ---------------------------------------------------------------------------
+# FIX-C: recover ``queued`` kie_video_render rows (the billed-render blind spot)
+# ---------------------------------------------------------------------------
+#
+# THE BUG FIX-C closes: the live broll/video submit path persists the render's
+# work_item in ``status='queued'`` (kie_video._submit ->
+# persist_submitted_render_work_item) but passes NO callback_url, and nothing
+# claims the ``kie_video_render`` kind -- so the row sits ``queued`` forever.
+# Reading only claimed/running left every queued (billed-but-unresolved) render
+# invisible to the sweep AND the watchdog: the billed kie clip was silently
+# lost. The sweep now ALSO reads queued rows and polls kie for their submitted
+# task_id (always present -- the producer writes it after kie returns it).
+
+
+async def test_reconcile_recovers_queued_render_with_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+    _patch_supabase: FakeSupabase,
+    _stub_store: list[str],
+) -> None:
+    """A 'queued' render with a submitted task_id is polled + closed completed.
+
+    This is the exact live shape: the submit path enqueues the render ``queued``
+    with the kie task_id in the payload, no callback armed. Before FIX-C the
+    sweep skipped it (read only claimed/running) and the billed clip was lost.
+    """
+    sb = _patch_supabase
+    _seed_render(sb, "veo-queued", status="queued", theme="roofing", creative_id="vc-9")
+    _install_kie(
+        monkeypatch,
+        {"veo-queued": RenderStatus("veo-queued", "success", urls=["https://k/q.mp4"])},
+    )
+
+    resolved = await scheduler.run_kie_reconcile_once(_settings())
+    assert resolved == 1
+    # The billed clip was downloaded + stored and the work_item closed completed.
+    assert _stub_store == ["veo-queued"]
+    upd = _render_updates(sb)
+    assert upd and upd[-1]["status"] == "completed"
+    assert upd[-1]["result"]["clip_id"] == "clip-veo-queued"
+    # The closed row in the store is terminal now (recovered, not stuck queued).
+    row = next(r for r in sb.rows("work_item") if r["idempotency_key"] == "kie:render:veo-queued")
+    assert row["status"] == "completed"
+
+
+async def test_reconcile_marks_queued_render_failed_on_kie_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    _patch_supabase: FakeSupabase,
+    _stub_store: list[str],
+) -> None:
+    """A 'queued' render kie reports as failed is closed ``failed`` (not stuck)."""
+    sb = _patch_supabase
+    _seed_render(sb, "veo-qf", status="queued")
+    _install_kie(
+        monkeypatch, {"veo-qf": RenderStatus("veo-qf", "failed", error="moderation")}
+    )
+
+    resolved = await scheduler.run_kie_reconcile_once(_settings())
+    assert resolved == 1
+    assert _stub_store == []  # a failure never stores
+    upd = _render_updates(sb)
+    assert upd and upd[-1]["status"] == "failed"
+    assert upd[-1]["error_detail"]["message"] == "moderation"
+
+
+async def test_reconcile_leaves_queued_render_without_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+    _patch_supabase: FakeSupabase,
+    _stub_store: list[str],
+) -> None:
+    """A 'queued' row with NO submitted task_id yet is left alone, NOT failed.
+
+    A render enqueued before kie returned a task_id (a payload with no/empty
+    ``task_id``) must never be marked failed prematurely -- only rows with a
+    real submitted task_id are polled. The row stays queued, recoverable once a
+    task_id lands (in practice the producer always writes the task_id, so this
+    is the defensive lower bound).
+    """
+    sb = _patch_supabase
+    sb.seed(
+        "work_item",
+        [
+            {
+                "id": "wi-noid",
+                "kind": "kie_video_render",
+                "status": "queued",
+                "attempt": 0,
+                "idempotency_key": "kie:render:noid",
+                "payload": {"task_id": "", "is_veo": True},
+            }
+        ],
+    )
+    _install_kie(monkeypatch, {})
+
+    resolved = await scheduler.run_kie_reconcile_once(_settings())
+    assert resolved == 0
+    assert _stub_store == []
+    # The row was NEVER written -- not failed, not attempt-bumped: left queued.
+    assert not _render_updates(sb)
+    row = next(r for r in sb.rows("work_item") if r["id"] == "wi-noid")
+    assert row["status"] == "queued"
+
+
+async def test_reconcile_reads_queued_claimed_and_running(
+    _patch_supabase: FakeSupabase,
+) -> None:
+    """_open_render_tasks reads queued AND claimed AND running (FIX-C widening).
+
+    Regression guard: a queued render MUST be visible to the sweep now, and the
+    pre-FIX-C claimed/running rows MUST still be read (no behavior lost). A
+    terminal row is still excluded (the no-re-read idempotency property).
+    """
+    sb = _patch_supabase
+    _seed_render(sb, "veo-q", status="queued")
+    _seed_render(sb, "veo-c", status="claimed")
+    _seed_render(sb, "veo-r", status="running")
+    _seed_render(sb, "veo-done", status="completed")  # terminal -> excluded
+
+    rows = scheduler._open_render_tasks(sb, limit=10)
+    task_ids = {r["payload"]["task_id"] for r in rows}
+    assert task_ids == {"veo-q", "veo-c", "veo-r"}
+
+
+async def test_reconcile_no_double_resolve_when_callback_won(
+    _patch_supabase: FakeSupabase,
+) -> None:
+    """No double-resolve: the close is scoped to non-terminal rows.
+
+    If a callback is ever armed and resolves a render to ``completed`` first,
+    the reconcile sweep's close (the SAME ``video_callback._mark_completed`` /
+    ``_mark_work_item_failed`` helpers) must NOT re-close it -- e.g. a stale
+    ``failed`` must not overwrite the callback's ``completed``. The UPDATE is
+    scoped to ``status in (queued, claimed, running)``, so a terminal row
+    matches 0 rows and is left untouched.
+    """
+    sb = _patch_supabase
+    # The callback already closed this render completed.
+    _seed_render(sb, "veo-race", status="completed")
+
+    # A late reconcile tries to mark the same render failed (the "loser" write).
+    video_callback._mark_work_item_failed("veo-race", error="stale poll")
+    # And tries to mark it completed again.
+    video_callback._mark_completed("veo-race", result_url="https://k/r.mp4", clip_id="c2")
+
+    # The stored row is STILL the callback's completed -- never overwritten.
+    row = next(r for r in sb.rows("work_item") if r["idempotency_key"] == "kie:render:veo-race")
+    assert row["status"] == "completed"
+    assert "error_kind" not in row or row.get("error_kind") != "kie_render_failed"
+
+
 def test_bump_render_attempt_never_raises() -> None:
     """The pending-render bookkeeping write is best-effort -- it swallows errors."""
 
