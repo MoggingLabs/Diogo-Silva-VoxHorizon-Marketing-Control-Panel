@@ -1,14 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { hydratePipelineStatus, hydratePipelineStatusMany } from "@/lib/pipeline/derived-status";
-import {
-  CreatePipelineInput,
-  ListPipelinesQuery,
-  type PipelineEventInsert,
-  type PipelineInsert,
-} from "@/lib/pipeline/schemas";
-import { createAdminClient } from "@/lib/supabase/admin";
-import type { Json } from "@/lib/supabase/types.gen";
+import { createPipelineRecord, listPipelinesQuery } from "@/lib/pipeline/queries";
+import { CreatePipelineInput, ListPipelinesQuery } from "@/lib/pipeline/schemas";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,6 +20,10 @@ export const dynamic = "force-dynamic";
  *     with `created_at < cursor`. The `next_cursor` in the response is the
  *     last item's `created_at`, ready to feed back into the next request.
  *     `null` when the current page is the last one.
+ *
+ * Thin HTTP wrapper: parses + validates the query string, then delegates to
+ * `listPipelinesQuery` (the shared data layer the Server Components call
+ * directly). Server Components no longer self-fetch this route.
  */
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
@@ -49,59 +46,13 @@ export async function GET(req: NextRequest) {
   const archivedRaw = url.searchParams.get("archived");
   const archived = archivedRaw === "true" || archivedRaw === "1";
 
-  const supabase = createAdminClient();
-  // Silent-failure PR-4: `pipelines.status` was dropped (migration 0051). When
-  // the caller filters by `?status=<stage>`, we read derived_status from
-  // `v_pipeline_dispatch_state` and INTERSECT with the pipelines page below.
-  // Otherwise we read the pipelines table directly and hydrate status per row.
-  let filteredIds: Set<string> | null = null;
-  if (status) {
-    const { data: vRows, error: vErr } = await supabase
-      .from("v_pipeline_dispatch_state")
-      .select("pipeline_id, derived_status")
-      .eq("derived_status", status);
-    if (vErr) {
-      return NextResponse.json({ error: vErr.message }, { status: 500 });
-    }
-    filteredIds = new Set(
-      (vRows ?? []).map((r) => r.pipeline_id).filter((id): id is string => typeof id === "string"),
-    );
-    // No matches -- early return with an empty page.
-    if (filteredIds.size === 0) {
-      return NextResponse.json({ pipelines: [], next_cursor: null });
-    }
+  try {
+    const result = await listPipelinesQuery({ status, client_id, limit, cursor, archived });
+    return NextResponse.json(result);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "list failed";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  let query = supabase
-    .from("pipelines")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(limit);
-
-  // Soft-archive filter (migration 0048): default hides archived rows; the
-  // archived view shows only them.
-  if (archived) {
-    query = query.not("deleted_at", "is", null);
-  } else {
-    query = query.is("deleted_at", null);
-  }
-
-  if (filteredIds) {
-    query = query.in("id", Array.from(filteredIds));
-  }
-  if (client_id) query = query.eq("client_id", client_id);
-  if (cursor) query = query.lt("created_at", cursor);
-
-  const { data, error } = await query;
-  if (error) {
-    return NextResponse.json({ error: error.message }, { status: 500 });
-  }
-  const rows = data ?? [];
-  // Hydrate `status` per row from the reducer so the list page (and every API
-  // client) sees the same Pipeline shape it did before the column was dropped.
-  const enriched = await hydratePipelineStatusMany(supabase, rows);
-  const next_cursor = rows.length === limit ? (rows[rows.length - 1]?.created_at ?? null) : null;
-  return NextResponse.json({ pipelines: enriched, next_cursor });
 }
 
 /**
@@ -115,12 +66,10 @@ export async function GET(req: NextRequest) {
  *
  * Returns the created pipeline row with status 201.
  *
- * Side effects:
- *   1. Inserts the pipelines row (status defaults to `configuration` via
- *      the DB schema; we also seed `advanced_at.configuration`).
- *   2. Inserts the bootstrap pipeline_events row. If the event insert
- *      fails the pipeline row is still real — we log and continue rather
- *      than rolling back, because the row is the primary artifact.
+ * Thin HTTP wrapper: parses the body + validates it, then delegates to
+ * `createPipelineRecord` (the shared data layer the Server Component calls
+ * directly). The command seeds `advanced_at.configuration`, inserts the
+ * bootstrap event (non-fatal on failure), and hydrates `status`.
  */
 export async function POST(req: NextRequest) {
   let body: unknown;
@@ -138,41 +87,14 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const supabase = createAdminClient();
-  const now = new Date().toISOString();
-  const insert: PipelineInsert = {
-    format_choice: parsed.data.format_choice,
-    client_id: parsed.data.client_id ?? null,
-    advanced_at: { configuration: now } as unknown as Json,
-  };
-
-  const { data: pipeline, error: insertErr } = await supabase
-    .from("pipelines")
-    .insert(insert)
-    .select()
-    .single();
-
-  if (insertErr || !pipeline) {
-    return NextResponse.json({ error: insertErr?.message ?? "insert failed" }, { status: 500 });
-  }
-
-  const event: PipelineEventInsert = {
-    pipeline_id: pipeline.id,
-    kind: "stage_advanced",
-    stage: "configuration",
-    payload: {
+  try {
+    const pipeline = await createPipelineRecord({
       format_choice: parsed.data.format_choice,
-      client_id: parsed.data.client_id ?? null,
-    } as Json,
-  };
-  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
-  if (evErr) {
-    // The pipeline row is the primary artifact — don't fail the request.
-    console.warn(`[pipelines.create] event insert failed: ${evErr.message}`);
+      client_id: parsed.data.client_id,
+    });
+    return NextResponse.json({ pipeline }, { status: 201 });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "insert failed";
+    return NextResponse.json({ error: message }, { status: 500 });
   }
-
-  // Silent-failure PR-4: hydrate `status` from the reducer (the seed
-  // `stage_advanced` event we just inserted resolves to 'configuration').
-  const enriched = await hydratePipelineStatus(supabase, pipeline);
-  return NextResponse.json({ pipeline: enriched }, { status: 201 });
 }

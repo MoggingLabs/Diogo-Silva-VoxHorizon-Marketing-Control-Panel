@@ -89,7 +89,18 @@ export async function middleware(req: NextRequest): Promise<NextResponse> {
   // No valid session. API callers get a machine-readable 401; page requests
   // get bounced to the login screen carrying the original path so the operator
   // returns where they started after signing in.
-  if (pathname.startsWith("/api/")) {
+  //
+  // RSC-class requests (a soft client-side navigation / prefetch / Server
+  // Action) also want a status code, NOT an HTML login page: returning a 307 to
+  // /login for those would hand the router a redirect to an HTML document it
+  // can't fold into the flight stream, and the navigation stalls. A clean 401
+  // makes the client fall back to a hard reload, which then hits the page-
+  // redirect branch below and lands on /login as a real document.
+  const isRscLike =
+    req.headers.get("RSC") === "1" ||
+    req.headers.has("Next-Router-Prefetch") ||
+    req.headers.has("Next-Action");
+  if (pathname.startsWith("/api/") || isRscLike) {
     return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
 

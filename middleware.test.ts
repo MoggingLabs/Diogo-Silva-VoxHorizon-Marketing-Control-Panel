@@ -16,10 +16,11 @@ function makeReq(opts: {
   path?: string;
   search?: string;
   cookie?: string | null;
+  headers?: Record<string, string>;
 }): import("next/server").NextRequest {
   const pathname = opts.path ?? "/";
   const search = opts.search ?? "";
-  const headers = new Headers();
+  const headers = new Headers(opts.headers);
   if (opts.cookie) headers.set("cookie", opts.cookie);
 
   const nextUrl = {
@@ -114,6 +115,54 @@ describe("middleware (single-operator session gate)", () => {
       expect(res.headers.get("location")).toBeNull();
       const body = await res.json();
       expect(body.error).toBe("unauthenticated");
+    });
+  });
+
+  describe("RSC-class page requests without a valid session", () => {
+    it("returns 401 JSON (not a 307) for an RSC soft-navigation", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/pipeline", headers: { RSC: "1" } }));
+      expect(res.status).toBe(401);
+      expect(res.headers.get("location")).toBeNull();
+      const body = await res.json();
+      expect(body.error).toBe("unauthenticated");
+    });
+
+    it("returns 401 JSON for a router prefetch", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(
+        makeReq({ path: "/pipeline", headers: { "Next-Router-Prefetch": "1" } }),
+      );
+      expect(res.status).toBe(401);
+      expect(res.headers.get("location")).toBeNull();
+    });
+
+    it("returns 401 JSON for a Server Action POST", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(
+        makeReq({ path: "/pipeline", headers: { "Next-Action": "abc123" } }),
+      );
+      expect(res.status).toBe(401);
+      expect(res.headers.get("location")).toBeNull();
+    });
+
+    it("still 307-redirects a normal document page request (no RSC headers)", async () => {
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(makeReq({ path: "/pipeline" }));
+      expect(res.status).toBe(307);
+      const url = new URL(res.headers.get("location")!);
+      expect(url.pathname).toBe("/login");
+      expect(url.searchParams.get("next")).toBe("/pipeline");
+    });
+
+    it("allows an authenticated RSC navigation through", async () => {
+      const cookie = await validCookie();
+      const mod = await loadMiddleware();
+      const res = await mod.middleware(
+        makeReq({ path: "/pipeline", cookie, headers: { RSC: "1" } }),
+      );
+      expect(res.status).toBeLessThan(400);
+      expect(res.headers.get("location")).toBeNull();
     });
   });
 

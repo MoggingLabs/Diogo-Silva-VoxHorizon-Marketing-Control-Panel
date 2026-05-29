@@ -34,9 +34,9 @@ vi.mock("@/lib/monitor/fetch", () => ({
   getMonitorRows: (...a: unknown[]) => getMonitorRows(...(a as [])),
 }));
 
-const getPipeline = vi.fn();
-vi.mock("@/lib/pipeline/client", () => ({
-  getPipeline: (...args: unknown[]) => getPipeline(...args),
+const getPipelineQuery = vi.fn();
+vi.mock("@/lib/pipeline/queries", () => ({
+  getPipelineQuery: (...args: unknown[]) => getPipelineQuery(...args),
 }));
 
 let currentSupabase: SupabaseClientMock;
@@ -175,7 +175,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders configuration stage with clients list", async () => {
-    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({}), events: [] });
+    getPipelineQuery.mockResolvedValueOnce({ pipeline: pipeline({}), events: [] });
     currentSupabase = mockSupabaseClient({
       clients: {
         select: {
@@ -192,7 +192,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("shows the operator narration + a scoped spend-approvals link on active runs", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "ideation", id: "abcd1234-rest" }),
       events: [{ id: "e1" }],
     });
@@ -208,7 +208,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("hides the supervision sidebar on a cancelled run", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "cancelled" }),
       events: [],
     });
@@ -221,7 +221,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders ideation stage", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "ideation" }),
       events: [],
     });
@@ -234,7 +234,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders review stage", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "review" }),
       events: [],
     });
@@ -245,7 +245,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders generation stage with events", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "generation" }),
       events: [{ id: "e1" }],
     });
@@ -256,7 +256,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("PR-5: SSR-seeds the active work_item into the ideation stage", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "ideation" }),
       events: [],
     });
@@ -280,7 +280,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("PR-5: threads a null seed when the dispatcher is idle on review", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "review" }),
       events: [],
     });
@@ -293,7 +293,10 @@ describe("PipelineDetailPage", () => {
   });
 
   it("PR-5: does NOT read the work_item seed on non-slot stages", async () => {
-    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "monitor" }), events: [] });
+    getPipelineQuery.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "monitor" }),
+      events: [],
+    });
     currentSupabase = mockSupabaseClient();
     const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
     render(el);
@@ -303,7 +306,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders done stage and hides cancel button", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "done" }),
       events: [],
     });
@@ -315,7 +318,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("renders cancelled banner + placeholder", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "cancelled" }),
       events: [],
     });
@@ -328,22 +331,22 @@ describe("PipelineDetailPage", () => {
     expect(screen.getByTestId("placeholder")).toBeInTheDocument();
   });
 
-  it("calls notFound on a 404", async () => {
-    getPipeline.mockRejectedValueOnce(Object.assign(new Error("nope"), { status: 404 }));
+  it("calls notFound when the pipeline is missing (null)", async () => {
+    getPipelineQuery.mockResolvedValueOnce(null);
     await expect(PipelineDetailPage({ params: Promise.resolve({ id: "x" }) })).rejects.toThrow(
       "__NOT_FOUND__",
     );
   });
 
-  it("rethrows non-404 errors", async () => {
-    getPipeline.mockRejectedValueOnce(new Error("boom"));
+  it("propagates a DB error thrown by the query", async () => {
+    getPipelineQuery.mockRejectedValueOnce(new Error("boom"));
     await expect(PipelineDetailPage({ params: Promise.resolve({ id: "x" }) })).rejects.toThrow(
       "boom",
     );
   });
 
   it("falls back to id slice when no client name and no client_id is null", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ client_id: null, status: "ideation" }),
       events: [],
     });
@@ -354,7 +357,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("uses client id slice when client_id set but lookup returns no name", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "ideation", client_id: "abcd1234-deadbeef" }),
       events: [],
     });
@@ -374,7 +377,7 @@ describe("PipelineDetailPage", () => {
   it.each(["creative_qa", "compliance_review", "spec_validation"] as const)(
     "routes the %s status to the per-creative review host",
     async (status) => {
-      getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status }), events: [] });
+      getPipelineQuery.mockResolvedValueOnce({ pipeline: pipeline({ status }), events: [] });
       currentSupabase = mockSupabaseClient();
       const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
       render(el);
@@ -384,7 +387,7 @@ describe("PipelineDetailPage", () => {
   );
 
   it("routes copy to StageCopy", async () => {
-    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "copy" }), events: [] });
+    getPipelineQuery.mockResolvedValueOnce({ pipeline: pipeline({ status: "copy" }), events: [] });
     currentSupabase = mockSupabaseClient();
     const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
     render(el);
@@ -393,7 +396,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("routes variant_plan to StageVariantPlan", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "variant_plan" }),
       events: [],
     });
@@ -404,7 +407,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("routes launch_handoff to the LaunchGate", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "launch_handoff" }),
       events: [],
     });
@@ -415,7 +418,10 @@ describe("PipelineDetailPage", () => {
   });
 
   it("routes monitor to the MonitorDashboard", async () => {
-    getPipeline.mockResolvedValueOnce({ pipeline: pipeline({ status: "monitor" }), events: [] });
+    getPipelineQuery.mockResolvedValueOnce({
+      pipeline: pipeline({ status: "monitor" }),
+      events: [],
+    });
     currentSupabase = mockSupabaseClient();
     const el = await PipelineDetailPage({ params: Promise.resolve({ id: "x" }) });
     render(el);
@@ -424,7 +430,7 @@ describe("PipelineDetailPage", () => {
   });
 
   it("falls through finalize_assets (auto stage) to the placeholder", async () => {
-    getPipeline.mockResolvedValueOnce({
+    getPipelineQuery.mockResolvedValueOnce({
       pipeline: pipeline({ status: "finalize_assets" }),
       events: [],
     });

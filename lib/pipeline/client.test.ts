@@ -4,8 +4,6 @@ import {
   archivePipeline,
   cancelPipeline,
   createLaunchPackage,
-  createPipeline,
-  getPipeline,
   kickoffOperatorPipeline,
   listPipelines,
   restorePipeline,
@@ -26,53 +24,6 @@ beforeEach(() => {
 afterEach(() => {
   process.env = { ...ORIG_ENV };
   vi.restoreAllMocks();
-});
-
-describe("createPipeline", () => {
-  it("posts the body and returns the new pipeline", async () => {
-    const spy = spyOnFetch();
-    const pipeline = { id: "p1", status: "configuration", format_choice: "image" };
-    spy.mockResolvedValueOnce(jsonResponse({ pipeline }));
-    const out = await createPipeline({ format_choice: "image" });
-    expect(out).toEqual(pipeline);
-    const call = spy.mock.calls[0];
-    expect(call?.[0]).toBe("http://localhost:3000/api/pipelines");
-    expect((call?.[1] as RequestInit | undefined)?.method).toBe("POST");
-  });
-
-  it("uses NEXT_PUBLIC_APP_URL when set", async () => {
-    process.env.NEXT_PUBLIC_APP_URL = "https://app.example.com/";
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(jsonResponse({ pipeline: { id: "p1" } }));
-    await createPipeline({ format_choice: "image" });
-    expect(spy.mock.calls[0]?.[0]).toBe("https://app.example.com/api/pipelines");
-  });
-
-  it("uses VERCEL_URL fallback", async () => {
-    process.env.VERCEL_URL = "preview.vercel.app";
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(jsonResponse({ pipeline: { id: "p1" } }));
-    await createPipeline({ format_choice: "image" });
-    expect(spy.mock.calls[0]?.[0]).toBe("https://preview.vercel.app/api/pipelines");
-  });
-
-  it("throws when the response is not 2xx", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(new Response("bad body", { status: 400 }));
-    await expect(createPipeline({ format_choice: "image" })).rejects.toThrow(/400.*bad body/);
-  });
-
-  it("throws when JSON is malformed", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(textResponse("not json"));
-    await expect(createPipeline({ format_choice: "image" })).rejects.toThrow(/Invalid JSON/);
-  });
-
-  it("throws using statusText when body is empty", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(new Response("", { status: 500, statusText: "Server bad" }));
-    await expect(createPipeline({ format_choice: "image" })).rejects.toThrow(/500.*Server bad/);
-  });
 });
 
 describe("kickoffOperatorPipeline", () => {
@@ -120,6 +71,22 @@ describe("listPipelines", () => {
     expect(spy.mock.calls[0]?.[0]).toBe("http://localhost:3000/api/pipelines");
   });
 
+  it("uses NEXT_PUBLIC_APP_URL when set", async () => {
+    process.env.NEXT_PUBLIC_APP_URL = "https://app.example.com/";
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
+    await listPipelines();
+    expect(spy.mock.calls[0]?.[0]).toBe("https://app.example.com/api/pipelines");
+  });
+
+  it("uses VERCEL_URL fallback", async () => {
+    process.env.VERCEL_URL = "preview.vercel.app";
+    const spy = spyOnFetch();
+    spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
+    await listPipelines();
+    expect(spy.mock.calls[0]?.[0]).toBe("https://preview.vercel.app/api/pipelines");
+  });
+
   it("encodes the archived flag when requested", async () => {
     const spy = spyOnFetch();
     spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
@@ -144,47 +111,6 @@ describe("listPipelines", () => {
     const spy = spyOnFetch();
     spy.mockResolvedValueOnce(new Response("", { status: 500, statusText: "Boom" }));
     await expect(listPipelines()).rejects.toThrow(/500.*Boom/);
-  });
-});
-
-describe("getPipeline", () => {
-  it("returns the parsed body", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(
-      jsonResponse({ pipeline: { id: "p1" }, image_brief: null, video_brief: null, events: [] }),
-    );
-    const out = await getPipeline("p1");
-    expect(out.pipeline.id).toBe("p1");
-  });
-
-  it("throws a 404 with a status property", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(new Response("", { status: 404 }));
-    await expect(getPipeline("p1")).rejects.toMatchObject({
-      message: "Pipeline not found",
-      status: 404,
-    });
-  });
-
-  it("throws on other non-2xx", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(new Response("err", { status: 500 }));
-    await expect(getPipeline("p1")).rejects.toThrow(/500/);
-  });
-
-  it("falls back to statusText when body is empty", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(new Response("", { status: 500, statusText: "Boom" }));
-    await expect(getPipeline("p1")).rejects.toThrow(/Boom/);
-  });
-
-  it("encodes special characters in the id", async () => {
-    const spy = spyOnFetch();
-    spy.mockResolvedValueOnce(
-      jsonResponse({ pipeline: { id: "a b" }, image_brief: null, video_brief: null, events: [] }),
-    );
-    await getPipeline("a b");
-    expect(spy.mock.calls[0]?.[0]).toContain("a%20b");
   });
 });
 
@@ -338,9 +264,7 @@ describe("body-read catch fallbacks", () => {
   }
 
   it.each([
-    ["createPipeline", async () => createPipeline({ format_choice: "image" })],
     ["listPipelines", async () => listPipelines()],
-    ["getPipeline", async () => getPipeline("p1")],
     ["updatePicks", async () => updatePicks("p1", {})],
     ["createLaunchPackage", async () => createLaunchPackage({ brief_id: "b1" })],
     ["cancelPipeline", async () => cancelPipeline("p1")],
@@ -360,8 +284,8 @@ describe("resolveBaseUrl (browser branch)", () => {
     (globalThis as Record<string, unknown>).window = {};
     try {
       const spy = spyOnFetch();
-      spy.mockResolvedValueOnce(jsonResponse({ pipeline: { id: "p1" } }));
-      await createPipeline({ format_choice: "image" });
+      spy.mockResolvedValueOnce(jsonResponse({ pipelines: [], next_cursor: null }));
+      await listPipelines();
       // Relative URL — no host prefix.
       expect(spy.mock.calls[0]?.[0]).toBe("/api/pipelines");
     } finally {

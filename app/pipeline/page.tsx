@@ -3,7 +3,7 @@ import type { Route } from "next";
 import { Bot } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { listPipelines } from "@/lib/pipeline/client";
+import { listPipelinesQuery } from "@/lib/pipeline/queries";
 import { PipelineList } from "@/components/pipeline/PipelineList";
 import { createClient } from "@/lib/supabase/server";
 import type { Pipeline } from "@/lib/pipeline/types";
@@ -29,7 +29,7 @@ export default async function PipelineIndexPage() {
   let loadError: string | null = null;
 
   try {
-    const res = await listPipelines({ limit: 200 });
+    const res = await listPipelinesQuery({ limit: 200 });
     pipelines = res.pipelines;
   } catch (err) {
     loadError = err instanceof Error ? err.message : "Failed to load pipelines.";
