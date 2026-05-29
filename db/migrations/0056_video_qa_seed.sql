@@ -21,8 +21,7 @@
 -- a partially-rendered video silently absent from the gate, surfaced nowhere.
 -- The manager never sees that a paid render failed.
 --
--- WHY OPTION 2 (widen the seed on a generation ``task_error``), NOT OPTION 1
--- (seed terminal-status creatives incl. a 'failed' status). The
+-- DETECTION (widen the seed on a generation ``task_error``). The
 -- ``video_creative_status`` enum (0001) is
 -- ``draft / script_ready / voiceover_ready / broll_ready / composed / captioned
 -- / approved / rejected`` -- there is NO ``failed`` value, and none was added by
@@ -31,23 +30,32 @@
 -- NOTHING to ``video_creatives.status`` -- the row simply stays at its last good
 -- status (e.g. ``composed`` when caption fails, ``broll_ready`` when compose
 -- fails). So a failed render is INDISTINGUISHABLE from an in-flight one by status
--- alone, and OPTION 1 has no clean terminal marker to key on. The reliable signal
--- is the substage failure event itself: ``_run_generation_video_substages`` emits
--- ``task_error`` at ``stage = 'generation'`` with
--- ``payload->>'kind' = 'video'`` and ``payload->>'creative_id' = <the failed
--- video creative id>`` (the image track's errors carry ``kind = 'image'`` and no
--- ``creative_id``, so the filter cannot catch an image error). FIX-E therefore
--- adds a THIRD seed: any in-scope video creative for this pipeline that has a
--- generation ``task_error`` in the SAME closure window (after the generation
--- cutoff), seeded with status ``'failed'`` so it lands as a BLOCKING row in the
--- creative_qa rollup. ``pipeline_rollup_cleared()`` (0018/0039) treats anything
--- not in (passed/overridden/skipped) as blocking, and a ``'failed'`` gate row can
--- only leave via an audited ``'overridden'`` (override_note REQUIRED, 0018) or
--- back to ``'in_progress'`` -- exactly the "manager must explicitly kill or
--- override a billed failure" semantics we want. The failed video creative's id is
--- a valid ``creative_stage_state.creative_id`` because EVERY ``video_creatives``
--- row (any status) is mirrored into the neutral ``creative`` base on insert
--- (0034) and the FK was repointed to ``creative`` (0035).
+-- alone. The reliable signal is the substage failure event itself:
+-- ``_run_generation_video_substages`` emits ``task_error`` at
+-- ``stage = 'generation'`` with ``payload->>'kind' = 'video'`` and
+-- ``payload->>'creative_id' = <the failed video creative id>`` (the image track's
+-- errors carry ``kind = 'image'`` and no ``creative_id``, so the filter cannot
+-- catch an image error). FIX-E therefore adds a THIRD seed: any in-scope video
+-- creative for this pipeline that has a generation ``task_error`` in the SAME
+-- closure window (after the generation cutoff).
+--
+-- WHY status ``'skipped'``, NOT ``'failed'`` (deadlock avoidance). A ``'failed'``
+-- gate row BLOCKS the stage (``pipeline_rollup_cleared()``, 0018/0039, treats
+-- anything not in passed/overridden/skipped as blocking) and can only leave via an
+-- audited ``'overridden'``. But there is NO creative_qa decision/override route in
+-- the app: ``compliance/override/route.ts`` is hardcoded to
+-- ``STAGE='compliance_review'`` and the only creative_qa writer is ``qa_run`` (a QA
+-- verdict, not a manager skip/override). So a ``'failed'`` creative_qa row would be
+-- UNCLEARABLE and the pipeline would DEADLOCK at creative_qa on every video
+-- substage failure -- strictly worse than the silent-drop this fixes. A failed
+-- render is not a deliverable to QA; the correct behaviour is to NOT block the
+-- successful creatives and NOT ship the failed one. ``'skipped'`` is in the cleared
+-- set, so the gate still clears, while the seeded row + its ``summary`` keep the
+-- failed (BILLED) render VISIBLE in the same per-creative rollup the manager
+-- reviews (``creative_stage_state`` is realtime-published). The failed video
+-- creative's id is a valid ``creative_stage_state.creative_id`` because EVERY
+-- ``video_creatives`` row (any status) is mirrored into the neutral ``creative``
+-- base on insert (0034) and the FK was repointed to ``creative`` (0035).
 --
 -- WHAT IS PRESERVED FROM 0054 (byte-identical). The closure heuristic, the
 -- all-failed guard, the reducer-based status check, the idempotent
@@ -61,11 +69,10 @@
 --
 -- IDEMPOTENCY / SCOPE. The new seed is ``on conflict (creative_id, stage) do
 -- nothing`` like the others, so a captioned creative already seeded above is not
--- double-seeded (and a creative that failed THEN was retried to captioned in the
--- same window is seeded once -- the captioned seed wins on first insert and the
--- failed seed no-ops; if the failed seed runs first the status is ``'failed'``,
--- which is the honest verdict for a render that errored at least once and is the
--- safer default since the manager must still confirm the retry is clean). The
+-- double-seeded. The captioned seed runs FIRST, so a creative that failed a
+-- substage THEN was retried to captioned in the same window keeps its captioned
+-- ``'pending'`` QA row (the deliverable gets QA'd); only a creative that has a
+-- generation error and never reached captioned lands as ``'skipped'``. The
 -- failed-video seed is scoped to the SAME generation closure window
 -- (``created_at >= v_cutoff_ts`` and excluding the cutoff event) the closure
 -- heuristic uses, so a stale error from a prior generation pass cannot resurrect
@@ -184,26 +191,48 @@ begin
   on conflict (creative_id, stage) do nothing;
 
   -- FIX-E: seed the per-creative QA gate for each FAILED video creative as a
-  -- BLOCKING row, so a billed render that errored mid-substage (and so never
-  -- reached 'captioned') is VISIBLE in the QA rollup instead of silently absent.
-  -- The signal is the substage failure event itself: a video substage failure
-  -- emits a generation 'task_error' carrying payload.kind = 'video' and
+  -- VISIBLE-but-NON-BLOCKING ('skipped') row, so a billed render that errored
+  -- mid-substage (and so never reached 'captioned') appears in the QA rollup
+  -- instead of being silently absent -- WITHOUT deadlocking the pipeline.
+  --
+  -- WHY 'skipped', NOT 'failed': a 'failed' row blocks the gate
+  -- (pipeline_rollup_cleared, 0018, treats anything not in
+  -- passed/overridden/skipped as blocking), and there is NO creative_qa
+  -- decision/override route in the app -- compliance/override/route.ts is
+  -- hardcoded to STAGE='compliance_review', and the only creative_qa writer is
+  -- qa_run (a QA verdict, not a manager skip/override). So a 'failed' creative_qa
+  -- row would be UNCLEARABLE -> the pipeline would deadlock at creative_qa on
+  -- every video substage failure (worse than the silent-drop this fixes). A
+  -- failed render is not a deliverable to QA, so the correct behaviour is to NOT
+  -- ship it and NOT block the successful creatives: 'skipped' is in the cleared
+  -- set, so the gate still clears, while the row + its summary keep the failed
+  -- (billed) render visible in the same per-creative rollup the manager reviews
+  -- (creative_stage_state is realtime-published).
+  --
+  -- The signal is the substage failure event: a video substage failure emits a
+  -- generation 'task_error' carrying payload.kind = 'video' and
   -- payload.creative_id = the failed video creative (worker pipeline.py
   -- _run_generation_video_substages). video_creative_status has no 'failed'
   -- value, so status alone cannot distinguish a failed render from an in-flight
   -- one -- the error event is the reliable marker. Scoped to the SAME closure
-  -- window (after the generation cutoff, excluding the cutoff event) the heuristic
-  -- counts, joined to in-scope (not soft-deleted) video creatives for this
-  -- pipeline's video lineage. Seeded 'failed' so it is blocking and can only leave
-  -- via an audited override / re-run (0018). Idempotent: the (creative_id, stage)
-  -- conflict no-ops if the captioned seed above already claimed this creative.
+  -- window the heuristic counts (after the generation cutoff, excluding the
+  -- cutoff event), joined to in-scope (not soft-deleted) video creatives for this
+  -- pipeline's video lineage. Explicit enum casts on the literals: a
+  -- ``select distinct`` over heterogeneous columns does not inherit the target
+  -- column types the way a plain ``insert ... select`` does, so the unknown-typed
+  -- 'creative_qa' / 'skipped' literals must be cast or Postgres raises a
+  -- DatatypeMismatch against creative_stage_enum / stage_state_enum. Idempotent:
+  -- the (creative_id, stage) conflict no-ops if the captioned seed above already
+  -- claimed this creative (a render that failed then was retried to captioned
+  -- keeps the captioned 'pending' QA row, not this skip).
   insert into creative_stage_state (pipeline_id, creative_id, stage, status, summary)
-  select distinct p.id, vc.id, 'creative_qa', 'failed',
+  select distinct p.id, vc.id, 'creative_qa'::creative_stage_enum, 'skipped'::stage_state_enum,
          jsonb_build_object(
            'reason', 'generation_render_failed',
-           'detail', 'video render failed mid-substage during generation; '
-                     || 'surfaced as a blocking QA item so the failed (billed) '
-                     || 'render is not silently dropped from the gate'
+           'detail', 'video render failed mid-substage during generation and never '
+                     || 'reached captioned; skipped from the QA gate (not a '
+                     || 'deliverable) and not shipped, surfaced here so the failed '
+                     || '(billed) render is visible to the manager, not silently dropped'
          )
     from pipelines p
     join video_creatives vc

@@ -244,17 +244,21 @@ def test_video_non_captioned_without_error_is_not_seeded(db_conn) -> None:
 
 
 # ---------------------------------------------------------------------------
-# FIX-E: a video render that FAILED mid-substage is surfaced as a BLOCKING
-# creative_qa gate row instead of being silently dropped (migration 0056).
+# FIX-E: a video render that FAILED mid-substage is surfaced as a VISIBLE but
+# NON-BLOCKING ('skipped') creative_qa gate row instead of being silently
+# dropped (migration 0056).
 # ---------------------------------------------------------------------------
 #
 # The bug: the closure heuristic counts the failed render's generation
 # task_error toward closure, but the captioned-only video seed (0046/0054) never
 # seeds the failed creative -- so a partially-rendered (and billed) video
 # advanced to creative_qa INVISIBLE to the QA rollup. FIX-E seeds it as a
-# 'failed' (blocking) row keyed off the substage failure event, which carries
-# payload.kind = 'video' + payload.creative_id (worker pipeline.py
-# _run_generation_video_substages).
+# 'skipped' row keyed off the substage failure event (payload.kind = 'video' +
+# payload.creative_id, worker pipeline.py _run_generation_video_substages).
+# 'skipped' (not 'failed') because there is NO creative_qa override route, so a
+# blocking 'failed' row would be unclearable and deadlock the pipeline; 'skipped'
+# is in the cleared set, so the gate still clears (the failed render just does
+# not ship) while the row + summary keep it visible to the manager.
 
 
 def _emit_generation_closure_with_video_error(
@@ -317,9 +321,11 @@ def _qa_creative_statuses(cur, pipeline_id: str) -> dict[str, str]:
     return {str(r[0]): str(r[1]) for r in cur.fetchall()}
 
 
-def test_failed_video_substage_is_seeded_as_blocking(db_conn) -> None:
-    """A video creative that failed mid-substage is seeded as a 'failed' (blocking)
-    creative_qa row, NOT silently dropped (FIX-E)."""
+def test_failed_video_substage_is_seeded_as_skipped_visible_nonblocking(db_conn) -> None:
+    """A video creative that failed mid-substage is seeded as a 'skipped' (VISIBLE
+    but NON-BLOCKING) creative_qa row, NOT silently dropped and NOT a blocking
+    'failed' row (which would deadlock -- there is no creative_qa override route).
+    FIX-E."""
     with db_conn.cursor() as cur:
         client_id = _seed_client(cur)
         vbrief = _seed_video_brief(cur, client_id)
@@ -339,21 +345,33 @@ def test_failed_video_substage_is_seeded_as_blocking(db_conn) -> None:
 
         assert _status(cur, pid) == "creative_qa"
         statuses = _qa_creative_statuses(cur, pid)
-        # The failed render is now VISIBLE in the gate, and BLOCKING.
+        # The failed render is now VISIBLE in the gate, as a non-blocking 'skipped'.
         assert failed_vc in statuses, "the failed video creative must own a gate row"
-        assert statuses[failed_vc] == "failed", (
-            "the failed render must be a blocking 'failed' gate row, not pending/cleared"
+        assert statuses[failed_vc] == "skipped", (
+            "the failed render must be a VISIBLE, non-blocking 'skipped' gate row "
+            "(a 'failed'/blocking row would deadlock -- no creative_qa override exists)"
         )
-        # The rollup must NOT be cleared while the failed render holds the gate.
+        # The summary records WHY it was skipped (the failed billed render), so it
+        # is not just silently cleared.
+        cur.execute(
+            "select summary->>'reason' from creative_stage_state "
+            "where pipeline_id = %s and creative_id = %s and stage = 'creative_qa'",
+            (pid, failed_vc),
+        )
+        assert cur.fetchone()[0] == "generation_render_failed"
+        # 'skipped' is in the cleared set, so the gate clears and the pipeline is
+        # NOT deadlocked by the failed render (it just does not ship).
         cur.execute(
             "select pipeline_rollup_cleared(%s, 'creative_qa')", (pid,)
         )
-        assert cur.fetchone()[0] is False
+        assert cur.fetchone()[0] is True
 
 
 def test_failed_and_captioned_video_both_seeded(db_conn) -> None:
     """A batch with one captioned render and one failed render seeds BOTH: the
-    captioned as 'pending', the failed as 'failed' (FIX-E)."""
+    captioned as 'pending' (a deliverable that still needs QA), the failed as
+    'skipped' (visible, non-blocking). The gate stays blocked by the captioned
+    'pending' until QA runs -- NOT by the skipped failure (FIX-E)."""
     with db_conn.cursor() as cur:
         client_id = _seed_client(cur)
         vbrief = _seed_video_brief(cur, client_id)
@@ -379,7 +397,13 @@ def test_failed_and_captioned_video_both_seeded(db_conn) -> None:
         assert _status(cur, pid) == "creative_qa"
         statuses = _qa_creative_statuses(cur, pid)
         assert statuses.get(good_vc) == "pending", "captioned render seeded as before"
-        assert statuses.get(failed_vc) == "failed", "failed render surfaced as blocking"
+        assert statuses.get(failed_vc) == "skipped", (
+            "failed render surfaced as a visible, non-blocking 'skipped' row"
+        )
+        # The gate is blocked by the captioned 'pending' (a real deliverable
+        # awaiting QA), NOT by the skipped failure.
+        cur.execute("select pipeline_rollup_cleared(%s, 'creative_qa')", (pid,))
+        assert cur.fetchone()[0] is False
 
 
 def test_captioned_video_seed_status_unchanged(db_conn) -> None:
