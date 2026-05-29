@@ -67,3 +67,18 @@ export async function seedSessionCookie(context: BrowserContext): Promise<void> 
     },
   ]);
 }
+
+/**
+ * Cookie header carrying a valid single-operator session, for harness helpers
+ * that drive Next API routes through the bare Node `fetch` rather than
+ * `page.request`. `page.request` shares the browser context's
+ * fixture-seeded cookie, so those calls are already authenticated; a bare
+ * `fetch` is a separate client with no cookie jar, so the session gate
+ * (`middleware.ts`) 401s it. Spread the returned header into the fetch's
+ * `headers` to authenticate it the same way the browser would.
+ */
+export async function sessionCookieHeader(): Promise<Record<string, string>> {
+  requireSessionSecret();
+  const token = await issueSessionToken(E2E_OPERATOR_EMAIL);
+  return { Cookie: `${SESSION_COOKIE}=${token}` };
+}
