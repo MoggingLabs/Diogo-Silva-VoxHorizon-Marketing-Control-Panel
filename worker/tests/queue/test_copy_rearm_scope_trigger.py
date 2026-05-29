@@ -109,6 +109,7 @@ def test_approve_draft_does_not_rearm_compliance(db_conn, image_creative) -> Non
     pid = image_creative["pipeline_id"]
     cid = image_creative["creative_id"]
     with db_conn.cursor() as cur:
+        _seed_cleared_compliance_gate(cur, pid, cid)
         variant_id = _insert_draft(cur, pid, cid)
         # The insert above re-armed the gate; re-clear it (the worker's fresh
         # adjudication of the draft), so we can observe whether the APPROVE
@@ -146,6 +147,7 @@ def test_reject_draft_does_not_rearm_compliance(db_conn, image_creative) -> None
     pid = image_creative["pipeline_id"]
     cid = image_creative["creative_id"]
     with db_conn.cursor() as cur:
+        _seed_cleared_compliance_gate(cur, pid, cid)
         variant_id = _insert_draft(cur, pid, cid)
         cur.execute(
             """
@@ -193,6 +195,7 @@ def test_content_edit_update_rearms_compliance(
     pid = image_creative["pipeline_id"]
     cid = image_creative["creative_id"]
     with db_conn.cursor() as cur:
+        _seed_cleared_compliance_gate(cur, pid, cid)
         variant_id = _insert_draft(cur, pid, cid)
         cur.execute(
             """
@@ -222,6 +225,7 @@ def test_humanize_only_update_does_not_rearm_compliance(db_conn, image_creative)
     pid = image_creative["pipeline_id"]
     cid = image_creative["creative_id"]
     with db_conn.cursor() as cur:
+        _seed_cleared_compliance_gate(cur, pid, cid)
         variant_id = _insert_draft(cur, pid, cid)
         cur.execute(
             """
