@@ -32,11 +32,13 @@ type RouteContext = { params: Promise<{ id: string }> };
  *     the same inputs the review-stage UI displays (format + picked counts).
  *   - Stamps `approval = { decision, notes, decided_at }`.
  *   - Stamps `advanced_at.generation = now()`.
- *   - Emits `pipeline_events(kind='stage_advanced', stage='generation', payload={decision})`.
- *   - Best-effort POST to the worker's `/work/hermes/kanban` bridge to
- *     create a generation task assigned to `ekko`. Failures (incl. 404
- *     when the worker isn't reachable) are swallowed so a transient
- *     outage doesn't block the commit.
+ *   - Enqueues the generation executor (operator_dispatch / worker_generation)
+ *     on the work_item queue, THEN emits
+ *     `pipeline_events(kind='stage_advanced', stage='generation', payload={decision})`.
+ *     The enqueue-before-emit ordering (FIX-F) means a rare enqueue failure
+ *     leaves the pipeline at `review` with no work_item rather than advanced to
+ *     `generation` with nothing to execute it. The enqueue is the only
+ *     producer; the daemon/worker pulls the queued row.
  *
  * Side-effects on reject:
  *   - Stamps `approval = { decision, notes, decided_at }`.
@@ -178,28 +180,18 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // Emit the stage_advanced event -- the reducer's load-bearing input.
-  // No longer swallowed: a failed insert is the silent-failure class
-  // we are curing.
-  const event: PipelineEventInsert = {
-    pipeline_id: pipeline.id,
-    kind: "stage_advanced",
-    stage: "generation",
-    payload: { decision } as Json,
-  };
-  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
-  if (evErr) {
-    return NextResponse.json(
-      { error: `stage_advanced event insert failed: ${evErr.message}` },
-      { status: 500 },
-    );
-  }
-
-  // Hand generation off to exactly one executor via the work_item queue.
-  // The auto-emit trigger writes the `operator_dispatched` / `task_queued`
-  // events the panel reads; the daemon/worker pulls the queued row. The
-  // legacy fire-and-forget kicks and the explicit `operator_dispatched`
-  // event insert are gone (PR-3 cutover).
+  // FINDING 1 (silent-failure FIX-F): hand generation off to exactly one
+  // executor via the work_item queue BEFORE emitting the canonical
+  // `stage_advanced->generation` event. The event is the SOLE input that
+  // flips the reducer to `generation`; the auto-emit trigger maps an
+  // operator_dispatch/worker_generation enqueue to `operator_dispatched` /
+  // `task_queued` (migration 0050), NOT `stage_advanced`, so emitting the
+  // stage advance after the enqueue is not a double-write. Ordering enqueue
+  // first means a rare enqueue failure leaves the pipeline at `review` with no
+  // work_item (a consistent, recoverable state) instead of advanced to
+  // `generation` with no backing work_item (permanent silent non-execution).
+  // The daemon/worker pulls the queued row; the legacy fire-and-forget kicks
+  // and the explicit `operator_dispatched` event insert are gone (PR-3 cutover).
   if (isOperatorDriven(pipeline.config_draft)) {
     // Operator-driven: the Hermes operator renders the finals for the picked
     // concepts (its render call is the per-batch spend gate).
@@ -236,6 +228,25 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
         { status: 500 },
       );
     }
+  }
+
+  // Now that the executor is queued, emit the stage_advanced event -- the
+  // reducer's load-bearing input. No longer swallowed: a failed insert is the
+  // silent-failure class we are curing. The enqueue above is idempotent on its
+  // key, so a 500 here that the caller retries re-runs the (deduped) enqueue
+  // and re-attempts this insert without double-dispatching.
+  const event: PipelineEventInsert = {
+    pipeline_id: pipeline.id,
+    kind: "stage_advanced",
+    stage: "generation",
+    payload: { decision } as Json,
+  };
+  const { error: evErr } = await supabase.from("pipeline_events").insert(event);
+  if (evErr) {
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   return NextResponse.json({

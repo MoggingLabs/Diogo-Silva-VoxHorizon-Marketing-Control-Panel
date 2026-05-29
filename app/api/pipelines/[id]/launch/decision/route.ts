@@ -137,6 +137,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
+  // FINDING 3 (silent-failure FIX-F): the stage_advanced->monitor event is the
+  // SOLE input that flips the reducer (compute_pipeline_status) to monitor.
+  // Swallowing a failed insert with console.warn + 200 status='monitor' left
+  // the reducer one stage behind (still launch_handoff) under a false UI, so a
+  // re-evaluation 409s 'invalid_state'. Make the insert strict (500 on failure)
+  // -- the same failure class the sibling advance/route.ts already 5xxes.
   const event: PipelineEventInsert = {
     pipeline_id: id,
     kind: "stage_advanced",
@@ -145,7 +151,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.launch.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   // No worker push: the operator already recorded the PAUSED-first Meta entities

@@ -161,6 +161,27 @@ describe("POST /api/pipelines/:id/launch/decision", () => {
     expect(res.status).toBe(500);
   });
 
+  it("500 when the stage_advanced event insert fails (FIX-F: no longer swallowed)", async () => {
+    // FINDING 3: the stage_advanced->monitor event is the SOLE input the
+    // reducer reads. A failed insert used to console.warn + return 200
+    // status='monitor', leaving the reducer at launch_handoff under a false UI
+    // so a re-evaluation 409s 'invalid_state'. It is now strict (500).
+    currentSupabase = mockClient({
+      pipelines: {
+        select: {
+          single: { data: { id, status: "launch_handoff", advanced_at: {} }, error: null },
+        },
+        update: { single: { data: { id, status: "monitor" }, error: null } },
+      },
+      pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
+    });
+    getReviewBundle.mockResolvedValue(READY_BUNDLE);
+    const res = await POST(req(approveBody), { params });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
+  });
+
   it("does NOT push to any worker launch endpoint (operator-MCP launch)", async () => {
     // The locked design holds the Meta launch on the operator's MCP (the
     // operator records entities via /work/pipeline/tools/launch before this

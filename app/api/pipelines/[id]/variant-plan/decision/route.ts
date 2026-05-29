@@ -127,6 +127,13 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
+  // FINDING 2 (silent-failure FIX-F): the stage_advanced->finalize_assets
+  // event is the SOLE input that flips the reducer (compute_pipeline_status)
+  // to finalize_assets. Swallowing a failed insert with console.warn + 200
+  // left the reducer one stage behind under a false "approved" UI, so the
+  // sibling finalize dispatch / advance route 409s 'invalid_state' on the next
+  // decision. Make the insert strict (500 on failure) -- the same failure
+  // class the sibling advance/route.ts already treats as a 5xx.
   const event: PipelineEventInsert = {
     pipeline_id: id,
     kind: "stage_advanced",
@@ -135,7 +142,10 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
-    console.warn(`[pipelines.variant-plan.decision] event insert failed: ${evErr.message}`);
+    return NextResponse.json(
+      { error: `stage_advanced event insert failed: ${evErr.message}` },
+      { status: 500 },
+    );
   }
 
   // FIX-A: dispatch the finalize_assets PRODUCER on entry. finalize_assets is

@@ -111,7 +111,9 @@ describe("POST /api/pipelines/:id/variant-plan/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("warns when plan/event updates fail but still succeeds", async () => {
+  it("warns when the best-effort variant_plan row update fails but still succeeds (200)", async () => {
+    // The variant_plan verdict row update is genuinely best-effort (the plan
+    // row may not exist yet); only the stage_advanced event is load-bearing.
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     currentSupabase = mockClient({
       pipelines: {
@@ -121,12 +123,33 @@ describe("POST /api/pipelines/:id/variant-plan/decision", () => {
         update: { single: { data: { id, status: "finalize_assets" }, error: null } },
       },
       variant_plan: { update: { data: null, error: { message: "plan down" } } },
-      pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
+      pipeline_events: { insert: { data: null, error: null } },
     });
     const res = await POST(req({ decision: "approved" }), { params });
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalled();
     warn.mockRestore();
+  });
+
+  it("500 when the stage_advanced event insert fails (FIX-F: no longer swallowed)", async () => {
+    // FINDING 2: the stage_advanced->finalize_assets event is the SOLE input
+    // the reducer reads. A failed insert used to console.warn + return 200,
+    // leaving the reducer a stage behind under a false "approved" UI. It is now
+    // strict (500) -- matching the sibling advance/route.ts failure class.
+    currentSupabase = mockClient({
+      pipelines: {
+        select: { single: { data: { id, status: "variant_plan", advanced_at: {} }, error: null } },
+        update: { single: { data: { id, status: "finalize_assets" }, error: null } },
+      },
+      variant_plan: { update: { data: null, error: null } },
+      pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
+    });
+    const res = await POST(req({ decision: "approved" }), { params });
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("ev down");
+    // The finalize dispatch must NOT have been enqueued -- we 500 before it.
+    expect(enqueueWorkItem).not.toHaveBeenCalled();
   });
 
   // FIX-A: finalize_assets is inherently OPERATOR-HELD work in BOTH modes --
