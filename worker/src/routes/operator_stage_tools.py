@@ -37,6 +37,15 @@ Endpoints (all bearer-authed):
       computing ``cpl_real = spend / ghl_leads`` (GHL is lead truth). Idempotent
       on the daily-unique index (skip a row already pulled today).
 
+  POST /work/pipeline/tools/monitor_action_result
+      Record the EXECUTED post-approval monitor action (the operator already
+      paused the campaign on Meta for a kill, or raised its daily_budget for a
+      scale, via the Meta MCP). Writes one ``monitor_action_result`` audit row
+      (decision, target_budget, approved_by, meta_payload) linked to the
+      pipeline + ad entity (migration 0058). This is the recorder half of the
+      monitor connector -- the WORKER never touches Meta (operator-held MCP);
+      it audits what the operator executed.
+
   POST /work/pipeline/tools/signal
       Record one operator dispatch signal on the unified ``work_item`` queue
       (kind ``operator_dispatch``): a fresh ``dispatched`` row, a ``running``
@@ -903,6 +912,112 @@ def _already_pulled_today(
 
 
 # ===========================================================================
+# POST /work/pipeline/tools/monitor_action_result
+# ===========================================================================
+
+
+class MonitorActionResult(BaseModel):
+    """One EXECUTED post-approval monitor action the operator applied on Meta.
+
+    The operator already called the Meta MCP ``ads_update_entity`` (kill ->
+    status PAUSED; scale -> raise daily_budget) BEFORE posting here -- the worker
+    never touches Meta (operator-held MCP). This records the audited outcome.
+    """
+
+    model_config = {"extra": "allow"}
+
+    decision: Literal["kill", "scale"]
+    campaign_id: str | None = None
+    ad_entity_id: str | None = None
+    # The new daily budget a `scale` wrote to Meta (minor currency units, e.g.
+    # cents). Required for a scale; ignored for a kill.
+    target_budget: float | None = Field(None, gt=0)
+    approved_by: str | None = None
+    notes: str | None = None
+    meta_payload: dict[str, Any] | None = None
+
+
+class MonitorActionInput(BaseModel):
+    """POST body for ``/work/pipeline/tools/monitor_action_result``."""
+
+    pipeline_id: str = Field(..., min_length=1)
+    client_id: str | None = None
+    result: MonitorActionResult
+
+
+@router.post(
+    "/work/pipeline/tools/monitor_action_result",
+    dependencies=[Depends(verify_secret)],
+)
+async def persist_monitor_action_result(body: MonitorActionInput) -> dict[str, Any]:
+    """Record the EXECUTED kill/scale action the operator applied on Meta.
+
+    Writes one ``monitor_action_result`` audit row (migration 0058): the verdict
+    the operator executed (kill -> the campaign was paused on Meta; scale -> the
+    campaign's daily_budget was raised to ``target_budget``), who approved it,
+    the targeted Meta campaign + recorded ad entity, and the Meta MCP echo. This
+    is the recorder half of the monitor connector: the worker has NO Meta
+    credentials, so it audits what the operator already did rather than calling
+    Meta itself (mirror of ``record_launch``). Emits a ``monitor_action_recorded``
+    pipeline_event so the executed action is visible on the timeline. Returns the
+    recorded row id + the resolved campaign id.
+    """
+    pipeline = _require_pipeline(body.pipeline_id)
+    sb = get_supabase_admin()
+    client_id = body.client_id or pipeline.get("client_id")
+    result = body.result
+
+    # A scale must carry the new budget; a kill must not (a pause has no budget).
+    if result.decision == "scale" and result.target_budget is None:
+        raise HTTPException(
+            status_code=422,
+            detail="scale requires target_budget (the new daily budget)",
+        )
+
+    row: dict[str, Any] = {
+        "pipeline_id": body.pipeline_id,
+        "client_id": client_id,
+        "campaign_id": result.campaign_id,
+        "decision": result.decision,
+        "approved_by": result.approved_by,
+        "notes": result.notes,
+        "meta_payload": result.meta_payload or {},
+    }
+    if result.ad_entity_id is not None:
+        row["ad_entity_id"] = result.ad_entity_id
+    if result.decision == "scale":
+        row["target_budget"] = result.target_budget
+
+    created = sb.table("monitor_action_result").insert(row).execute().data
+    action_id = created[0]["id"] if isinstance(created, list) and created else None
+
+    emit_pipeline_event(
+        pipeline_id=body.pipeline_id,
+        kind="monitor_action_recorded",
+        stage="monitor",
+        payload={
+            "decision": result.decision,
+            "campaign_id": result.campaign_id,
+            "target_budget": result.target_budget,
+            "monitor_action_result_id": action_id,
+        },
+    )
+    log.info(
+        "operator_monitor_action_persisted",
+        pipeline_id=body.pipeline_id,
+        decision=result.decision,
+        campaign_id=result.campaign_id,
+        target_budget=result.target_budget,
+    )
+    return {
+        "ok": True,
+        "monitor_action_result_id": action_id,
+        "decision": result.decision,
+        "campaign_id": result.campaign_id,
+    }
+
+
+# ===========================================================================
 # POST /work/pipeline/tools/signal
 # ===========================================================================
 
@@ -1034,5 +1149,7 @@ __all__ = [
     "FinalizeResult",
     "MonitorInput",
     "MonitorResult",
+    "MonitorActionInput",
+    "MonitorActionResult",
     "SignalInput",
 ]

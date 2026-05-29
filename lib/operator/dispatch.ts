@@ -24,7 +24,13 @@ export type OperatorStage =
   | "variant_plan"
   | "finalize_assets"
   | "launch_handoff"
-  | "monitor";
+  | "monitor"
+  // The POST-APPROVAL monitor action: the manager has approved a kill/scale
+  // verdict and the operator now EXECUTES it on Meta (kill -> pause the live
+  // campaign; scale -> raise the winning campaign's daily budget). This is the
+  // execute counterpart to the recommend-only `monitor` stage. It is not a
+  // pipeline_status_enum value -- the verdict run already reached `done`.
+  | "monitor_action";
 
 /**
  * Build the natural-language instruction the operator receives for a given
@@ -70,6 +76,15 @@ export function operatorInstruction(
       return `Assemble and validate the launch package for pipeline ${pipelineId}. Do not touch Meta without an explicit approval naming the live action; create PAUSED first. Stop at the launch gate.`;
     case "monitor":
       return `Monitor the live ads for pipeline ${pipelineId}. Pull GHL leads as the source of truth, apply the kill/watch/keep thresholds, and recommend kill or scale. Stop for the manager's call.`;
+    case "monitor_action": {
+      // POST-APPROVAL execute path. The manager already approved the verdict;
+      // the operator now EXECUTES it on Meta via the Meta MCP, then records the
+      // outcome through the worker recorder. The verdict details (decision,
+      // campaign, target budget) ride on the `brief` free-text the route
+      // builds, since the daemon keys live state off the pipeline_id.
+      const detail = brief?.trim() ? ` ${brief.trim()}` : "";
+      return `The manager APPROVED a monitor verdict for pipeline ${pipelineId}.${detail} Look up the campaign's live meta_id from ad_entity (kind='campaign' for this pipeline's launch). For a kill: call the Meta MCP ads_update_entity to set status PAUSED. For a scale: call ads_update_entity to raise the campaign's daily_budget to the approved target. Then record the executed action via the worker monitor_action_result tool. This is an EXECUTE path, not a recommendation -- do the Meta write, then record it.`;
+    }
   }
 }
 

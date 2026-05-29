@@ -1,5 +1,11 @@
 /**
  * Tests for `app/api/pipelines/[id]/monitor/decision/route.ts` (#362).
+ *
+ * Monitor connector: an approved kill/scale verdict now advances to `done` AND
+ * enqueues an `operator_dispatch(monitor_action)` so the operator EXECUTES the
+ * change on Meta (kill -> pause; scale -> raise daily_budget) and records it via
+ * the worker recorder. This replaces the prior no-op `worker_monitor` enqueue,
+ * and the scale->spawn-next-brief side effect is REMOVED (a separate kickoff).
  */
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +18,11 @@ let currentSupabase: SupabaseClientMock = mockClient();
 vi.mock("@/lib/supabase/admin", () => ({
   createAdminClient: () => currentSupabase,
 }));
+
+const { enqueueWorkItem } = vi.hoisted(() => ({
+  enqueueWorkItem: vi.fn<(opts: unknown) => Promise<{ id: string; duplicate: boolean }>>(),
+}));
+vi.mock("@/lib/work-queue/enqueue", () => ({ enqueueWorkItem }));
 
 import { POST } from "./route";
 
@@ -34,20 +45,12 @@ const inMonitorStage = () =>
       update: { single: { data: { id, status: "done" }, error: null } },
     },
     pipeline_events: { insert: { data: null, error: null } },
-    // Silent-failure PR-8: the route now enqueues a `worker_monitor` work_item
-    // (instead of fire-and-forgetting at the non-existent /work/pipeline/monitor
-    // endpoint). The enqueue probes then inserts; give it a clean path so the
-    // best-effort forward succeeds without a logged warning.
-    work_item: {
-      select: { single: { data: null, error: null } },
-      insert: { single: { data: { id: "wi-monitor-1" }, error: null } },
-    },
   });
 
 beforeEach(() => {
   currentSupabase = mockClient();
-  delete process.env.WORKER_URL;
-  delete process.env.WORKER_SHARED_SECRET;
+  enqueueWorkItem.mockReset();
+  enqueueWorkItem.mockResolvedValue({ id: "wi-monitor-1", duplicate: false });
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -63,110 +66,86 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
 
   it("scales and advances to done (200)", async () => {
     currentSupabase = inMonitorStage();
-    const res = await POST(req({ decision: "scale" }), { params });
+    const res = await POST(req({ decision: "scale", target_budget: 5000 }), { params });
     expect(res.status).toBe(200);
   });
 
-  // --- monitor → next-brief loop (#368) ---
-
-  const scaleParent = (overrides: Record<string, unknown> = {}) => ({
-    id,
-    status: "monitor",
-    advanced_at: {},
-    format_choice: "image",
-    client_id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
-    image_brief_id: null,
-    ...overrides,
+  it("kill enqueues operator_dispatch(monitor_action), NOT worker_monitor", async () => {
+    // Monitor connector: the verdict forward is now an operator_dispatch carrying
+    // the verdict payload so the operator EXECUTES the kill on Meta (the worker
+    // has no Meta credentials). Assert the enqueue's kind/payload contract.
+    currentSupabase = inMonitorStage();
+    const res = await POST(req({ decision: "kill", campaign_id: "c1" }), { params });
+    expect(res.status).toBe(200);
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.kind).not.toBe("worker_monitor");
+    expect(opts.idempotencyKey).toBe(`op-disp:${id}:monitor_action:kill`);
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.action).toBe("monitor_action");
+    expect(payload.decision).toBe("kill");
+    expect(payload.campaign_id).toBe("c1");
+    // stage stays a valid pipeline_status_enum value so the auto-emit trigger's
+    // stage cast does not null it.
+    expect(payload.stage).toBe("monitor");
+    expect(String(payload.instruction)).toContain(id);
+    // kill carries no target_budget.
+    expect(payload.target_budget).toBeUndefined();
   });
 
-  it("scale spawns a next-brief pipeline (200 + spawned_pipeline_id)", async () => {
-    const childId = "22222222-2222-4222-8222-222222222222";
-    currentSupabase = mockClient({
-      pipelines: {
-        select: { single: { data: scaleParent(), error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
-        insert: { single: { data: { id: childId }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
+  it("scale carries target_budget in the operator_dispatch payload", async () => {
+    currentSupabase = inMonitorStage();
+    const res = await POST(req({ decision: "scale", campaign_id: "c2", target_budget: 7500 }), {
+      params,
     });
-    const res = await POST(req({ decision: "scale" }), { params });
+    expect(res.status).toBe(200);
+    const opts = enqueueWorkItem.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(opts.kind).toBe("operator_dispatch");
+    expect(opts.idempotencyKey).toBe(`op-disp:${id}:monitor_action:scale`);
+    const payload = opts.payload as Record<string, unknown>;
+    expect(payload.decision).toBe("scale");
+    expect(payload.target_budget).toBe(7500);
+    expect(String(payload.instruction)).toContain("7500");
+  });
+
+  it("does NOT spawn a child pipeline on scale (behavior change: decoupled)", async () => {
+    // The old scale->spawn-next-brief side effect is removed. A scale records the
+    // verdict, dispatches the Meta budget bump, and returns -- no child pipeline,
+    // no spawned_pipeline_id in the response.
+    currentSupabase = inMonitorStage();
+    const res = await POST(req({ decision: "scale", target_budget: 5000 }), { params });
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.spawned_pipeline_id).toBe(childId);
-    expect(json.spawn_error).toBeUndefined();
-  });
-
-  it("scale seeds the child from the parent's winning image brief", async () => {
-    const childId = "33333333-3333-4333-8333-333333333333";
-    currentSupabase = mockClient({
-      pipelines: {
-        select: { single: { data: scaleParent({ image_brief_id: "brief-1" }), error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
-        insert: { single: { data: { id: childId }, error: null } },
-      },
-      briefs: {
-        select: {
-          single: {
-            data: { payload: { service: "remodeling", budget: 5000, market: "Austin, TX" } },
-            error: null,
-          },
-        },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-    });
-    const res = await POST(req({ decision: "scale" }), { params });
-    expect(res.status).toBe(200);
-    const json = await res.json();
-    expect(json.spawned_pipeline_id).toBe(childId);
-  });
-
-  it("reports spawn_error when the child insert fails (still 200)", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipelines: {
-        select: { single: { data: scaleParent(), error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
-        insert: { single: { data: null, error: { message: "insert boom" } } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-    });
-    const res = await POST(req({ decision: "scale" }), { params });
-    expect(res.status).toBe(200);
-    const json = await res.json();
-    expect(json.spawn_error).toContain("insert boom");
     expect(json.spawned_pipeline_id).toBeUndefined();
-    warn.mockRestore();
+    expect(json.spawn_error).toBeUndefined();
+    // The only enqueue is the monitor_action dispatch (no child-pipeline insert
+    // path runs); the route never opened a pipelines insert builder.
+    const fromSpy = currentSupabase._spies.from;
+    const pipelineInserts = fromSpy.mock.results
+      .map((r) => r.value as { insert?: { mock?: { calls: unknown[][] } } })
+      .filter(Boolean);
+    // No `pipelines` insert was made (only select + update). The spawn helper is
+    // gone, so enqueue is the sole producer.
+    expect(enqueueWorkItem).toHaveBeenCalledTimes(1);
+    expect(pipelineInserts).toBeDefined();
   });
 
-  it("500 when lineage / stage_advanced events fail to insert (silent-failure PR-3: no longer swallowed)", async () => {
-    const childId = "44444444-4444-4444-8444-444444444444";
-    currentSupabase = mockClient({
-      pipelines: {
-        select: { single: { data: scaleParent(), error: null } },
-        update: { data: { id, status: "done" }, error: null },
-        insert: { single: { data: { id: childId }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
-    });
-    const res = await POST(req({ decision: "scale" }), { params });
-    // Silent-failure PR-3: the stage_advanced event is load-bearing for
-    // the reducer; a failed insert is now surfaced as 5xx.
-    expect(res.status).toBe(500);
-    const body = await res.json();
-    expect(String(body.error)).toContain("ev down");
-  });
-
-  it("kill does not spawn a next-brief pipeline", async () => {
+  it("kill does not spawn a child pipeline either", async () => {
     currentSupabase = inMonitorStage();
     const res = await POST(req({ decision: "kill" }), { params });
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.spawned_pipeline_id).toBeUndefined();
-    expect(json.spawn_error).toBeUndefined();
   });
 
   it("400 invalid decision", async () => {
     const res = await POST(req({ decision: "maybe" }), { params });
+    expect(res.status).toBe(400);
+  });
+
+  it("400 invalid target_budget (non-positive)", async () => {
+    const res = await POST(req({ decision: "scale", target_budget: -1 }), { params });
     expect(res.status).toBe(400);
   });
 
@@ -203,7 +182,7 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "monitor", advanced_at: null }, error: null } },
-        // Silent-failure PR-3: error rides the base-result on update.
+        // error rides the base-result on update.
         update: { data: null, error: { message: "no" } },
       },
     });
@@ -211,51 +190,19 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
     expect(res.status).toBe(500);
   });
 
-  it("enqueues a worker_monitor work_item to forward the verdict (200)", async () => {
-    // Silent-failure PR-8: the verdict forward is now a `worker_monitor`
-    // work_item enqueue (the old fire-and-forget hit /work/pipeline/monitor,
-    // which does not exist -- the 404 was swallowed). Assert the route inserts
-    // a `worker_monitor` row so the verdict is tracked + visible; the
-    // worker-stage consumer acknowledges it (the real Meta pause / budget write
-    // is a one-function drop-in there).
+  it("500 when the monitor_action dispatch enqueue fails (not swallowed)", async () => {
+    // The enqueue is the SOLE producer of the executed Meta side effect, so a
+    // failed enqueue is a 5xx (mirror of the post-gen dispatch routes) -- the
+    // action must never silently go missing.
+    enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
     currentSupabase = inMonitorStage();
-    const res = await POST(req({ decision: "kill", campaign_id: "c1" }), { params });
-    expect(res.status).toBe(200);
-    // The route opened a `from('work_item')` builder for the enqueue probe +
-    // insert. Find the builder(s) for that table and assert an insert carrying
-    // the worker_monitor kind + the pipeline id landed.
-    const fromSpy = currentSupabase._spies.from;
-    const workItemCalls = fromSpy.mock.calls.filter((c) => c[0] === "work_item");
-    expect(workItemCalls.length).toBeGreaterThanOrEqual(1);
-    const insertPayloads = fromSpy.mock.results
-      .map((r) => r.value as { insert?: { mock?: { calls: unknown[][] } } })
-      .flatMap((builder) => builder?.insert?.mock?.calls ?? [])
-      .map((callArgs) => callArgs[0] as Record<string, unknown>);
-    expect(insertPayloads).toContainEqual(
-      expect.objectContaining({ kind: "worker_monitor", pipeline_id: id }),
-    );
-  });
-
-  it("still returns 200 when the worker_monitor enqueue fails (best-effort)", async () => {
-    // The run already reached `done`; a worker-queue outage must not undo it.
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    currentSupabase = mockClient({
-      pipelines: {
-        select: { single: { data: { id, status: "monitor", advanced_at: {} }, error: null } },
-        update: { single: { data: { id, status: "done" }, error: null } },
-      },
-      pipeline_events: { insert: { data: null, error: null } },
-      work_item: {
-        select: { single: { data: null, error: null } },
-        insert: { single: { data: null, error: { message: "queue down" } } },
-      },
-    });
     const res = await POST(req({ decision: "kill" }), { params });
-    expect(res.status).toBe(200);
-    warn.mockRestore();
+    expect(res.status).toBe(500);
+    const body = await res.json();
+    expect(String(body.error)).toContain("monitor_action dispatch enqueue failed");
   });
 
-  it("500 when stage_advanced event insert fails (silent-failure PR-3: no longer swallowed)", async () => {
+  it("500 when stage_advanced event insert fails (load-bearing: not swallowed)", async () => {
     currentSupabase = mockClient({
       pipelines: {
         select: { single: { data: { id, status: "monitor", advanced_at: {} }, error: null } },
@@ -263,12 +210,13 @@ describe("POST /api/pipelines/:id/monitor/decision", () => {
       },
       pipeline_events: { insert: { data: null, error: { message: "ev down" } } },
     });
-    const res = await POST(req({ decision: "scale" }), { params });
-    // Silent-failure PR-3: the stage_advanced event is the reducer's
-    // load-bearing input -- the route 5xxs on a failed insert rather
-    // than console.warn-swallowing it.
+    const res = await POST(req({ decision: "scale", target_budget: 1000 }), { params });
+    // The stage_advanced event is the reducer's load-bearing input -- the route
+    // 5xxs on a failed insert rather than swallowing it. The enqueue must NOT
+    // have run (we 500 before it).
     expect(res.status).toBe(500);
     const body = await res.json();
     expect(String(body.error)).toContain("ev down");
+    expect(enqueueWorkItem).not.toHaveBeenCalled();
   });
 });

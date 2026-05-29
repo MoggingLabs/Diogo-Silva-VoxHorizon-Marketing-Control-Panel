@@ -41,7 +41,6 @@ from src.services.worker_stage_consumer import (
     _handle_worker_compliance,
     _handle_worker_generation,
     _handle_worker_ideation,
-    _handle_worker_monitor,
     _handle_worker_qa,
     _handle_worker_spec,
     _resolve_in_scope_creatives,
@@ -481,31 +480,29 @@ def test_handlers_registered_for_both_kinds() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Monitor: honest no-op acknowledgement (PR-8 Step 3)
+# Monitor connector: the worker_monitor no-op handler was DELETED
 # ---------------------------------------------------------------------------
 
 
-def test_drain_monitor_row_is_acknowledged_completed(fake_supabase) -> None:
-    """A worker_monitor row is claimed + acknowledged (closed completed).
+def test_worker_monitor_handler_removed() -> None:
+    """worker_monitor has NO handler now.
 
-    The monitor ACTION (Meta pause / budget bump) is not implemented as a
-    worker service; the handler is a no-op acknowledgement shell so the verdict
-    is tracked + visible and the row never strands queued.
+    Monitor connector: the monitor decision route no longer enqueues
+    worker_monitor -- it enqueues an operator_dispatch(monitor_action) so the
+    operator EXECUTES the kill/scale on Meta and records it via
+    monitor_action_result. With no producer, the dead no-op acknowledgement
+    handler is removed (the enum value stays in the DB, forward-only, unused).
     """
-    row = _claim_row("worker_monitor", pipeline_id="p-mon")
-    sb = _SingleClaimSb(fake_supabase, claims={"worker_monitor": [row]})
+    assert "worker_monitor" not in _HANDLERS
+
+
+def test_worker_monitor_kind_is_a_logged_skip(fake_supabase) -> None:
+    """A stray worker_monitor row (no handler) is a logged skip, not a crash."""
+    sb = _SingleClaimSb(fake_supabase, claims={"worker_monitor": []})
     tally = asyncio.run(
         run_worker_stage_drain_once(_settings(), kinds=["worker_monitor"], sb=sb)
     )
-    assert tally["worker_monitor"] == 1
-    closes = [u for n, u in fake_supabase.updates if n == "work_item"]
-    assert closes[-1]["status"] == "completed"
-    assert closes[-1]["result"]["acknowledged"] is True
-
-
-def test_monitor_handler_registered() -> None:
-    """worker_monitor is wired into the handler table (route enqueues it)."""
-    assert "worker_monitor" in _HANDLERS
+    assert tally == {"worker_monitor": 0}
 
 
 # ---------------------------------------------------------------------------
@@ -732,12 +729,6 @@ def test_generation_handler_reraises_producer_fault(
     )
     with pytest.raises(RuntimeError, match="render crashed"):
         asyncio.run(_handle_worker_generation("p-1"))
-
-
-def test_monitor_handler_acknowledges() -> None:
-    """The monitor handler is a no-op acknowledgement shell (pure)."""
-    result = asyncio.run(_handle_worker_monitor("p-mon"))
-    assert result == {"pipeline_id": "p-mon", "acknowledged": True}
 
 
 # ---------------------------------------------------------------------------

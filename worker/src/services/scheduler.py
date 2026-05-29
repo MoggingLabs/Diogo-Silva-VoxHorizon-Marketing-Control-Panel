@@ -1125,9 +1125,12 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
         # The drain runs the in-process producer for each claimed row to
         # completion under a live heartbeat; the watchdog above retries /
         # dead-letters a stuck or failed row so retry policy lives in one place.
-        # ``worker_monitor`` rides the same drain (the monitor decision route
-        # enqueues it); its handler is a no-op acknowledgement shell until the
-        # Meta-pause / budget connector lands -- see the consumer module.
+        # Monitor connector: ``worker_monitor`` is no longer drained -- the
+        # monitor decision route now enqueues an ``operator_dispatch`` so the
+        # operator EXECUTES the kill/scale on Meta + records it via
+        # ``monitor_action_result`` (the old no-op acknowledgement handler is
+        # gone). The ``worker_monitor`` enum value stays in the DB (forward-only)
+        # but has no producer or consumer now.
         # FIX-A: ``worker_qa`` / ``worker_compliance`` / ``worker_spec`` ride the
         # same drain too -- the deterministic post-generation gate consumers the
         # auto-advance trigger + the advance route enqueue (the producers that
@@ -1141,7 +1144,6 @@ def start_scheduler(settings: Settings | None = None) -> Scheduler:
                     kinds=[
                         "worker_ideation",
                         "worker_generation",
-                        "worker_monitor",
                         # FIX-A: the deterministic post-generation gate consumers
                         # (creative_qa / compliance_review / spec_validation). The
                         # auto-advance trigger + the advance route enqueue these

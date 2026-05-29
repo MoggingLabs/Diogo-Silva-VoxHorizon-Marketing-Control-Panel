@@ -1,34 +1,44 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { operatorInstruction } from "@/lib/operator/dispatch";
 import { getDerivedStatus } from "@/lib/pipeline/derived-status";
 import { MonitorDecisionInput } from "@/lib/pipeline/decision-schemas";
-import {
-  type PipelineEventInsert,
-  type PipelineInsert,
-  type PipelineUpdate,
-} from "@/lib/pipeline/schemas";
+import { type PipelineEventInsert, type PipelineUpdate } from "@/lib/pipeline/schemas";
 import type { PipelineStatus } from "@/lib/pipeline/types";
 import { createAdminClient } from "@/lib/supabase/admin";
-import type { Database, Json } from "@/lib/supabase/types.gen";
+import type { Json } from "@/lib/supabase/types.gen";
 import { enqueueWorkItem } from "@/lib/work-queue/enqueue";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 type RouteContext = { params: Promise<{ id: string }> };
-type SupabaseClient = ReturnType<typeof createAdminClient>;
 
 /**
  * POST /api/pipelines/:id/monitor/decision
  *
- * The monitor stage kill/scale verdict (#362, P4.7).
- *   - `kill`  → records the kill, advances to `done`, forwards to the worker so
- *     it can pause/archive the Meta entities (PAUSED, never stop-live-spend).
- *   - `scale` → records the scale intent, advances to `done`.
+ * The monitor stage kill/scale verdict (#362, P4.7). Both verdicts advance the
+ * run to `done` AND dispatch the operator to EXECUTE the approved action on
+ * Meta (Meta is operator-held MCP; the worker has no Meta credentials, mirror
+ * of the launch pattern):
+ *   - `kill`  -> enqueue `operator_dispatch(monitor_action)` so the operator
+ *     pauses the live campaign on Meta (`ads_update_entity` -> status PAUSED).
+ *   - `scale` -> enqueue `operator_dispatch(monitor_action)` so the operator
+ *     raises the winning campaign's daily budget on Meta (`ads_update_entity`
+ *     -> daily_budget = `target_budget`).
  *
- * The monitor loop spawns a NEW pipeline rather than looping back, so both
- * verdicts are terminal for this run (status → done). Status guard: 409 unless
- * the pipeline is in `monitor`.
+ * The operator records the executed outcome via the worker
+ * `/work/pipeline/tools/monitor_action_result` recorder (who/what/when + the
+ * new budget or the pause). This replaces the prior no-op: the route used to
+ * enqueue a `worker_monitor` work_item whose handler only logged + acked, so a
+ * "kill" never paused the campaign and a "scale" never changed spend.
+ *
+ * Behavior change (flagged in the PR): the previous scale->spawn-next-brief
+ * side effect is REMOVED. Spinning up another pipeline is a separate kickoff
+ * action, not a "scale this campaign" action.
+ *
+ * Both verdicts are terminal for this run (status -> done). Status guard: 409
+ * unless the pipeline is in `monitor`.
  */
 export async function POST(req: NextRequest, ctx: RouteContext) {
   const { id } = await ctx.params;
@@ -46,7 +56,7 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
       { status: 400 },
     );
   }
-  const { decision, campaign_id, notes } = parsed.data;
+  const { decision, campaign_id, notes, target_budget } = parsed.data;
 
   const supabase = createAdminClient();
 
@@ -116,7 +126,12 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     pipeline_id: id,
     kind: "monitor_decision",
     stage: "done",
-    payload: { decision, campaign_id: campaign_id ?? null, notes: notes ?? null } as Json,
+    payload: {
+      decision,
+      campaign_id: campaign_id ?? null,
+      notes: notes ?? null,
+      target_budget: target_budget ?? null,
+    } as Json,
   };
   const { error: evErr } = await supabase.from("pipeline_events").insert(event);
   if (evErr) {
@@ -126,126 +141,51 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     );
   }
 
-  // The monitor → next-brief loop (P5.5, #368). A `scale` verdict means this
-  // run produced a winner worth expanding, so spawn a NEW `configuration`
-  // pipeline seeded from the winning run (same client + format + image-brief
-  // payload, tagged `spawned_from`) — the manager picks up a pre-seeded brief
-  // instead of starting from scratch. `kill` is terminal: no spawn. The spawn
-  // is non-fatal — the parent run already reached `done`; a failed spawn just
-  // means the manager starts the next pipeline by hand.
-  let spawnedPipelineId: string | null = null;
-  let spawnError: string | null = null;
-  if (decision === "scale") {
-    const spawn = await spawnNextBriefPipeline(supabase, pipeline);
-    if (spawn.ok) {
-      spawnedPipelineId = spawn.pipelineId;
-    } else {
-      spawnError = spawn.message;
-      console.warn(
-        `[pipelines.monitor.decision] next-brief spawn failed for ${id}: ${spawn.message}`,
-      );
-    }
-  }
-
-  // Forward the verdict to the worker queue (kill → pause/archive; scale →
-  // budget bump). Silent-failure PR-8: this used to fire-and-forget at
-  // `POST /work/pipeline/monitor`, which DOES NOT EXIST in the worker (the
-  // monitor ACTION was never implemented as a service) -- so the kick 404'd
-  // and was swallowed, leaving the verdict's side effect untracked + invisible.
-  // The honest fix is to enqueue a `worker_monitor` work_item: the row makes
-  // the verdict tracked + visible on the dashboard, and the worker-stage
-  // consumer claims + acknowledges it (the real Meta pause / budget write is a
-  // one-function drop-in there, mirroring the outbox no-op shells). Best-effort:
-  // the run already reached `done`, so an enqueue failure must NOT undo it --
-  // we log and continue rather than 5xx.
+  // Execute the approved verdict on Meta via the OPERATOR (Meta is
+  // operator-held MCP; the worker has no Meta credentials -- mirror of launch).
+  // Enqueue an `operator_dispatch(monitor_action)` carrying the verdict; the
+  // daemon claims it and the operator looks up the campaign's live meta_id from
+  // `ad_entity` (kind='campaign'), calls the Meta MCP `ads_update_entity`
+  // (kill -> status PAUSED; scale -> raise daily_budget), then records the
+  // outcome via the worker `monitor_action_result` recorder.
+  //
+  // FIX (monitor connector): the route used to enqueue a no-op `worker_monitor`
+  // row whose handler only logged + acked, so the verdict never reached Meta.
+  // The enqueue is the SOLE producer of the executed side effect; a failed
+  // enqueue is a 5xx (mirror of the post-gen dispatch routes) -- the action
+  // must never silently go missing.
+  const brief =
+    decision === "scale" && typeof target_budget === "number"
+      ? `Verdict: scale. Campaign: ${campaign_id ?? "the winning campaign"}. Target daily_budget: ${target_budget}.`
+      : `Verdict: ${decision}. Campaign: ${campaign_id ?? "the winning campaign"}.`;
   try {
     await enqueueWorkItem({
-      kind: "worker_monitor",
+      kind: "operator_dispatch",
       pipelineId: id,
-      payload: { decision, campaign_id: campaign_id ?? null, stage: "done" },
-      idempotencyKey: `wm:${id}:${decision}`,
+      payload: {
+        instruction: operatorInstruction("monitor_action", id, brief),
+        // `stage` is folded into the auto-emit trigger's stage cast; keep it a
+        // valid pipeline_status_enum value (`monitor`) and carry the action +
+        // verdict separately so the trigger does not null the stage column.
+        stage: "monitor",
+        action: "monitor_action",
+        decision,
+        campaign_id: campaign_id ?? null,
+        notes: notes ?? null,
+        ...(typeof target_budget === "number" ? { target_budget } : {}),
+      },
+      idempotencyKey: `op-disp:${id}:monitor_action:${decision}`,
       createdBy: "api/pipelines/monitor/decision",
     });
   } catch (e) {
-    console.warn(
-      `[pipelines.monitor.decision] worker_monitor enqueue failed for ${id}: ${String(e)}`,
+    return NextResponse.json(
+      { error: `monitor_action dispatch enqueue failed: ${String(e)}` },
+      { status: 500 },
     );
   }
 
   return NextResponse.json({
     pipeline: { ...updated, status: "done" as PipelineStatus },
     decision,
-    ...(spawnedPipelineId ? { spawned_pipeline_id: spawnedPipelineId } : {}),
-    ...(spawnError ? { spawn_error: spawnError } : {}),
   });
-}
-
-/**
- * Spawn the next-brief pipeline from a `scale` verdict. Seeds a new
- * `configuration` pipeline with the winning run's client + format and (best
- * effort) its image-brief payload, tagged with `spawned_from` for lineage.
- * Returns the new pipeline id, or an error message (non-fatal — see caller).
- */
-async function spawnNextBriefPipeline(
-  supabase: SupabaseClient,
-  parent: Database["public"]["Tables"]["pipelines"]["Row"],
-): Promise<{ ok: true; pipelineId: string } | { ok: false; message: string }> {
-  // Seed the child's image_payload from the parent's winning brief, if present.
-  let imagePayload: Json | null = null;
-  if (parent.image_brief_id) {
-    const { data: brief } = await supabase
-      .from("briefs")
-      .select("payload")
-      .eq("id", parent.image_brief_id)
-      .maybeSingle();
-    imagePayload = (brief?.payload as Json | undefined) ?? null;
-  }
-
-  const now = new Date().toISOString();
-  const configDraft: Record<string, unknown> = {
-    spawned_from: parent.id,
-    spawn_reason: "scale",
-    note:
-      `Scaled from pipeline ${parent.id} — winning campaign. Review the seeded ` +
-      `brief and adjust the angle / budget before continuing.`,
-  };
-  if (imagePayload) configDraft.image_payload = imagePayload;
-
-  const insert: PipelineInsert = {
-    format_choice: parent.format_choice,
-    client_id: parent.client_id,
-    config_draft: configDraft as unknown as Json,
-    advanced_at: { configuration: now } as unknown as Json,
-  };
-  const { data: child, error: insertErr } = await supabase
-    .from("pipelines")
-    .insert(insert)
-    .select("id")
-    .single();
-  if (insertErr || !child) {
-    return { ok: false, message: insertErr?.message ?? "spawn insert failed" };
-  }
-
-  // Lineage events: close the loop on the parent + record the child's creation.
-  const { error: evErr } = await supabase.from("pipeline_events").insert([
-    {
-      pipeline_id: parent.id,
-      kind: "next_brief_spawned",
-      stage: "done",
-      payload: { child_pipeline_id: child.id, reason: "scale" } as Json,
-    },
-    {
-      pipeline_id: child.id,
-      kind: "stage_advanced",
-      stage: "configuration",
-      payload: { spawned_from: parent.id, reason: "scale" } as Json,
-    },
-  ]);
-  if (evErr) {
-    console.warn(
-      `[pipelines.monitor.decision] spawn lineage event insert failed: ${evErr.message}`,
-    );
-  }
-
-  return { ok: true, pipelineId: child.id };
 }

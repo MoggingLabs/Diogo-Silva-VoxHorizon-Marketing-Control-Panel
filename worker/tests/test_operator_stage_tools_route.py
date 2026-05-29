@@ -528,6 +528,141 @@ def test_monitor_422_on_bad_verdict(
     assert resp.status_code == 422
 
 
+# ===========================================================================
+# POST /work/pipeline/tools/monitor_action_result (monitor connector)
+# ===========================================================================
+
+
+def test_monitor_action_requires_auth(client: TestClient) -> None:
+    resp = client.post("/work/pipeline/tools/monitor_action_result", json={})
+    assert resp.status_code == 401
+
+
+def test_monitor_action_404_when_pipeline_missing(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    stage_sb.set_single("pipelines", None)
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "ghost",
+            "result": {"decision": "kill", "campaign_id": "camp-1"},
+        },
+    )
+    assert resp.status_code == 404
+
+
+def test_monitor_action_kill_records_pause(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A kill records a monitor_action_result row with no budget (a pause)."""
+    stage_sb.set_single("pipelines", _pipeline_row(status="monitor"))
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "client_id": "c-1",
+            "result": {
+                "decision": "kill",
+                "campaign_id": "camp-1",
+                "ad_entity_id": "ae-1",
+                "approved_by": "manager@vox",
+                "notes": "CPL 3x target, zero GHL leads after $120 spend",
+                "meta_payload": {"status": "PAUSED"},
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["decision"] == "kill"
+    rows = [r for t, r in stage_sb.inserts if t == "monitor_action_result"]
+    assert rows and rows[0]["decision"] == "kill"
+    assert rows[0]["campaign_id"] == "camp-1"
+    assert rows[0]["ad_entity_id"] == "ae-1"
+    assert rows[0]["approved_by"] == "manager@vox"
+    # A kill is a pause -> no target_budget on the row.
+    assert "target_budget" not in rows[0]
+    # The executed action is surfaced on the timeline.
+    events = [r for t, r in stage_sb.inserts if t == "pipeline_events"]
+    assert any(e["kind"] == "monitor_action_recorded" for e in events)
+
+
+def test_monitor_action_scale_records_target_budget(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A scale records the new daily_budget the operator wrote to Meta."""
+    stage_sb.set_single("pipelines", _pipeline_row(status="monitor"))
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "result": {
+                "decision": "scale",
+                "campaign_id": "camp-1",
+                "target_budget": 7500,
+                "approved_by": "manager@vox",
+                "meta_payload": {"daily_budget": 7500},
+            },
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["decision"] == "scale"
+    rows = [r for t, r in stage_sb.inserts if t == "monitor_action_result"]
+    assert rows and rows[0]["decision"] == "scale"
+    assert rows[0]["target_budget"] == 7500
+
+
+def test_monitor_action_scale_without_budget_is_422(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    """A scale MUST carry the new budget -- omitting it is a 422."""
+    stage_sb.set_single("pipelines", _pipeline_row(status="monitor"))
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "result": {"decision": "scale", "campaign_id": "camp-1"},
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_monitor_action_422_on_bad_decision(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    stage_sb.set_single("pipelines", _pipeline_row(status="monitor"))
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "result": {"decision": "explode", "campaign_id": "camp-1"},
+        },
+    )
+    assert resp.status_code == 422
+
+
+def test_monitor_action_422_on_nonpositive_budget(
+    client: TestClient, stage_sb: FakeSupabase
+) -> None:
+    stage_sb.set_single("pipelines", _pipeline_row(status="monitor"))
+    resp = client.post(
+        "/work/pipeline/tools/monitor_action_result",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "result": {"decision": "scale", "campaign_id": "camp-1", "target_budget": 0},
+        },
+    )
+    assert resp.status_code == 422
+
+
 # ---------------------------------------------------------------------------
 # Video routing (VID-12): finalize -> video_creatives, monitor -> campaign_perf_video
 # ---------------------------------------------------------------------------
