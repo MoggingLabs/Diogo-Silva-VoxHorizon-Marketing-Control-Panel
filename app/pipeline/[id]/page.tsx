@@ -23,7 +23,7 @@ import { StageVariantPlan } from "@/components/pipeline/StageVariantPlan";
 import { VariantPlanEditor } from "@/components/pipeline/VariantPlanEditor";
 import { LaunchGate } from "@/components/launch/LaunchGate";
 import { getMonitorRows } from "@/lib/monitor/fetch";
-import { getPipeline } from "@/lib/pipeline/client";
+import { getPipelineQuery } from "@/lib/pipeline/queries";
 import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/review/fetch";
 import { getVariantPlanEditorData } from "@/lib/variant-plan/fetch";
 import type { VariantTestVariable } from "@/lib/variant-plan/schemas";
@@ -67,19 +67,12 @@ function shortClientLabel(p: Pipeline, clientName: string | null): string {
 export default async function PipelineDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
 
-  let pipeline: Pipeline;
-  let initialEvents: PipelineEvent[] = [];
-  try {
-    const res = await getPipeline(id);
-    pipeline = res.pipeline;
-    initialEvents = res.events ?? [];
-  } catch (err) {
-    const status = (err as { status?: number }).status;
-    if (status === 404) {
-      notFound();
-    }
-    throw err;
+  const res = await getPipelineQuery(id);
+  if (!res) {
+    notFound();
   }
+  const pipeline: Pipeline = res.pipeline;
+  const initialEvents: PipelineEvent[] = res.events ?? [];
 
   let clientName: string | null = null;
   let clients: {

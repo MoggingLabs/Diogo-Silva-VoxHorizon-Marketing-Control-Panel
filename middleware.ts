@@ -1,158 +1,125 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { readSessionFromRequest } from "@/lib/auth/session";
+
 /**
- * Tailscale-only access gate (defense-in-depth).
+ * Single-operator session gate (app-layer auth, defense-in-depth).
  *
- * The primary access boundary is the network layer — only tailnet members can
- * reach the host. This middleware is a secondary check: if the deployment is
- * accidentally exposed publicly (or behind a misconfigured proxy), it will
- * either log or block off-tailnet requests.
+ * REPLACES the previous default-disabled Tailscale IP gate. The dashboard
+ * still sits behind Caddy HTTP Basic Auth at the edge (the OUTER layer, kept),
+ * but this middleware adds a REAL app-layer boundary that no longer relies
+ * solely on the edge: every non-public request must carry a valid signed
+ * session cookie (issued by `POST /api/auth/login`, verified here via
+ * `lib/auth/session`). The cookie is HttpOnly + SameSite=Lax (CSRF defense).
  *
- * Behavior is controlled by env vars (see .env.example):
- *   TAILSCALE_ONLY=                — disabled, requests pass through (default)
- *   TAILSCALE_ONLY=1               — log non-tailnet IPs, allow through
- *   TAILSCALE_ONLY=strict          — return 403 for non-tailnet IPs
+ * Posture: single-operator. This is NOT per-user / multi-tenant auth and does
+ * NOT touch RLS — server reads stay on the service-role client. The gate is
+ * identity + access control at the app boundary only.
  *
- *   TAILSCALE_CIDRS="100.64.0.0/10,..."  — override the default tailnet ranges.
+ * Request handling:
+ *   - PUBLIC paths (always allowed, no session needed):
+ *       /login                  the login screen itself
+ *       /api/auth/*             login + logout endpoints
+ *       /api/health             public liveness probe (also excluded in matcher)
+ *     plus Next.js internals + static assets (excluded in the matcher below).
  *
- * Routes excluded from the gate:
- *   - Next.js internals (`_next/static`, `_next/image`, `favicon.ico`)
- *   - `/api/health` so Vercel/uptime probes can reach the deployment
+ *   - M2M EXEMPTION (machine callers that authenticate with a bearer, NOT a
+ *     browser session): see {@link M2M_EXEMPT_PATHS}. These routes do their OWN
+ *     bearer auth; the session gate must not 401 them or it would break the
+ *     worker -> Next callback in prod.
+ *
+ *   - Everything else: validate the session cookie.
+ *       missing/expired/tampered + page request  -> 307 redirect to
+ *         /login?next=<original path> (so the operator lands back where they were)
+ *       missing/expired/tampered + /api/* request -> 401 JSON (no redirect: an
+ *         XHR/fetch wants a status code, not an HTML login page)
  */
 
-const DEFAULT_TAILNET_CIDRS = ["100.64.0.0/10"];
+/**
+ * Worker -> Next machine-to-machine routes that authenticate with their OWN
+ * bearer secret, NOT a browser session cookie. The session gate exempts these
+ * so the worker callback keeps working in prod.
+ *
+ * EVIDENCE (audited from app/api/**; the only INCOMING bearer-authenticated
+ * route in the tree):
+ *   - /api/internal/approval-email
+ *       app/api/internal/approval-email/route.ts verifies
+ *       `Authorization: Bearer <INTERNAL_API_TOKEN>` via a constant-time
+ *       `timingSafeEqual` (route.ts:167-182) and fails closed when the env
+ *       token is unset. The Python worker is the caller
+ *       (worker/src/services/approval_notifications.py). It presents a bearer,
+ *       never a session cookie, so the session gate must let it through to the
+ *       route's own auth.
+ *
+ * Routes that LOOK m2m but are NOT (kept GATED, audited):
+ *   - /api/worker/health, /api/operator/daemon-health, /api/realtime,
+ *     /api/pipelines/**, /api/approval-mode/** etc. — these are called by the
+ *     BROWSER dashboard. The `Authorization: Bearer` strings in those files are
+ *     OUTGOING (Next -> worker), set on `fetch(...)` to the worker; nothing in
+ *     them reads an incoming bearer. They must stay behind the session gate.
+ *   - The operator daemon talks to the WORKER's `/work/queue/*` (port 8000),
+ *     not to Next (operator-daemon/voxhorizon_daemon/queue_client.py), so it
+ *     needs no Next-side exemption.
+ */
+const M2M_EXEMPT_PATHS = ["/api/internal/"];
 
-type Cidr = { network: bigint; bits: number; family: 4 | 6 };
+/** Public paths that never require a session. */
+const PUBLIC_PATHS = ["/login", "/api/auth/", "/api/health"];
 
-function parseCidr(cidr: string): Cidr | null {
-  const [addr, prefix] = cidr.trim().split("/");
-  if (!addr || !prefix) return null;
-  const bits = Number.parseInt(prefix, 10);
-  if (!Number.isFinite(bits) || bits < 0) return null;
-
-  if (addr.includes(":")) {
-    const ip = parseIPv6(addr);
-    if (ip === null || bits > 128) return null;
-    const network = ip & (((1n << BigInt(bits)) - 1n) << BigInt(128 - bits));
-    return { network, bits, family: 6 };
-  }
-
-  const ip = parseIPv4(addr);
-  if (ip === null || bits > 32) return null;
-  const mask = bits === 0 ? 0n : (((1n << BigInt(bits)) - 1n) << BigInt(32 - bits));
-  return { network: ip & mask, bits, family: 4 };
+function isPrefixed(pathname: string, prefixes: string[]): boolean {
+  return prefixes.some((p) => pathname === p || pathname.startsWith(p));
 }
 
-function parseIPv4(addr: string): bigint | null {
-  const parts = addr.split(".");
-  if (parts.length !== 4) return null;
-  let value = 0n;
-  for (const part of parts) {
-    const n = Number.parseInt(part, 10);
-    if (!Number.isFinite(n) || n < 0 || n > 255 || String(n) !== part) {
-      return null;
-    }
-    value = (value << 8n) | BigInt(n);
-  }
-  return value;
-}
+export async function middleware(req: NextRequest): Promise<NextResponse> {
+  const { pathname } = req.nextUrl;
 
-function parseIPv6(addr: string): bigint | null {
-  // Minimal IPv6 parser sufficient for membership checks. Does not normalize
-  // every edge case — tailnet IPs in practice are IPv4 (100.64/10) or
-  // ULA-prefixed; this branch exists only for the fd7a::/8 alias range.
-  try {
-    const expanded = expandIPv6(addr);
-    if (!expanded) return null;
-    let value = 0n;
-    for (const group of expanded) {
-      value = (value << 16n) | BigInt(Number.parseInt(group, 16));
-    }
-    return value;
-  } catch {
-    return null;
-  }
-}
-
-function expandIPv6(addr: string): string[] | null {
-  const halves = addr.split("::");
-  if (halves.length > 2) return null;
-  const left = halves[0] ? halves[0].split(":") : [];
-  const right = halves[1] ? halves[1].split(":") : [];
-  if (halves.length === 1) {
-    if (left.length !== 8) return null;
-    return left.map((g) => g || "0");
-  }
-  const missing = 8 - (left.length + right.length);
-  if (missing < 0) return null;
-  return [
-    ...left,
-    ...Array.from({ length: missing }, () => "0"),
-    ...right,
-  ].map((g) => g || "0");
-}
-
-function ipMatchesCidr(ip: string, cidr: Cidr): boolean {
-  const parsed = cidr.family === 4 ? parseIPv4(ip) : parseIPv6(ip);
-  if (parsed === null) return false;
-  const totalBits = cidr.family === 4 ? 32 : 128;
-  if (cidr.bits === 0) return true;
-  const mask = ((1n << BigInt(cidr.bits)) - 1n) << BigInt(totalBits - cidr.bits);
-  return (parsed & mask) === cidr.network;
-}
-
-function getClientIp(req: NextRequest): string | null {
-  // `x-forwarded-for` is the most reliable on Vercel and behind reverse proxies.
-  const xff = req.headers.get("x-forwarded-for");
-  if (xff) {
-    const first = xff.split(",")[0]?.trim();
-    if (first) return first;
-  }
-  return req.headers.get("x-real-ip") ?? null;
-}
-
-const tailscaleOnly = (process.env.TAILSCALE_ONLY ?? "").trim().toLowerCase();
-const tailscaleCidrsEnv = (process.env.TAILSCALE_CIDRS ?? "").trim();
-const cidrStrings = tailscaleCidrsEnv
-  ? tailscaleCidrsEnv.split(",").map((s) => s.trim()).filter(Boolean)
-  : DEFAULT_TAILNET_CIDRS;
-const parsedCidrs = cidrStrings
-  .map(parseCidr)
-  .filter((c): c is Cidr => c !== null);
-
-export function middleware(req: NextRequest) {
-  if (!tailscaleOnly) {
+  // Public + m2m-exempt routes skip the session check entirely.
+  if (isPrefixed(pathname, PUBLIC_PATHS) || isPrefixed(pathname, M2M_EXEMPT_PATHS)) {
     return NextResponse.next();
   }
 
-  const ip = getClientIp(req);
-  if (!ip) {
-    if (tailscaleOnly === "strict") {
-      return new NextResponse("Forbidden", { status: 403 });
-    }
-    console.warn("[tailscale-gate] request has no client IP header");
+  // Validate the signed session cookie. `readSessionFromRequest` returns null
+  // for a missing, malformed, tampered, or expired token (and also when
+  // SESSION_SECRET is unset — it fails closed rather than throwing here).
+  const session = await readSessionFromRequest(req);
+  if (session) {
     return NextResponse.next();
   }
 
-  const allowed = parsedCidrs.some((cidr) => ipMatchesCidr(ip, cidr));
-  if (allowed) {
-    return NextResponse.next();
+  // No valid session. API callers get a machine-readable 401; page requests
+  // get bounced to the login screen carrying the original path so the operator
+  // returns where they started after signing in.
+  //
+  // RSC-class requests (a soft client-side navigation / prefetch / Server
+  // Action) also want a status code, NOT an HTML login page: returning a 307 to
+  // /login for those would hand the router a redirect to an HTML document it
+  // can't fold into the flight stream, and the navigation stalls. A clean 401
+  // makes the client fall back to a hard reload, which then hits the page-
+  // redirect branch below and lands on /login as a real document.
+  const isRscLike =
+    req.headers.get("RSC") === "1" ||
+    req.headers.has("Next-Router-Prefetch") ||
+    req.headers.has("Next-Action");
+  if (pathname.startsWith("/api/") || isRscLike) {
+    return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
   }
 
-  if (tailscaleOnly === "strict") {
-    return new NextResponse("Forbidden", { status: 403 });
+  const loginUrl = req.nextUrl.clone();
+  loginUrl.pathname = "/login";
+  loginUrl.search = "";
+  const nextTarget = pathname + req.nextUrl.search;
+  // Only round-trip a real in-app destination (avoid `?next=/login`).
+  if (nextTarget && nextTarget !== "/login") {
+    loginUrl.searchParams.set("next", nextTarget);
   }
-
-  console.warn(
-    `[tailscale-gate] non-tailnet request ip=${ip} path=${req.nextUrl.pathname}`,
-  );
-  return NextResponse.next();
+  return NextResponse.redirect(loginUrl);
 }
 
 export const config = {
   matcher: [
     // Run on everything except Next.js internals, public assets, and the
-    // public health probe used by uptime monitors.
+    // public health probe used by uptime monitors. The session gate inside
+    // `middleware` then handles /login + /api/auth + the m2m exemption.
     "/((?!_next/static|_next/image|favicon.ico|api/health).*)",
   ],
 };

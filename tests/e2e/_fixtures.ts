@@ -3,6 +3,8 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 
 import type { Database } from "@/lib/supabase/types.gen";
 
+import { seedSessionCookie } from "./_auth";
+
 import {
   cleanupCampaignPerf,
   cleanupCreatives,
@@ -187,13 +189,26 @@ async function cleanupAll(clientId: string): Promise<void> {
  * Cleanup covers the Wave 5 surface too — launch packages and campaign_perf
  * rows — so specs only ever need to call `seedXxx` and let teardown handle
  * the rest.
+ *
+ * AUTH: the single-operator session gate (`middleware.ts`) is active, so the
+ * fixture also injects a valid signed session cookie into the browser context
+ * before each test (see `seedSessionCookie`). Every spec's `page.goto(...)`
+ * then passes the gate without walking the login form. The auto-used `auth`
+ * fixture runs ahead of the test body purely for its side effect.
  */
 // Playwright fixtures expose a function parameter named `use`, which the
 // react-hooks/rules-of-hooks ESLint rule (enabled by eslint-config-next)
 // mistakes for a React Hook call. It's not — it's Playwright's "yield" — so
 // we disable the rule scoped to this block.
 /* eslint-disable react-hooks/rules-of-hooks */
-export const test = base.extend<{ clientId: string }>({
+export const test = base.extend<{ clientId: string; auth: void }>({
+  auth: [
+    async ({ context }, use) => {
+      await seedSessionCookie(context);
+      await use();
+    },
+    { auto: true },
+  ],
   clientId: async ({}, use) => {
     const id = await ensureTestClient();
     await cleanupAll(id);

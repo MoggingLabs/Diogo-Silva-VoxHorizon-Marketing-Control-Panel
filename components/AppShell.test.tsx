@@ -215,6 +215,21 @@ describe("AppShell", () => {
     expect(pipelineLinks.every((l) => l.getAttribute("aria-current") !== "page")).toBe(true);
   });
 
+  it("renders only the children (no nav chrome) on the /login route", () => {
+    pathname.mockReturnValue("/login");
+    render(
+      <AppShell>
+        <p>Login form</p>
+      </AppShell>,
+    );
+
+    // The bare login screen shows the children but none of the dashboard chrome:
+    // no nav links, no worker status, no command palette.
+    expect(screen.getByText("Login form")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: /Dashboard/i })).toBeNull();
+    expect(screen.queryByTestId("worker-status")).toBeNull();
+  });
+
   it("opens the command palette via the search button", async () => {
     const user = userEvent.setup();
     render(

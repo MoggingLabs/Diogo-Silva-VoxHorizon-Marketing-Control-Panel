@@ -493,6 +493,12 @@ jobs:
       # (verify_secret) and the e2e driver presents it; deliberately NOT exported
       # to the Next app (see note on the build/start steps).
       WORKER_SHARED_SECRET: e2e-local-worker-secret
+      # Dummy local session secret - NEVER a real key. The app-layer session
+      # gate (middleware) verifies the cookie with it, and the e2e auth fixture
+      # (tests/e2e/_auth.ts) signs the seeded session cookie with the SAME value.
+      # Job-level env is inherited by both the `pnpm start` server step and the
+      # Playwright runner step, so the signature matches on both sides.
+      SESSION_SECRET: e2e-local-session-secret
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
       - uses: actions/checkout@v4

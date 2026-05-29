@@ -1,7 +1,7 @@
 /**
  * Exemplar server-component test. Demonstrates:
  *  - Awaiting an async server component the same way RSC would render it.
- *  - Mocking `@/lib/pipeline/client.listPipelines` and the
+ *  - Mocking `@/lib/pipeline/queries.listPipelinesQuery` and the
  *    `@/lib/supabase/server.createClient` lookup.
  *  - Mocking the realtime-dependent `PipelineList` client child so we don't
  *    need to wire a real Supabase channel in jsdom.
@@ -15,11 +15,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { mockSupabaseClient, type SupabaseClientMock } from "@/tests/unit/helpers/supabase-mock";
 
-const listPipelines = vi.fn();
+const listPipelinesQuery = vi.fn();
 let currentSupabase: SupabaseClientMock = mockSupabaseClient();
 
-vi.mock("@/lib/pipeline/client", () => ({
-  listPipelines: (...args: unknown[]) => listPipelines(...args),
+vi.mock("@/lib/pipeline/queries", () => ({
+  listPipelinesQuery: (...args: unknown[]) => listPipelinesQuery(...args),
 }));
 
 vi.mock("@/lib/supabase/server", () => ({
@@ -48,7 +48,7 @@ vi.mock("@/components/pipeline/PipelineList", () => ({
 import PipelineIndexPage from "./page";
 
 beforeEach(() => {
-  listPipelines.mockReset();
+  listPipelinesQuery.mockReset();
   currentSupabase = mockSupabaseClient();
 });
 
@@ -58,7 +58,7 @@ afterEach(() => {
 
 describe("PipelineIndexPage", () => {
   it("renders the header and pipeline list with SSR-fetched data", async () => {
-    listPipelines.mockResolvedValue({
+    listPipelinesQuery.mockResolvedValue({
       pipelines: [
         {
           id: "p1",
@@ -88,8 +88,8 @@ describe("PipelineIndexPage", () => {
     );
   });
 
-  it("renders the error banner when listPipelines throws", async () => {
-    listPipelines.mockRejectedValue(new Error("worker down"));
+  it("renders the error banner when listPipelinesQuery throws", async () => {
+    listPipelinesQuery.mockRejectedValue(new Error("worker down"));
 
     const element = await PipelineIndexPage();
     render(element);
@@ -101,7 +101,7 @@ describe("PipelineIndexPage", () => {
   });
 
   it("skips the clients table lookup when no pipeline has a client_id", async () => {
-    listPipelines.mockResolvedValue({
+    listPipelinesQuery.mockResolvedValue({
       pipelines: [
         {
           id: "p1",
@@ -123,8 +123,8 @@ describe("PipelineIndexPage", () => {
     expect(currentSupabase._spies.from).not.toHaveBeenCalled();
   });
 
-  it("uses string fallback when listPipelines throws a non-Error value", async () => {
-    listPipelines.mockRejectedValue("plain string failure");
+  it("uses string fallback when listPipelinesQuery throws a non-Error value", async () => {
+    listPipelinesQuery.mockRejectedValue("plain string failure");
 
     const element = await PipelineIndexPage();
     render(element);

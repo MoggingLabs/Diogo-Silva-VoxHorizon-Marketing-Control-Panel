@@ -4,12 +4,7 @@
  * testable and lets us swap to a typed client (or tRPC) later without
  * touching the call sites.
  */
-import type { Pipeline, PipelineEvent, PipelineFormat, PipelineStatus } from "@/lib/pipeline/types";
-
-export type CreatePipelineInput = {
-  format_choice: PipelineFormat;
-  client_id?: string;
-};
+import type { Pipeline, PipelineFormat, PipelineStatus } from "@/lib/pipeline/types";
 
 export type ListPipelinesFilters = {
   status?: PipelineStatus;
@@ -23,13 +18,6 @@ export type ListPipelinesFilters = {
 export type ListPipelinesResult = {
   pipelines: Pipeline[];
   next_cursor: string | null;
-};
-
-export type GetPipelineResult = {
-  pipeline: Pipeline;
-  image_brief: unknown;
-  video_brief: unknown;
-  events: PipelineEvent[];
 };
 
 /**
@@ -52,23 +40,6 @@ async function readJson<T>(res: Response): Promise<T> {
   } catch {
     throw new Error(`Invalid JSON from ${res.url}: ${text.slice(0, 200)}`);
   }
-}
-
-export async function createPipeline(input: CreatePipelineInput): Promise<Pipeline> {
-  const res = await fetch(`${resolveBaseUrl()}/api/pipelines`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `POST /api/pipelines failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
-    );
-  }
-  const data = await readJson<{ pipeline: Pipeline }>(res);
-  return data.pipeline;
 }
 
 /**
@@ -147,22 +118,6 @@ export async function listPipelines(
     );
   }
   return readJson<ListPipelinesResult>(res);
-}
-
-export async function getPipeline(id: string): Promise<GetPipelineResult> {
-  const res = await fetch(`${resolveBaseUrl()}/api/pipelines/${encodeURIComponent(id)}`, {
-    cache: "no-store",
-  });
-  if (res.status === 404) {
-    throw Object.assign(new Error("Pipeline not found"), { status: 404 });
-  }
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(
-      `GET /api/pipelines/${id} failed (${res.status}): ${body.slice(0, 200) || res.statusText}`,
-    );
-  }
-  return readJson<GetPipelineResult>(res);
 }
 
 /**

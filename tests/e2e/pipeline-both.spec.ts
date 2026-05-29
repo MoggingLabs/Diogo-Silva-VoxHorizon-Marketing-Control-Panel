@@ -1,4 +1,5 @@
 import { test, expect, getTestAdminClient } from "./_fixtures";
+import { sessionCookieHeader } from "./_auth";
 import { mockWorkerIdeation } from "./_mocks/sse-harness";
 import { makeSquarePngBase64 } from "./_mocks/png-fixture";
 import {
@@ -526,7 +527,7 @@ async function managerPost(pipelineId: string, path: string, body: unknown): Pro
   const base = process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000";
   const res = await fetch(`${base}/api/pipelines/${pipelineId}/${path}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...(await sessionCookieHeader()) },
     body: JSON.stringify(body),
   });
   let parsed: unknown = null;

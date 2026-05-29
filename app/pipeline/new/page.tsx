@@ -3,7 +3,7 @@ import { redirect } from "next/navigation";
 import { AlertTriangle } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
-import { createPipeline } from "@/lib/pipeline/client";
+import { createPipelineRecord } from "@/lib/pipeline/queries";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +25,7 @@ export default async function NewPipelinePage() {
   let newId: string | null = null;
 
   try {
-    const pipeline = await createPipeline({ format_choice: "image" });
+    const pipeline = await createPipelineRecord({ format_choice: "image" });
     newId = pipeline.id;
   } catch (err) {
     createError = err instanceof Error ? err.message : "Failed to start pipeline.";
