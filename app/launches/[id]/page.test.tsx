@@ -28,8 +28,8 @@ vi.mock("@/components/launch/LaunchTimeline", () => ({
     <div data-testid="timeline" data-count={initialEvents.length} />
   ),
 }));
-vi.mock("@/components/brief/ApprovalGate", () => ({
-  ApprovalGate: () => <div data-testid="approval-gate" />,
+vi.mock("@/components/launch/LaunchApprovalGate", () => ({
+  LaunchApprovalGate: () => <div data-testid="approval-gate" />,
 }));
 vi.mock("@/components/launch/LaunchPackageActions", () => ({
   LaunchPackageActions: () => <div data-testid="launch-actions" />,

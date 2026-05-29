@@ -658,6 +658,17 @@ jobs:
           echo "===== worker.log ====="; cat "$GITHUB_WORKSPACE/worker.log" || true
           echo "===== next.log ====="; cat "$GITHUB_WORKSPACE/next.log" || true
 
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-${{ matrix.spec }}
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Stop background servers
         if: always()
         run: |

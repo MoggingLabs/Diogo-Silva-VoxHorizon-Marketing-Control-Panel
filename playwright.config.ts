@@ -31,7 +31,7 @@ export default defineConfig({
   reporter: process.env.CI ? "list" : "html",
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
-    trace: "on-first-retry",
+    trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
   // Omit the auto-spawned dev server when an external server URL is provided.
