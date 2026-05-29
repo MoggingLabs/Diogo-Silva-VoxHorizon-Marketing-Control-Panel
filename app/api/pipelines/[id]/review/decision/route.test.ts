@@ -504,6 +504,35 @@ describe("POST /api/pipelines/:id/review/decision", () => {
       // else fired (silent-failure PR-3: legacy fire-and-forget is gone).
     });
 
+    it("FIX-F: does NOT emit the stage_advanced event when the enqueue throws (enqueue-before-emit ordering)", async () => {
+      // FINDING 1: the stage_advanced->generation event is the SOLE input that
+      // flips the reducer. Emitting it BEFORE a failed enqueue left the
+      // pipeline advanced to `generation` with no work_item (permanent silent
+      // non-execution). With the enqueue-before-emit ordering a failed enqueue
+      // 500s before the event is ever written, so the reducer stays at `review`
+      // -- a consistent, recoverable state.
+      enqueueWorkItem.mockRejectedValueOnce(new Error("work_item insert failed: boom"));
+      currentSupabase = mockClient({
+        pipelines: {
+          select: { single: { data: operatorReviewPipeline(), error: null } },
+          update: { single: { data: { id, status: "generation" }, error: null } },
+        },
+        pipeline_events: { insert: { data: null, error: null } },
+      });
+      const res = await POST(
+        req(`http://localhost/api/pipelines/${id}/review/decision`, {
+          method: "POST",
+          body: JSON.stringify({ decision: "approved" }),
+        }),
+        { params },
+      );
+      expect(res.status).toBe(500);
+      // The stage_advanced event must never have been inserted: the route
+      // touched `pipelines` (read + update) but never reached `pipeline_events`.
+      const touchedTables = currentSupabase._spies.from.mock.calls.map((c) => c[0]);
+      expect(touchedTables).not.toContain("pipeline_events");
+    });
+
     it("treats a duplicate idempotency_key as 200 (the dedup branch)", async () => {
       enqueueWorkItem.mockResolvedValueOnce({ id: "wi-existing", duplicate: true });
       currentSupabase = mockClient({
