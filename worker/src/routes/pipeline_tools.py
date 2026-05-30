@@ -68,7 +68,7 @@ from typing import Any, Literal
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from ..auth import verify_secret
 from ..generated.db_enums import PER_CREATIVE_STAGES as _PER_CREATIVE_STAGES
@@ -580,17 +580,24 @@ async def read_client(client_id: str) -> dict[str, Any]:
 class BriefImagePayload(BaseModel):
     """Operator-authored image brief payload.
 
-    ``market`` / ``offer_text`` / ``angles`` are the required creative
-    inputs the operator must supply; everything else is optional and passed
-    through verbatim (``model_config`` allows extra keys so the operator can
-    enrich the payload without a schema bump).
+    ``market`` is the one required creative input. The operator may author the
+    brief in either of two valid shapes, both of which pass:
+
+    * concepts-first: ``market`` + ``concepts`` (the per-concept prompts carry
+      the creative direction; ``offer_text`` / ``angles`` are not supplied at
+      the top level), or
+    * offer-first: ``market`` + ``offer_text`` + ``angles``.
+
+    ``offer_text`` / ``angles`` are therefore OPTIONAL. Everything else is
+    passed through verbatim (``model_config`` allows extra keys so the operator
+    can enrich the payload without a schema bump).
     """
 
     model_config = {"extra": "allow"}
 
     market: str = Field(..., min_length=1)
-    offer_text: str = Field(..., min_length=1)
-    angles: list[str] = Field(..., min_length=1)
+    offer_text: str | None = None
+    angles: list[str] | None = None
     audience: str | None = None
     service_type: str | None = None
 
@@ -604,9 +611,12 @@ class ConceptSpec(BaseModel):
     the LLM never holds the prompts through a long synchronous render, and a
     retried render resumes from the persisted plan instead of re-authoring.
 
-    Shape mirrors an ``image-ad-authoring`` ``build_concept`` result
-    (``{concept, prompt, offer_text?}``); extra keys are allowed so the author
-    can enrich a concept without a schema bump.
+    Shape mirrors an ``image-ad-authoring`` ``build_concept`` result. The label
+    field is accepted as either ``concept`` or ``concept_name`` (the operator's
+    authoring skill emits ``concept_name``); the validator below maps
+    ``concept_name`` onto the canonical ``concept`` field so downstream readers
+    (render / ideation) keep reading ``concept``. ``prompt`` is required; extra
+    keys are allowed so the author can enrich a concept without a schema bump.
     """
 
     model_config = {"extra": "allow"}
@@ -614,6 +624,23 @@ class ConceptSpec(BaseModel):
     concept: str = Field(..., min_length=1)
     prompt: str = Field(..., min_length=1)
     offer_text: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_concept_name_alias(cls, data: Any) -> Any:
+        """Map ``concept_name`` -> ``concept`` when ``concept`` is absent.
+
+        The operator authors concepts keyed ``concept_name``; normalise that to
+        the canonical ``concept`` field (and drop the alias key so the persisted
+        spec carries a single label) without disturbing a brief that already
+        uses ``concept``.
+        """
+        if isinstance(data, dict) and not data.get("concept"):
+            alias = data.get("concept_name")
+            if alias is not None:
+                data = {k: v for k, v in data.items() if k != "concept_name"}
+                data["concept"] = alias
+        return data
 
 
 class BriefInput(BaseModel):

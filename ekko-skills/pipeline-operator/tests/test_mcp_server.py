@@ -229,6 +229,16 @@ def test_render_passes_errors_through(
         mcp_server.pipeline_operator_render("p-1", "nope", [{}])
 
 
+def test_brief_docstring_documents_concepts_first_contract() -> None:
+    """The brief tool advertises the relaxed contract: market is required plus
+    EITHER a concepts list OR offer_text+angles, and concept_name is accepted."""
+    doc = mcp_server.pipeline_operator_brief.__doc__ or ""
+    assert "market" in doc
+    assert "concepts" in doc
+    assert "offer_text" in doc and "angles" in doc
+    assert "concept_name" in doc
+
+
 # ---------------------------------------------------------------------------
 # P3 stage-persist tools: registration + delegation
 # ---------------------------------------------------------------------------
