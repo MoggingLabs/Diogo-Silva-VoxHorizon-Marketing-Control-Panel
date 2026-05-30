@@ -311,13 +311,16 @@ def pipeline_operator_brief(
 
     Calls ``POST {WORKER_BASE_URL}/work/pipeline/tools/brief`` with
     ``{pipeline_id, image_payload, notes?, concepts?}``. ``image_payload`` must
-    carry the worker-required keys ``market``, ``offer_text``, ``angles`` —
-    build it with the ``image-ad-authoring`` skill's ``build_image_brief`` so it
-    is valid before it leaves the agent.
+    carry the worker-required key ``market`` plus EITHER a non-empty
+    ``concepts`` list (concepts-first: the per-concept prompts carry the
+    creative direction) OR both ``offer_text`` and ``angles`` (offer-first).
+    Build it with the ``image-ad-authoring`` skill so it is valid before it
+    leaves the agent.
 
     ``concepts`` is the full set of N concept specs (each
-    ``{concept, prompt, offer_text?}`` — build them with ``build_concept`` and
-    ``assert_distinct_concepts``). Persisting them HERE, at brief time, is what
+    ``{concept | concept_name, prompt, offer_text?}``, build them with
+    ``build_concept`` and ``assert_distinct_concepts``). Persisting them HERE,
+    at brief time, is what
     lets the ideation render run as a single DETERMINISTIC, worker-driven pass
     over the stored plan: ``pipeline_operator_render(pipeline_id, "concept_preview")``
     then renders ALL persisted concepts with no LLM in the per-image loop, and a
@@ -334,12 +337,19 @@ def pipeline_operator_brief(
     pid = _require_pipeline_id(pipeline_id)
     if not isinstance(image_payload, dict) or not image_payload:
         raise PipelineOperatorError("image_payload must be a non-empty dict")
-    missing = [
-        k for k in ("market", "offer_text", "angles") if k not in image_payload
-    ]
-    if missing:
+    if "market" not in image_payload:
         raise PipelineOperatorError(
-            f"image_payload missing required keys: {missing}"
+            "image_payload missing required key: ['market']"
+        )
+    # A brief is valid in either shape: concepts-first (market + a non-empty
+    # `concepts` list, the per-concept prompts carrying the creative direction)
+    # or offer-first (market + offer_text + angles). Require one of the two.
+    has_concepts = isinstance(concepts, list) and len(concepts) > 0
+    has_offer = "offer_text" in image_payload and "angles" in image_payload
+    if not has_concepts and not has_offer:
+        raise PipelineOperatorError(
+            "image_payload needs either a non-empty `concepts` list or both "
+            "`offer_text` and `angles`"
         )
 
     body: dict[str, Any] = {"pipeline_id": pid, "image_payload": image_payload}
@@ -437,10 +447,12 @@ def _normalize_concept_specs(
 ) -> list[dict[str, Any]]:
     """Validate + normalize the persisted concept specs for the brief body.
 
-    Each must be ``{concept, prompt}`` (+ optional ``offer_text`` /
-    ``parent_creative_id`` passthrough). Mirrors the per-item validation in
-    :func:`pipeline_operator_render` so a malformed plan fails loudly at brief
-    time rather than producing a broken deterministic render later.
+    Each must carry a label (``concept``, or ``concept_name`` which the operator
+    authoring skill emits and which is normalised to ``concept`` here) and a
+    ``prompt`` (+ optional ``offer_text`` / ``parent_creative_id`` passthrough).
+    Mirrors the per-item validation in :func:`pipeline_operator_render` so a
+    malformed plan fails loudly at brief time rather than producing a broken
+    deterministic render later.
     """
     if not isinstance(concepts, list) or not concepts:
         raise PipelineOperatorError("concepts must be a non-empty list")
@@ -448,7 +460,7 @@ def _normalize_concept_specs(
     for idx, spec in enumerate(concepts):
         if not isinstance(spec, dict):
             raise PipelineOperatorError(f"concepts[{idx}] must be a dict")
-        concept = spec.get("concept")
+        concept = spec.get("concept") or spec.get("concept_name")
         prompt = spec.get("prompt")
         if not isinstance(concept, str) or not concept.strip():
             raise PipelineOperatorError(

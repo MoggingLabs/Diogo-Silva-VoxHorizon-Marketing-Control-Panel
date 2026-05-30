@@ -98,13 +98,11 @@ def pipeline_operator_brief(
     """Author or upsert the image brief for the pipeline.
 
     Use this in the ``configuration`` stage to record the brief the manager
-    will review. ``image_payload`` must carry ``market`` plus EITHER a non-empty
-    ``concepts`` list (concepts-first) OR both ``offer_text`` and ``angles``
-    (offer-first); build it with the ``image-ad-authoring`` skill.
+    will review. ``image_payload`` must carry ``market``, ``offer_text``, and
+    ``angles`` (build it with the ``image-ad-authoring`` skill).
 
     PASS ``concepts`` — the full set of N concept specs (each
-    ``{concept | concept_name, prompt, offer_text?}`` from ``build_concept``),
-    so the brief
+    ``{concept, prompt, offer_text?}`` from ``build_concept``) — so the brief
     PERSISTS the whole concept plan. That lets the ideation render run as a
     single deterministic, worker-driven pass over the stored plan: you then call
     ``pipeline_operator_render(pipeline_id, "concept_preview")`` with NO items

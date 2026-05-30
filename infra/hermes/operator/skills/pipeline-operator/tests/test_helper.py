@@ -393,12 +393,46 @@ def test_video_render_rejects_bad_estimate(env_set: None) -> None:
         )
 
 
-def test_brief_requires_payload_keys(env_set: None) -> None:
-    with pytest.raises(PipelineOperatorError, match="missing required keys"):
+def test_brief_requires_market(env_set: None) -> None:
+    with pytest.raises(PipelineOperatorError, match=r"missing required key"):
+        pipeline_operator_brief(
+            pipeline_id="p-1",
+            image_payload={"offer_text": "$99", "angles": ["trust"]},  # no market
+        )
+
+
+def test_brief_requires_concepts_or_offer(env_set: None) -> None:
+    """market alone, with neither a concepts list nor offer_text+angles, is
+    rejected: a brief must carry creative direction in one of the two shapes."""
+    with pytest.raises(PipelineOperatorError, match=r"concepts.*offer_text"):
         pipeline_operator_brief(
             pipeline_id="p-1",
             image_payload={"market": "Austin", "offer_text": "$99"},  # no angles
         )
+
+
+def test_brief_concepts_first_accepts_market_plus_concepts(
+    env_set: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concepts-first brief (market + concepts, no offer_text/angles) is
+    accepted, and concept_name is normalised to concept on the body."""
+    built = _install_fake_client(
+        monkeypatch, responses=[_FakeResponse(200, {"ok": True, "brief_id": "b-1"})]
+    )
+    out = pipeline_operator_brief(
+        pipeline_id="p-1",
+        image_payload={"market": "Austin TX roofing", "audience": "homeowners"},
+        concepts=[
+            {"concept_name": "before_after__a", "prompt": "pa"},
+            {"concept_name": "savings__b", "prompt": "pb", "offer_text": "$99"},
+        ],
+    )
+    assert out == {"ok": True, "brief_id": "b-1"}
+    body = built[0].requests[0].json_body
+    assert body["concepts"] == [
+        {"concept": "before_after__a", "prompt": "pa"},
+        {"concept": "savings__b", "prompt": "pb", "offer_text": "$99"},
+    ]
 
 
 def test_brief_rejects_empty_payload(env_set: None) -> None:
