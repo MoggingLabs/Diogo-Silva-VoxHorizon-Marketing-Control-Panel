@@ -677,11 +677,15 @@ def test_brief_validates_required_keys(
     client: TestClient, tools_sb: _ToolsSupabase
 ) -> None:
     tools_sb.pipeline_row = _pipeline_row()
-    # Missing offer_text + angles.
+    # `market` is the one required creative key; an image_payload missing it
+    # (offer_text/angles are now optional) still fails validation.
     resp = client.post(
         "/work/pipeline/tools/brief",
         headers=_auth(),
-        json={"pipeline_id": "p-1", "image_payload": {"market": "Austin"}},
+        json={
+            "pipeline_id": "p-1",
+            "image_payload": {"offer_text": "x", "angles": ["y"]},
+        },
     )
     assert resp.status_code == 422
 
@@ -796,6 +800,86 @@ def test_brief_persists_concepts(
     events = [d for n, d in tools_sb.inserts if n == "pipeline_events"]
     authored = [e for e in events if e["kind"] == "brief_authored"]
     assert authored[0]["payload"]["concept_count"] == 2
+
+
+def test_brief_concepts_first_persists_and_maps_concept_name(
+    client: TestClient, tools_sb: _ToolsSupabase
+) -> None:
+    """A concepts-first brief (market + concepts keyed ``concept_name``, NO
+    top-level offer_text/angles) validates, persists the briefs row, and merges
+    config_draft.image_payload + config_draft.concepts. ``concept_name`` is
+    normalised to the canonical ``concept`` key the render path reads."""
+    tools_sb.pipeline_row = _pipeline_row(image_brief_id=None)
+    tools_sb.client_row = {"slug": "acme"}
+
+    resp = client.post(
+        "/work/pipeline/tools/brief",
+        headers=_auth(),
+        json={
+            "pipeline_id": "p-1",
+            "image_payload": {
+                "market": "Austin, TX",
+                "service": "roofing",
+                "audience": "homeowners",
+            },
+            "concepts": [
+                {
+                    "concept_name": "before_after__a",
+                    "prompt": "pa",
+                    "use_case": "feed",
+                    "qa_notes": "n",
+                },
+                {"concept_name": "savings__b", "prompt": "pb"},
+            ],
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["ok"] is True
+
+    # briefs row inserted; CHECK-satisfying service + budget backfilled.
+    brief_inserts = [d for n, d in tools_sb.inserts if n == "briefs"]
+    assert len(brief_inserts) == 1
+    payload = brief_inserts[0]["payload"]
+    assert payload["market"] == "Austin, TX"
+    assert "service" in payload and "budget" in payload
+    # concept_name was mapped onto concept; concept_name dropped; extras kept.
+    stored = payload["concepts"]
+    assert [c["concept"] for c in stored] == ["before_after__a", "savings__b"]
+    assert all("concept_name" not in c for c in stored)
+    assert stored[0]["use_case"] == "feed"
+
+    # config_draft mirrors both image_payload and the concept plan.
+    pipe_updates = [d for n, d in tools_sb.updates if n == "pipelines"]
+    assert pipe_updates[0]["config_draft"]["image_payload"]["market"] == "Austin, TX"
+    assert [
+        c["concept"] for c in pipe_updates[0]["config_draft"]["concepts"]
+    ] == ["before_after__a", "savings__b"]
+
+
+def test_brief_image_payload_concept_spec_accept_aliases() -> None:
+    """Schema-level back-compat: an offer-first BriefImagePayload still
+    validates, a concepts-first one (no offer_text/angles) validates, and
+    ConceptSpec maps concept_name -> concept."""
+    from src.routes.pipeline_tools import BriefImagePayload, ConceptSpec
+
+    # Offer-first (back-compat) still valid.
+    offer_first = BriefImagePayload(
+        market="Austin", offer_text="$99", angles=["trust"]
+    )
+    assert offer_first.offer_text == "$99"
+
+    # Concepts-first valid with only market (offer_text/angles optional).
+    concepts_first = BriefImagePayload(market="Austin")
+    assert concepts_first.offer_text is None
+    assert concepts_first.angles is None
+
+    # ConceptSpec accepts concept_name and normalises to concept.
+    spec = ConceptSpec(concept_name="before_after__a", prompt="p")
+    dumped = spec.model_dump(exclude_none=True)
+    assert dumped["concept"] == "before_after__a"
+    assert "concept_name" not in dumped
+    # Explicit `concept` still wins / works.
+    assert ConceptSpec(concept="x", prompt="p").concept == "x"
 
 
 def test_brief_404_when_pipeline_missing(
