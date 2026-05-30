@@ -21,7 +21,7 @@ import { EkkoDraftModal, type ProposedConfig } from "./EkkoDraftModal";
 import { OperatorBriefReview } from "./OperatorBriefReview";
 import { StageShell } from "./StageShell";
 import { WorkItemPanel } from "./WorkItemPanel";
-import { BriefPayload, type BriefPayloadT } from "@/lib/briefs";
+import { BriefPayload, type Brief, type BriefPayloadT } from "@/lib/briefs";
 import { activeTracksLocal } from "@/lib/pipeline/transitions";
 import type { Pipeline, PipelineFormat } from "@/lib/pipeline/types";
 import { fetchClients } from "@/lib/realtime/client-data";
@@ -61,6 +61,11 @@ export type StageConfigurationProps = {
   pipeline: Pipeline;
   /** Optional client list — server-fetched. Falls back to a browser query when omitted. */
   clients?: ClientOption[];
+  /**
+   * The canonical `briefs` row linked by `image_brief_id` (server-fetched).
+   * Drives the operator brief-review render; null for manual pipelines.
+   */
+  imageBrief?: Brief | null;
 };
 
 export type ClientOption = {
@@ -385,12 +390,12 @@ function useAutosave(pipelineId: string) {
  * deterministic flow does not regress.
  */
 export function StageConfiguration(props: StageConfigurationProps) {
-  const { pipeline } = props;
+  const { pipeline, imageBrief } = props;
   const operatorDriven = isOperatorDrivenDraft(pipeline.config_draft);
 
   if (operatorDriven) {
     if (pipeline.image_brief_id) {
-      return <OperatorBriefReview pipeline={pipeline} />;
+      return <OperatorBriefReview pipeline={pipeline} imageBrief={imageBrief} />;
     }
     return <OperatorDraftingWaiting pipelineId={pipeline.id} />;
   }

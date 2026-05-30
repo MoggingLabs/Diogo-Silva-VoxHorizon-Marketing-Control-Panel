@@ -55,8 +55,18 @@ vi.mock("@/lib/realtime/client-data", () => ({
 // Stub the operator brief-review panel so the branch test asserts dispatch,
 // not the panel's internals (covered in OperatorBriefReview.test.tsx).
 vi.mock("./OperatorBriefReview", () => ({
-  OperatorBriefReview: ({ pipeline }: { pipeline: { id: string } }) => (
-    <div data-testid="operator-brief-review" data-pipeline={pipeline.id} />
+  OperatorBriefReview: ({
+    pipeline,
+    imageBrief,
+  }: {
+    pipeline: { id: string };
+    imageBrief?: { id: string } | null;
+  }) => (
+    <div
+      data-testid="operator-brief-review"
+      data-pipeline={pipeline.id}
+      data-image-brief={imageBrief?.id ?? ""}
+    />
   ),
 }));
 
@@ -767,6 +777,33 @@ describe("StageConfiguration - operator-driven branch", () => {
     expect(screen.queryByText(/hang tight/i)).not.toBeInTheDocument();
     expect(screen.queryByTestId("operator-brief-review")).not.toBeInTheDocument();
     expect(screen.queryByText("Image brief")).not.toBeInTheDocument();
+  });
+
+  it("threads the imageBrief prop down to the brief-review panel", () => {
+    const brief = {
+      id: "brief-1",
+      brief_id_human: "ACME-0001",
+      client_id: "c1",
+      created_at: "2026-05-17T10:00:00Z",
+      decided_at: null,
+      decided_by: null,
+      decided_notes: null,
+      deleted_at: null,
+      posted_at: null,
+      status: "posted" as const,
+      payload: { market: "Austin", concepts: [] },
+    };
+    render(
+      <StageConfiguration
+        pipeline={makePipeline({
+          image_brief_id: "brief-1",
+          config_draft: { operator_driven: true, operator_instruction: "make ads" },
+        })}
+        imageBrief={brief}
+      />,
+    );
+    const panel = screen.getByTestId("operator-brief-review");
+    expect(panel.getAttribute("data-image-brief")).toBe("brief-1");
   });
 
   it("treats a stored operator_instruction (no flag) as operator-driven", () => {

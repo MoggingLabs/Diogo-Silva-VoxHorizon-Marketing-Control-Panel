@@ -22,6 +22,7 @@ import { StageReview } from "@/components/pipeline/StageReview";
 import { StageVariantPlan } from "@/components/pipeline/StageVariantPlan";
 import { VariantPlanEditor } from "@/components/pipeline/VariantPlanEditor";
 import { LaunchGate } from "@/components/launch/LaunchGate";
+import type { Brief } from "@/lib/briefs";
 import { getMonitorRows } from "@/lib/monitor/fetch";
 import { getPipelineQuery } from "@/lib/pipeline/queries";
 import { getClientCplTarget, getCopyVariants, getReviewBundle } from "@/lib/review/fetch";
@@ -73,6 +74,9 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
   }
   const pipeline: Pipeline = res.pipeline;
   const initialEvents: PipelineEvent[] = res.events ?? [];
+  // The canonical operator brief (briefs row) the configuration stage renders
+  // for operator-driven pipelines. `getPipelineQuery` already embeds it.
+  const imageBrief = (res.image_brief ?? null) as Brief | null;
 
   let clientName: string | null = null;
   let clients: {
@@ -240,7 +244,7 @@ export default async function PipelineDetailPage({ params }: { params: Promise<{
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_22rem]">
           <div className="flex min-w-0 flex-col gap-6">
             {pipeline.status === "configuration" ? (
-              <StageConfiguration pipeline={pipeline} clients={clients} />
+              <StageConfiguration pipeline={pipeline} clients={clients} imageBrief={imageBrief} />
             ) : pipeline.status === "ideation" ? (
               <StageIdeation
                 pipeline={pipeline}
