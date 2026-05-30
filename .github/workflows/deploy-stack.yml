@@ -25,6 +25,7 @@ on:
     branches: [main]
     paths:
       - worker/**
+      - operator-daemon/**
       - web/**
       - app/**
       - components/**
