@@ -240,22 +240,33 @@ class HermesExec:
     ) -> ChatResult:
         """Run one ``hermes chat`` invocation inside the operator container.
 
-        Argv: ``hermes chat -q "<instruction>" --pass-session-id <session_id>
-        --max-turns <N>``. We use ``--pass-session-id`` (the same flag the
-        worker's hermes_bridge uses, see :func:`HermesBridge._build_argv`)
-        so multi-turn context survives across dispatches keyed by the
-        pipeline id.
+        Argv: ``hermes chat -q "<instruction>" --pass-session-id
+        --max-turns <N>``. On the operator container's Hermes build
+        (``hermes-lua:src``) ``--pass-session-id`` is a BARE flag that takes
+        NO value: it injects the run's session id into the agent's system
+        prompt. The worker's ``hermes_bridge`` drives a DIFFERENT container
+        whose CLI accepts ``--pass-session-id <id>``; copying that here made
+        argparse reject the appended id as an unrecognized positional and
+        exit 2, stalling every operator dispatch. The pipeline id the
+        operator needs is already in ``instruction``, and each dispatch reads
+        pipeline state from the DB, so no CLI-level session continuity is
+        required.
 
         Returns a :class:`ChatResult` with the last 4 KB of stdout and a
         classified ``error_kind`` (``None`` on success).
         """
+        log.info(
+            "hermes_chat_invoke",
+            session_id=session_id,
+            max_turns=max_turns,
+            timeout_s=timeout_s,
+        )
         argv = [
             "hermes",
             "chat",
             "-q",
             instruction,
             "--pass-session-id",
-            session_id,
             "--max-turns",
             str(max_turns),
         ]

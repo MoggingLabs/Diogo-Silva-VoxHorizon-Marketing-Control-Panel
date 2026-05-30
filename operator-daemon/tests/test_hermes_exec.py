@@ -187,10 +187,15 @@ async def test_chat_success_returns_no_error_kind():
     assert result.exit_code == 0
     assert result.error_kind is None
     assert "hello world" in result.stdout_tail
-    # argv carries the expected CLI shape
-    assert container.exec_calls[0][:3] == ["hermes", "chat", "-q"]
-    assert "--pass-session-id" in container.exec_calls[0]
-    assert "sess-1" in container.exec_calls[0]
+    # argv carries the expected CLI shape. On the operator container's Hermes
+    # build ``--pass-session-id`` is a BARE flag (no value): the session id must
+    # NOT be appended as a CLI arg or argparse rejects it as an unrecognized
+    # positional and exits 2. The id reaches the operator via the instruction.
+    argv = container.exec_calls[0]
+    assert argv[:3] == ["hermes", "chat", "-q"]
+    assert "--pass-session-id" in argv
+    assert "sess-1" not in argv
+    assert "--max-turns" in argv and "5" in argv
 
 
 async def test_chat_classifies_auth_expired():
